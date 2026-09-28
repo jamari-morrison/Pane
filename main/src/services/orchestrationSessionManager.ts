@@ -672,7 +672,10 @@ export class OrchestrationSessionManager extends EventEmitter {
   private createInternalSession(record: OrchestrationSessionRecord): void {
     const existing = this.sessionManager.getSession(record.internalSessionId);
     if (existing) {
-      const workspace = prepareSessionWorkspace(record.id, record.profile, record);
+      const running = Object.values(record.panelIds).some(id => terminalPanelManager.isTerminalInitialized(id));
+      const workspace = running
+        ? sessionWorkspacePath(record.id)
+        : prepareSessionWorkspace(record.id, record.profile, record);
       if (existing.worktreePath !== workspace) {
         const updated = databaseService.updateSession(existing.id, { worktree_path: workspace });
         if (!updated) throw new Error('Could not update Session workspace location');

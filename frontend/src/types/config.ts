@@ -123,9 +123,20 @@ export interface AppConfig {
   // made through Pane (enabled by default). Applies to newly spawned terminals
   // and commands only — already-running processes keep their launch-time env.
   gitAttributionEnabled?: boolean;
-  // Agent-facing Pane context in repository instructions files
+  // Agent-facing Pane context
   agentContext?: {
-    managedAgentsMd: boolean;
+    /** Write a marked Pane section into repository AGENTS.md files (off by default; edits the repo). */
+    managedAgentsMd?: boolean;
+    /** Register Pane's MCP server with the user-level Claude Code, Codex, and Cursor configs. */
+    registerMcp?: boolean;
+    /** Toolsets the registered server serves (`runpane mcp --toolsets`); core when absent. */
+    mcpToolsets?: string[];
+    /** Install Pane's managed skill in the user's home skill folders (default on). */
+    homeSkill?: boolean;
+    /** Agent-context defaults already applied to this config; see configManager migrations. */
+    defaultsVersion?: number;
+    /** Retry removal of Pane's old AGENTS.md blocks until saved repositories are available. */
+    cleanupPending?: boolean;
   };
   // Use interactive mode for Claude CLI (persistent process with stdin instead of spawn-per-message)
   useInteractiveMode?: boolean;

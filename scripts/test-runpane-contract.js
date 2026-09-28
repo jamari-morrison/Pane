@@ -247,7 +247,7 @@ function isExpectedClientDisconnect(error, socket) {
   return error.code === 'ERR_STREAM_DESTROYED' && socket.destroyed;
 }
 
-async function withFakeDaemon(paneDir, onRequest, action) {
+async function withFakeDaemon(paneDir, onRequest, action, onFrame = () => {}) {
   const { getPaneDaemonEndpoint } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'daemonClient.js'));
   const endpoint = getPaneDaemonEndpoint(paneDir);
   if (endpoint.transport === 'unix') {
@@ -278,6 +278,7 @@ async function withFakeDaemon(paneDir, onRequest, action) {
         buffer = buffer.slice(index + 1);
         if (!raw.trim()) continue;
         const frame = JSON.parse(raw);
+        onFrame(frame);
         if (frame.type !== 'request' || frame.id !== 1) continue;
         const response = onRequest(frame);
         if (response.destroy) {
@@ -574,6 +575,7 @@ function compareParserParity() {
       focus: parsed.focus ?? false,
       pinned: parsed.pinned ?? false,
       noPinned: parsed.noPinned ?? false,
+      noAssociate: parsed.noAssociate ?? false,
       composerStrategy: parsed.composerStrategy ?? null,
       watchAs: parsed.watchAs ?? null,
       watchSince: parsed.watchSince ?? null,
@@ -599,6 +601,14 @@ function compareParserParity() {
       selfTest: parsed.selfTest ?? false,
       report: parsed.report ?? false,
       bodyFile: parsed.bodyFile ?? null,
+      message: parsed.message ?? null,
+      query: parsed.query ?? null,
+      doc: parsed.doc ?? null,
+      url: parsed.url ?? null,
+      folder: parsed.folder ?? null,
+      keys: parsed.keys ?? null,
+      toolsets: parsed.toolsets ?? null,
+      readOnly: parsed.readOnly ?? false,
       remoteSetupArgs: parsed.remoteSetupArgs
     };
   });
@@ -655,6 +665,7 @@ for args in samples:
         "focus": parsed.focus,
         "pinned": parsed.pinned,
         "noPinned": parsed.no_pinned,
+        "noAssociate": parsed.no_associate,
         "composerStrategy": parsed.composer_strategy,
         "watchAs": parsed.watch_as,
         "watchSince": parsed.watch_since,
@@ -680,6 +691,14 @@ for args in samples:
         "selfTest": parsed.self_test,
         "report": parsed.report,
         "bodyFile": parsed.body_file,
+        "message": parsed.message,
+        "query": parsed.query,
+        "doc": parsed.doc,
+        "url": parsed.url,
+        "folder": parsed.folder,
+        "keys": parsed.keys,
+        "toolsets": parsed.toolsets,
+        "readOnly": parsed.read_only,
         "remoteSetupArgs": parsed.remote_setup_args,
     })
 print(json.dumps(normalized))
@@ -1291,6 +1310,90 @@ print(artifact["name"])
   assert.strictEqual(pythonArtifact, 'Pane-2.2.8-Windows-x64.zip');
 }
 
+async function checkGuidedRemoteSetup() {
+  const promptsPath = path.join(rootDir, 'packages/runpane/dist/setupPrompts.js');
+  const originalPrompts = require(promptsPath);
+  const installers = require(path.join(rootDir, 'packages/runpane/dist/installers.js'));
+  const originalResolve = installers.resolveExistingPanePath;
+  const originalSpawn = installers.spawnPane;
+  const originalCI = process.env.CI;
+  const stdinTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  const stdoutTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+  try {
+    delete process.env.CI;
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+    for (const argv of [[], ['setup']]) {
+      for (const cancelAt of [null, 'action', 'name']) {
+        let finished = false;
+        let spawned = false;
+        let cancelled = false;
+        let success = false;
+        let failure = false;
+        const exitCode = argv.length ? 0 : 7;
+        const hostName = argv.length ? '' : 'My Server';
+        const cancellation = Symbol('cancel');
+        require.cache[require.resolve(promptsPath)].exports = {
+          intro() {},
+          select: async () => cancelAt === 'action' ? cancellation : 'daemon',
+          text: async options => {
+            assert.ok(options.validate('   '));
+            assert.strictEqual(options.validate(''), undefined);
+            return cancelAt === 'name' ? cancellation : hostName;
+          },
+          isCancel: value => value === cancellation,
+          cancel: () => { cancelled = true; },
+          outro: () => { finished = true; },
+          log: { info() {}, success: () => { success = true; }, error: () => { failure = true; } }
+        };
+        installers.resolveExistingPanePath = () => '/test/pane';
+        installers.spawnPane = async (_executable, args) => {
+          assert.ok(finished, 'Prompts must finish before interactive setup');
+          assert.deepStrictEqual(args, [
+            '--remote-setup', '--label', hostName || os.hostname() || 'Remote Host', '--prefer-tunnel', 'tailscale',
+            '--interactive-tailscale-setup', '--auto-listen-port'
+          ]);
+          spawned = true;
+          return exitCode;
+        };
+        delete require.cache[require.resolve(npmCli)];
+        const { main } = require(npmCli);
+        assert.strictEqual(await main(argv), cancelAt ? 0 : exitCode);
+        assert.strictEqual(success, !cancelAt && exitCode === 0);
+        assert.strictEqual(failure, !cancelAt && exitCode !== 0);
+        assert.strictEqual(spawned, !cancelAt);
+        assert.strictEqual(cancelled, Boolean(cancelAt));
+      }
+    }
+  } finally {
+    require.cache[require.resolve(promptsPath)].exports = originalPrompts;
+    delete require.cache[require.resolve(npmCli)];
+    installers.resolveExistingPanePath = originalResolve;
+    installers.spawnPane = originalSpawn;
+    if (originalCI === undefined) delete process.env.CI;
+    else process.env.CI = originalCI;
+    if (stdinTTY) Object.defineProperty(process.stdin, 'isTTY', stdinTTY);
+    else delete process.stdin.isTTY;
+    if (stdoutTTY) Object.defineProperty(process.stdout, 'isTTY', stdoutTTY);
+    else delete process.stdout.isTTY;
+  }
+  runPythonSnippet(`
+from unittest.mock import patch
+from runpane.cli import run_interactive_wizard
+from runpane.telemetry import create_initial_telemetry_context
+
+with patch("builtins.input", side_effect=["2", "My Server"]), patch("runpane.cli.install_or_update") as install:
+    install.return_value = 7
+    assert run_interactive_wizard(create_initial_telemetry_context([])) == 7
+    parsed = install.call_args.args[0]
+    assert parsed.target == "daemon"
+    assert parsed.remote_setup_args == [
+        "--label", "My Server", "--prefer-tunnel", "tailscale",
+        "--interactive-tailscale-setup", "--auto-listen-port"
+    ]
+`);
+}
+
 async function checkExistingDaemonShortCircuit() {
   const existingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'runpane-existing-'));
   const existingPath = path.join(existingDir, process.platform === 'win32' ? 'Pane.exe' : 'pane');
@@ -1546,6 +1649,50 @@ finally:
       dryRun: true
     }
   });
+}
+
+async function checkCreateAssociationSource() {
+  const payloadPath = path.join(os.tmpdir(), `runpane-association-${process.pid}.json`);
+  const previousSession = process.env.PANE_ORCHESTRATION_SESSION_ID;
+  fs.writeFileSync(payloadPath, JSON.stringify({
+    repo: 'active',
+    panes: [{ name: 'child', tool: { command: 'echo ready' } }],
+    associateSession: 'explicit-session',
+  }));
+  try {
+    const { parseRunpaneArgs } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'commands.js'));
+    const { buildPaneCreateRequest } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'localControl.js'));
+    const request = async (...flags) => buildPaneCreateRequest(parseRunpaneArgs(['panes', 'create', '--from-json', payloadPath, ...flags]));
+    delete process.env.PANE_ORCHESTRATION_SESSION_ID;
+    assert.strictEqual((await request()).associateSession, 'explicit-session');
+    process.env.PANE_ORCHESTRATION_SESSION_ID = 'current-session';
+    assert.strictEqual((await request()).associateSession, 'current-session');
+    assert.strictEqual((await request('--no-associate')).associateSession, undefined);
+  } finally {
+    if (previousSession === undefined) delete process.env.PANE_ORCHESTRATION_SESSION_ID;
+    else process.env.PANE_ORCHESTRATION_SESSION_ID = previousSession;
+    fs.rmSync(payloadPath, { force: true });
+  }
+
+  runPythonSnippet(`
+import json
+import os
+import tempfile
+from runpane.cli import parse_args
+from runpane.local_control import build_pane_create_request
+
+with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8") as handle:
+    json.dump({"repo": "active", "panes": [{"name": "child", "tool": {"command": "echo ready"}}], "associateSession": "explicit-session"}, handle)
+try:
+    args = ["panes", "create", "--from-json", handle.name]
+    os.environ.pop("PANE_ORCHESTRATION_SESSION_ID", None)
+    assert build_pane_create_request(parse_args(args))["associateSession"] == "explicit-session"
+    os.environ["PANE_ORCHESTRATION_SESSION_ID"] = "current-session"
+    assert build_pane_create_request(parse_args(args))["associateSession"] == "current-session"
+    assert "associateSession" not in build_pane_create_request(parse_args(args + ["--no-associate"]))
+finally:
+    os.unlink(handle.name)
+`);
 }
 
 async function checkPaneCreateBlockedReadiness() {
@@ -2209,31 +2356,21 @@ function compareAgentContextParity() {
   const managedBlock = nodeBrief.source === 'runpane-contract'
     ? require(path.join(rootDir, 'packages', 'runpane', 'dist', 'generated', 'contract.js')).RUNPANE_CONTRACT.agentContext.managedBlock.join('\n')
     : '';
-  assert.ok(managedBlock.includes('Typical workflow: register the saved base repository once'));
-  assert.ok(managedBlock.includes('one Pane (Pane session) per feature/PR'));
-  assert.ok(managedBlock.includes('clean up its managed worktree when applicable'));
-  assert.ok(managedBlock.includes('created by [runpane.com](https://runpane.com)'));
-  assert.ok(managedBlock.includes('[Pane repository](https://github.com/dcouple/Pane)'));
-  assert.ok(managedBlock.includes('Do not delete or overwrite this block'));
-  assert.ok(managedBlock.includes('Default happy path when the user asks you to use Pane or RunPane'));
-  assert.ok(managedBlock.includes('resolve the saved base repository'));
-  assert.ok(managedBlock.includes('runpane panes create --repo <repo> --name <name> --agent <agent> --prompt'));
-  assert.ok(managedBlock.includes('equivalent `--tool-command <command>` form'));
-  assert.ok(!managedBlock.includes('with `runpane panes create --source agent --no-focus --wait-ready --yes --json`'));
-  assert.ok(managedBlock.includes('Skill routing reference:'));
-  assert.ok(managedBlock.includes('<PANE_DIR>/skills/pane-chat/skills/'));
-  assert.ok(managedBlock.includes('<PANE_DIR>/skills/pane-chat/pane-orchestrator/SKILL.md'));
-  assert.ok(!managedBlock.includes('runpane-orchestrator.md'));
-  assert.ok(!managedBlock.includes('.sources/dcouple-skills'));
-  assert.ok(managedBlock.includes('Choose the phase from the request'));
-  assert.ok(managedBlock.includes('main/src/services/skillCacheManager.ts'));
-  assert.ok(managedBlock.includes('main/src/services/paneChatBundle/'));
-  assert.ok(managedBlock.includes('main/src/services/paneChatManager.ts'));
-  assert.ok(managedBlock.includes('tiny bootstrap prompt that tells the selected Pane Chat agent to read it'));
-  assert.ok(managedBlock.includes('Do not hardcode a specific assistant brand'));
-  assert.ok(managedBlock.includes('Pane agent or custom tool command the user selected'));
-  assert.ok(managedBlock.includes('runpane watch --follow'));
-  assert.ok(managedBlock.includes('For ongoing supervision'));
+  assert.ok(managedBlock.includes('npm i -g runpane'));
+  assert.ok(managedBlock.includes('npx --yes runpane@latest'));
+  assert.ok(managedBlock.includes('runpane doctor --json'));
+  assert.ok(managedBlock.includes('runpane agent-context --json'));
+  assert.ok(managedBlock.includes('claude mcp add --scope user pane -- npx --yes runpane@latest mcp'));
+  assert.ok(managedBlock.includes('[mcp_servers.pane]'));
+  assert.ok(managedBlock.includes('command = "npx"'));
+  assert.ok(managedBlock.includes('runpane@latest'));
+  assert.ok(managedBlock.includes('claude mcp list'));
+  assert.ok(managedBlock.includes('codex mcp list'));
+  assert.ok(managedBlock.includes('agent mcp list'));
+  assert.ok(managedBlock.includes('agent mcp enable pane'));
+  assert.ok(!managedBlock.includes('Typical workflow: register the saved base repository once'));
+  assert.ok(!managedBlock.includes('Skill routing reference:'));
+  assert.ok(!managedBlock.includes('main/src/services/skillCacheManager.ts'));
 
   const nodeDottedDetail = JSON.parse(runNode(['agent-context', '--command', 'panes.create', '--json']));
   const pyDottedDetail = JSON.parse(runPython(['agent-context', '--command', 'panes.create', '--json']));
@@ -2513,6 +2650,185 @@ async function checkAgentTemplateParity() {
   });
 }
 
+async function checkCreatePayloadErrorPaths() {
+  const { runPanesCreate } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'localControl.js'));
+  const { parseRunpaneArgs } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'commands.js'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'runpane-invalid-payload-'));
+  const inputPath = path.join(directory, 'request.json');
+  try {
+    for (const [payload, expected] of [
+      [{ repo: 'active', panes: [{ name: false, tool: { agent: 'codex' } }] }, /input\.panes\.0\.name: expected string/],
+      [{ repo: 'active', panes: [{ name: 'Work', pinned: 'yes', tool: { agent: 'codex' } }] }, /input\.panes\.0\.pinned: expected boolean/],
+      [[], /input: expected object/],
+    ]) {
+      fs.writeFileSync(inputPath, JSON.stringify(payload));
+      await assert.rejects(runPanesCreate(parseRunpaneArgs([
+        'panes', 'create', '--from-json', inputPath, '--dry-run', '--yes',
+      ])), expected);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+async function checkInstallerFailures() {
+  const { installPaneArtifact } = require(path.join(rootDir, 'packages/runpane', 'dist', 'installers.js'));
+  const originalSpawn = childProcess.spawnSync;
+  const originalExists = fs.existsSync;
+  const artifact = { path: '/fixture/installer', fileName: 'fixture', usedFallback: false };
+  try {
+    // An older Pane executable exists. It must not disguise a failed update.
+    fs.existsSync = () => true;
+    for (const platform of [{ os: 'linux', arch: 'x64' }, { os: 'win32', arch: 'x64' }]) {
+      const options = { parsed: { command: 'update' }, platform, format: platform.os === 'linux' ? 'deb' : 'exe', target: 'client' };
+      for (const outcome of [{ status: 7 }, { status: null, signal: 'SIGTERM' }, { status: null, error: new Error('Permission denied') }]) {
+        childProcess.spawnSync = command => command === 'sudo' || command === artifact.path ? outcome : { status: 0 };
+        await assert.rejects(installPaneArtifact(artifact, options), /installer exited|Permission denied/);
+      }
+      childProcess.spawnSync = () => ({ status: 0 });
+      const result = await installPaneArtifact(artifact, options);
+      assert.strictEqual(result.installKind, platform.os === 'linux' ? 'installed' : 'launched-installer');
+    }
+  } finally {
+    childProcess.spawnSync = originalSpawn;
+    fs.existsSync = originalExists;
+  }
+  runPythonSnippet(`
+from types import SimpleNamespace
+import runpane.installers as installers
+from runpane.download import DownloadedArtifact
+from runpane.platforms import PanePlatform
+installers.os.path.exists = lambda path: True
+installers.shutil.which = lambda command: "/fixture/apt"
+artifact = DownloadedArtifact(path="/fixture/installer", file_name="fixture", used_fallback=False)
+for platform_name in ["linux", "win32"]:
+    for status in [7, -15, "error", 0]:
+        def call(args, **kwargs):
+            if status == "error":
+                raise OSError("Permission denied")
+            return status
+        installers.subprocess.call = call
+        try:
+            result = installers.install_pane_artifact(artifact, SimpleNamespace(command="update", pane_path=None), PanePlatform(os=platform_name, arch="x64"), "deb" if platform_name == "linux" else "exe", "client")
+            assert status == 0, "Failed installer was reported as successful"
+            assert result.install_kind == ("installed" if platform_name == "linux" else "launched-installer")
+        except (RuntimeError, OSError) as error:
+            assert status != 0
+            assert "installer exited" in str(error) or "Permission denied" in str(error)
+`);
+}
+
+async function checkDoctorExitStatus() {
+  const doctor = require(path.join(rootDir, 'packages/runpane', 'dist', 'doctor.js'));
+  const releases = require(path.join(rootDir, 'packages/runpane', 'dist', 'releases.js'));
+  const daemon = require(path.join(rootDir, 'packages/runpane', 'dist', 'daemonClient.js'));
+  const platform = require(path.join(rootDir, 'packages/runpane', 'dist', 'platform.js'));
+  const { parseRunpaneArgs } = require(path.join(rootDir, 'packages/runpane', 'dist', 'commands.js'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'runpane-doctor-status-'));
+  const cases = [
+    { reachable: false, releaseAvailable: true, expectedCode: 1 },
+    { reachable: true, releaseAvailable: true, expectedCode: 0 },
+    { reachable: true, releaseAvailable: false, expectedCode: 1 },
+  ];
+  const original = { release: releases.resolveRelease, invoke: daemon.invokeDaemon, platform: platform.detectPlatform, log: console.log };
+  try {
+    platform.detectPlatform = () => ({ os: 'darwin', arch: 'arm64' });
+    for (const scenario of cases) {
+      releases.resolveRelease = async () => {
+        if (!scenario.releaseAvailable) throw new Error('Release service unavailable');
+        return { release: { tag_name: 'v1' }, artifact: { name: 'Pane.dmg' }, format: 'dmg' };
+      };
+      daemon.invokeDaemon = async () => {
+        if (!scenario.reachable) throw new Error('Daemon unavailable');
+        return { daemon: {}, repos: { count: 0 } };
+      };
+      for (const json of [true, false]) {
+        const output = [];
+        console.log = line => output.push(line);
+        const code = await doctor.runDoctor(parseRunpaneArgs([
+          'doctor', '--pane-dir', directory, '--pane-path', path.join(directory, 'missing'), ...(json ? ['--json'] : []),
+        ]));
+        if (json) assert.strictEqual(JSON.parse(output.join('\n')).ok, scenario.expectedCode === 0);
+        assert.strictEqual(code, scenario.expectedCode, `doctor ${json ? 'JSON' : 'text'} status must match overall health`);
+      }
+    }
+    runPythonSnippet(`
+import contextlib
+import io
+import json
+import sys
+from types import SimpleNamespace
+import runpane.doctor as doctor
+from runpane.cli import parse_args
+from runpane.platforms import PanePlatform
+payload = json.loads(sys.stdin.read())
+doctor.detect_platform = lambda: PanePlatform(os="darwin", arch="arm64")
+for scenario in payload["cases"]:
+    def release(**kwargs):
+        if not scenario["releaseAvailable"]:
+            raise RuntimeError("Release service unavailable")
+        return SimpleNamespace(release={"tag_name": "v1"}, artifact={"name": "Pane.dmg"}, format="dmg", preferred_download_url=None, fallback_download_url=None)
+    def invoke(*args, **kwargs):
+        if not scenario["reachable"]:
+            raise RuntimeError("Daemon unavailable")
+        return {"daemon": {}, "repos": {"count": 0}}
+    doctor.resolve_release = release
+    doctor.invoke_daemon = invoke
+    for json_output in [True, False]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = doctor.run_doctor(parse_args(["doctor", "--pane-dir", payload["directory"], "--pane-path", payload["missing"], *(["--json"] if json_output else [])]))
+        if json_output:
+            assert json.loads(output.getvalue())["ok"] == (scenario["expectedCode"] == 0)
+        assert code == scenario["expectedCode"], (scenario, json_output, code)
+`, JSON.stringify({ cases, directory, missing: path.join(directory, 'missing') }));
+  } finally {
+    releases.resolveRelease = original.release;
+    daemon.invokeDaemon = original.invoke;
+    platform.detectPlatform = original.platform;
+    console.log = original.log;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function checkFollowRequiresPositiveTimeout() {
+  const { parseRunpaneArgs } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'commands.js'));
+  for (const args of [['watch', '--follow', '--timeout-ms', '0'], ['watch', '--timeout-ms', '0', '--follow']]) {
+    assert.throws(() => parseRunpaneArgs(args), /--timeout-ms must be greater than 0 with --follow/);
+  }
+  assert.strictEqual(parseRunpaneArgs(['watch', '--timeout-ms', '0']).timeoutMs, 0);
+  assert.strictEqual(parseRunpaneArgs(['watch', '--follow', '--timeout-ms', '1']).timeoutMs, 1);
+  runPythonSnippet(`
+from runpane.cli import parse_args
+for args in [["watch", "--follow", "--timeout-ms", "0"], ["watch", "--timeout-ms", "0", "--follow"]]:
+    try:
+        parse_args(args)
+        raise AssertionError("follow accepted zero timeout")
+    except ValueError as error:
+        assert "--timeout-ms must be greater than 0 with --follow" in str(error)
+assert parse_args(["watch", "--timeout-ms", "0"]).timeout_ms == 0
+assert parse_args(["watch", "--follow", "--timeout-ms", "1"]).timeout_ms == 1
+`);
+}
+
+async function checkCliEventSubscriptions() {
+  for (const runtime of ['npm', 'pip']) {
+    const paneDir = fs.mkdtempSync(path.join(os.tmpdir(), 'runpane-event-filter-'));
+    const frames = [];
+    try {
+      await withFakeDaemon(paneDir, () => ({ result: { ok: true, repos: [] } }),
+        () => runWatchCli(runtime, ['repos', 'list', '--json'], paneDir, stdout => stdout.includes('"repos"')),
+        frame => frames.push(frame));
+      assert.deepStrictEqual(frames, [
+        { type: 'request', id: 0, channel: 'daemon:events', args: [{ include: [] }] },
+        { type: 'request', id: 1, channel: 'runpane:repos:list', args: [] },
+      ], `${runtime} ordinary commands must opt out of unrelated daemon events before invoking`);
+    } finally {
+      fs.rmSync(paneDir, { recursive: true, force: true });
+    }
+  }
+}
+
 async function checkSessionChildPinDefaults() {
   const daemonClient = require(path.join(rootDir, 'packages/runpane/dist/daemonClient.js'));
   const { parseRunpaneArgs } = require(path.join(rootDir, 'packages/runpane/dist/commands.js'));
@@ -2556,6 +2872,11 @@ print(json.dumps([build_pane_create_request(parse_args(base + extra))["panes"][0
 async function runChecks() {
   checkGeneratedContractFresh();
   ensureBuiltCli();
+  await checkCliEventSubscriptions();
+  checkFollowRequiresPositiveTimeout();
+  await checkDoctorExitStatus();
+  await checkInstallerFailures();
+  await checkCreatePayloadErrorPaths();
   compareParserParity();
   checkWatchFormatterGoldens();
   await checkWatchStreamParity();
@@ -2573,9 +2894,12 @@ async function runChecks() {
   compareDaemonLaunchArgsParity();
   compareRemoteSetupDiagnosticParity();
   checkPlatformMatchingEdgeCases();
+  await checkGuidedRemoteSetup();
+  runPythonSnippet('import runpy; runpy.run_path("scripts/test-runpane-setup-pty.py", run_name="__main__")');
   await checkExistingDaemonShortCircuit();
   checkWindowsPaneVersionDoesNotLaunchExecutable();
   await checkFromJsonAcceptsBom();
+  await checkCreateAssociationSource();
   await checkPaneArchiveDryRunParity();
   await checkPanePinParity();
   await checkPaneCreateBlockedReadiness();

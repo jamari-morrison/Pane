@@ -29,6 +29,42 @@ describe('TerminalStateEmulator', () => {
     emulator.dispose();
   });
 
+  it.each([1006, 1016])('restores mouse encoding %i after alternate buffer activation', async (mode) => {
+    const emulator = new TerminalStateEmulator(20, 5);
+    emulator.write('\x1b[?10');
+    emulator.write(`${mode === 1006 ? '06' : '16'}h\x1b[?1049h\x1b[?1003h`);
+    await emulator.waitForIdle();
+    const snapshot = emulator.serializeForRestore();
+    expect(snapshot).toContain('\x1b[?1003h');
+    expect(snapshot.endsWith(`\x1b[?${mode}h`)).toBe(true);
+    expect(snapshot.indexOf(`\x1b[?${mode}h`)).toBeGreaterThan(snapshot.indexOf('\x1b[?1049h'));
+    const restored = new TerminalStateEmulator(20, 5);
+    restored.write(snapshot);
+    await restored.waitForIdle();
+    expect(restored.serializeForRestore()).toContain(`\x1b[?${mode}h`);
+    restored.dispose();
+    emulator.dispose();
+    expect(emulator.serializeForRestore()).toContain(`\x1b[?${mode}h`);
+  });
+
+  it.each<[string, 1006 | 1016 | undefined]>([
+    ['\x1b[?1006;1016h', 1016],
+    ['\x1b[?1016;1006h', 1006],
+    ['\x1b[?1006h\x1b[?1016l', undefined],
+    ['\x1b[?1016h\x1b[?1006l', undefined],
+    ['\x1b[?1006h\x1bc', undefined],
+    // DECSTR does not reset xterm's mouse service.
+    ['\x1b[?1016h\x1b[!p', 1016],
+  ])('honors ordered encoding transitions %j', async (stream, mode) => {
+    const emulator = new TerminalStateEmulator(20, 5);
+    emulator.write(stream);
+    await emulator.waitForIdle();
+    const snapshot = emulator.serializeForRestore();
+    expect(snapshot.includes('\x1b[?1006h')).toBe(mode === 1006);
+    expect(snapshot.includes('\x1b[?1016h')).toBe(mode === 1016);
+    emulator.dispose();
+  });
+
   it('renders cursor-addressed alternate-screen output as a coherent screen', async () => {
     const emulator = new TerminalStateEmulator(20, 5);
 

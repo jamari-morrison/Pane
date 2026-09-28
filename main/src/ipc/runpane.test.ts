@@ -12,6 +12,7 @@ import type { RunpaneToolSpec } from '../../../shared/types/runpaneOrchestration
 
 import { RUNPANE_CONTRACT } from '../../../shared/types/generatedRunpaneContract';
 import { panelManager } from '../services/panelManager';
+import { panelManager as terminalPanelStore } from '../test/setup';
 import { terminalPanelManager } from '../services/terminalPanelManager';
 import { databaseService as panelDatabase } from '../services/database';
 import { ArchiveProgressManager } from '../services/archiveProgressManager';
@@ -416,33 +417,86 @@ describe('runpane IPC handlers', () => {
       expect(duplicate).toMatchObject({ ok: false, items: [{ error: { message: expect.stringContaining('already registered') } }] });
     });
 
-    it('emits the stopped pane, creates one configured terminal, and stages resume input', async () => {
+    it.each([false, true])('adopts a pane with stored identity and launch=%s', async (launch) => {
       const repoPath = createTempGitRepo('create-adopt-repo');
       execFileSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: repoPath, stdio: 'ignore' });
       const worktreePath = path.join(path.dirname(repoPath), 'create-adopt-worktree');
       execFileSync('git', ['worktree', 'add', '-b', 'create-adopt', worktreePath], { cwd: repoPath, stdio: 'ignore' });
       const services = adoptionServices(repoPath, worktreePath);
+      const adoptedPanel = { ...terminalPanel, state: { ...terminalPanel.state, customState: { agentType: 'codex' as const, agentSessionId: 'thread-1' } } };
+      vi.mocked(panelManager.createPanel).mockResolvedValue(adoptedPanel);
+      vi.mocked(panelManager.getPanel).mockReturnValue(adoptedPanel);
+      terminalPanelStore.getPanel.mockReturnValue(adoptedPanel);
+      vi.mocked(terminalPanelManager.initializeTerminal).mockResolvedValue(undefined);
+
+      const result = await createRegistry(services).invoke('runpane:panes:adopt', [{
+        repo: { id: project.id },
+        panes: [{ path: worktreePath, name: 'Adopted', tool: { agent: 'codex' }, resume: 'thread-1', launch }],
+      }]);
+
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, items: [{ ok: true, sessionId: session.id }] });
+      expect(panelManager.createPanel).toHaveBeenCalledTimes(1);
+      expect(panelManager.createPanel).toHaveBeenCalledWith(expect.objectContaining({
+        initialState: expect.objectContaining({ agentType: 'codex', agentSessionId: 'thread-1', initialCommand: launch ? 'codex --yolo' : undefined }),
+      }));
+      if (!launch) {
+        expect(terminalPanelManager.writeToTerminal).toHaveBeenCalledWith(terminalPanel.id, 'codex --yolo resume "thread-1"');
+      }
+      expect(services.sessionManager.emitSessionCreated).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'stopped' }),
+        expect.objectContaining({ createDefaultTerminalOnCreate: false }),
+      );
+    });
+
+    it('associates adopted panes with the calling Session and reports association failures', async () => {
+      const repoPath = createTempGitRepo('associate-adopt-repo');
+      execFileSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: repoPath, stdio: 'ignore' });
+      const worktreePath = path.join(path.dirname(repoPath), 'associate-adopt-worktree');
+      execFileSync('git', ['worktree', 'add', '-b', 'associate-adopt', worktreePath], { cwd: repoPath, stdio: 'ignore' });
+      const associate = vi.fn(async () => ({}));
+      // SAFETY: The handler only calls associate on the Sessions manager.
+      const services = { ...adoptionServices(repoPath, worktreePath), orchestrationSessionManager: { associate } as never };
+      vi.mocked(panelManager.createPanel).mockResolvedValue(terminalPanel);
+      vi.mocked(terminalPanelManager.initializeTerminal).mockImplementation(async () => {
+        expect(associate).toHaveBeenCalledWith({ sessionId: 'orchestrator-1' }, { paneId: session.id });
+      });
+      const request = {
+        repo: { id: project.id },
+        panes: [{ path: worktreePath, name: 'Adopted', tool: { agent: 'codex' } }],
+        associateSession: 'orchestrator-1',
+      };
+
+      const result = await createRegistry(services).invoke('runpane:panes:adopt', [request]);
+
+      expect(associate).toHaveBeenCalledWith({ sessionId: 'orchestrator-1' }, { paneId: session.id });
+      expect(result).toMatchObject({ ok: true, items: [{ ok: true, association: { sessionId: 'orchestrator-1', ok: true } }] });
+
+      associate.mockRejectedValueOnce(new Error('Pane is already associated with Session Other'));
+      const failed = await createRegistry(services).invoke('runpane:panes:adopt', [request]);
+      expect(failed).toMatchObject({
+        ok: true,
+        items: [{ ok: true, association: { ok: false, error: 'Pane is already associated with Session Other' } }],
+      });
+    });
+
+    it('does not associate panes when no Session is given', async () => {
+      const repoPath = createTempGitRepo('no-associate-adopt-repo');
+      execFileSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: repoPath, stdio: 'ignore' });
+      const worktreePath = path.join(path.dirname(repoPath), 'no-associate-adopt-worktree');
+      execFileSync('git', ['worktree', 'add', '-b', 'no-associate-adopt', worktreePath], { cwd: repoPath, stdio: 'ignore' });
+      const associate = vi.fn(async () => ({}));
+      // SAFETY: The handler only calls associate on the Sessions manager.
+      const services = { ...adoptionServices(repoPath, worktreePath), orchestrationSessionManager: { associate } as never };
       vi.mocked(panelManager.createPanel).mockResolvedValue(terminalPanel);
       vi.mocked(terminalPanelManager.initializeTerminal).mockResolvedValue(undefined);
 
       const result = await createRegistry(services).invoke('runpane:panes:adopt', [{
         repo: { id: project.id },
-        panes: [{ path: worktreePath, name: 'Adopted', tool: { agent: 'codex' }, resume: 'thread-1' }],
+        panes: [{ path: worktreePath, name: 'Adopted', tool: { agent: 'codex' } }],
       }]);
 
-      expect(result).toMatchObject({ ok: true, items: [{ ok: true, sessionId: session.id }] });
-      expect(panelManager.createPanel).toHaveBeenCalledTimes(1);
-      expect(panelManager.createPanel).toHaveBeenCalledWith(expect.objectContaining({
-        initialState: expect.objectContaining({ agentSessionId: 'thread-1', initialCommand: undefined }),
-      }));
-      expect(terminalPanelManager.writeToTerminal).toHaveBeenCalledWith(
-        terminalPanel.id,
-        expect.stringMatching(/^codex resume --yolo ["']thread-1["']$/u),
-      );
-      expect(services.sessionManager.emitSessionCreated).toHaveBeenCalledWith(
-        expect.objectContaining({ status: 'stopped' }),
-        expect.objectContaining({ createDefaultTerminalOnCreate: false }),
-      );
+      expect(associate).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ ok: true, items: [expect.not.objectContaining({ association: expect.anything() })] });
     });
 
     it('rolls back the pane record when terminal setup fails', async () => {
@@ -983,6 +1037,22 @@ describe('runpane IPC handlers', () => {
     expect(resumed).toMatchObject({ generation: 3, entries: [], timedOut: true });
     expect(resumed.dropped).toBeUndefined();
     expect(resumed.reset).toBeUndefined();
+  });
+
+  it('recognizes a WSL repo registered by the UI through either UNC spelling', async () => {
+    const savedProject: Project = {
+      ...project, path: '/home/user/repo', wsl_enabled: true, wsl_distribution: 'Ubuntu',
+    };
+    const services = createServices({
+      // SAFETY: Repo lookup only reads these projects and never reaches persistence for an existing repo.
+      databaseService: { getAllProjects: () => [savedProject] } as AppServices['databaseService'],
+    });
+    const registry = createRegistry(services);
+    for (const path of ['\\\\wsl$\\Ubuntu\\home\\user\\repo', '\\\\wsl.localhost\\Ubuntu\\home\\user\\repo']) {
+      await expect(registry.invoke('runpane:repos:add', [{ path }])).resolves.toMatchObject({
+        ok: true, created: false, repo: { path: '/home/user/repo', environment: 'wsl' },
+      });
+    }
   });
 
   it('dry-runs adding an existing git repository without saving it', async () => {
@@ -2451,12 +2521,18 @@ describe('runpane IPC handlers', () => {
       updatedAt: '2026-01-01T00:00:00.000Z',
     } as never);
 
-    const services = createServices();
+    const associate = vi.fn(async () => ({}));
+    // SAFETY: The handler only calls associate on the Sessions manager.
+    const services = createServices({ orchestrationSessionManager: { associate } as never });
+    vi.mocked(terminalPanelManager.initializeTerminal).mockImplementation(async () => {
+      expect(associate).toHaveBeenCalledWith({ sessionId: 'orchestrator-1' }, { paneId: session.id });
+    });
     const registry = createRegistry(services);
 
     const result = await registry.invoke('runpane:panes:create', [{
       repo: { id: project.id },
       timeoutMs: 1234,
+      associateSession: 'orchestrator-1',
       panes: [{
         name: 'issue-252',
         worktreeName: 'issue-252-worktree',
@@ -2506,6 +2582,7 @@ describe('runpane IPC handlers', () => {
         worktreePath: session.worktreePath,
         active: false,
         focused: false,
+        association: { sessionId: 'orchestrator-1', ok: true },
         nextCommand: 'runpane panels output --panel panel-1 --limit 200 --json',
       }],
     });

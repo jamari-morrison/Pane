@@ -810,7 +810,7 @@ describe('TerminalPanelManager hidden output delivery', () => {
   it('preserves custom native arguments on resume without submitting input', () => {
     const manager = testAccess<LaunchCommandAccess>(new TerminalPanelManager());
     const id = '22222222-2222-4222-8222-222222222222';
-    const claude = manager.resolveCliLaunchCommand('panel', 'claude --model "my model" --permission-mode plan', {
+    const claude = manager.resolveCliLaunchCommand('panel', 'claude --model "my model" --permission-mode plan "implement the task"', {
       agentType: 'claude', agentSessionId: id, hasClaudeSessionId: true,
     });
     expect(claude.commandToRun).toBe(`claude --model "my model" --permission-mode plan --resume "${id}"`);
@@ -865,12 +865,12 @@ describe('TerminalPanelManager hidden output delivery', () => {
     expect(restarted.customState.initialInputSentAt).toBeUndefined();
   });
 
-  it('resumes wrapped Claude only when the allocated conversation has a transcript', () => {
+  it('resumes direct Claude only when the allocated conversation has a transcript', () => {
     const manager = testAccess<LaunchCommandAccess>(new TerminalPanelManager());
     const lookup = vi.spyOn(claudeTranscripts, 'findClaudeSessionTranscript').mockReturnValue(undefined);
     const readable = vi.spyOn(claudeTranscripts, 'canReadClaudeTranscripts').mockReturnValue(true);
     try {
-      const command = 'any-launcher my-profile';
+      const command = 'claude --model sonnet';
       const first = manager.resolveCliLaunchCommand('panel', command, { initialCommand: command, customResume: {
         mode: 'claude', initialTemplate: '{command} -- --session-id {sessionId}', resumeTemplate: '{command} -- --resume {sessionId}',
       } });
@@ -881,9 +881,9 @@ describe('TerminalPanelManager hidden output delivery', () => {
     } finally { lookup.mockRestore(); readable.mockRestore(); }
   });
 
-  it('resumes wrapped Claude by its recorded conversation when Pane cannot see the transcripts', () => {
+  it('resumes wrapped Claude by its recorded conversation without assuming the app configuration matches its launcher', () => {
     const manager = testAccess<LaunchCommandAccess>(new TerminalPanelManager());
-    const readable = vi.spyOn(claudeTranscripts, 'canReadClaudeTranscripts').mockReturnValue(false);
+    const readable = vi.spyOn(claudeTranscripts, 'canReadClaudeTranscripts').mockReturnValue(true);
     try {
       const command = 'any-launcher my-profile';
       const first = manager.resolveCliLaunchCommand('panel', command, { initialCommand: command, customResume: {
@@ -900,6 +900,27 @@ describe('TerminalPanelManager hidden output delivery', () => {
       agentType: 'codex', agentSessionId: 'thread-1', wasInterrupted: true,
     });
     expect(result.commandToRun).toBe('CODEX_HOME=~/codex-work codex --yolo resume "thread-1"');
+  });
+
+  it.each([
+    ['CODEX_HOME="/tmp/my codex" codex "fix bug"', 'CODEX_HOME="/tmp/my codex" codex resume "thread-1"'],
+    ['codex --cd "$HOME/repo" "fix bug"', 'codex --cd "$HOME/repo" resume "thread-1"'],
+  ])('preserves shell argument spelling on resume: %s', (command, expected) => {
+    const manager = testAccess<LaunchCommandAccess>(new TerminalPanelManager());
+    expect(manager.resolveCliLaunchCommand('panel', command, {
+      agentType: 'codex', agentSessionId: 'thread-1', wasInterrupted: true,
+    }).commandToRun).toBe(expected);
+  });
+
+  it.each([
+    'claude --debug-file /tmp/claude.log',
+    'claude --permission-prompt-tool mcp__pane-permissions__approve_permission',
+    'claude --future-setting value',
+  ])('keeps option operands on Claude resume: %s', command => {
+    const manager = testAccess<LaunchCommandAccess>(new TerminalPanelManager());
+    expect(manager.resolveCliLaunchCommand('panel', command, {
+      agentType: 'claude', agentSessionId: '22222222-2222-4222-8222-222222222222', hasClaudeSessionId: true,
+    }).commandToRun).toBe(`${command} --resume "22222222-2222-4222-8222-222222222222"`);
   });
 
   it('allocates a Claude session when resume flags appear only inside an option value', () => {
@@ -1152,16 +1173,19 @@ describe('TerminalPanelManager agent session capture', () => {
     disposeFlowControlRecord(terminal.flowControl);
   });
 
-  it.each(['unknown-launcher', 'claude'])('captures an explicitly reported ID from %s across output chunks and persists it', (command) => {
+  it.each([undefined, 'claude', 'codex'] as const)('captures a reported ID with detected identity %s across output chunks', agentType => {
+    const command = 'unknown-launcher';
     const manager = testAccess<AgentSessionCaptureAccess>(new TerminalPanelManager());
     const terminal = createTerminal();
-    terminal.agentType = undefined;
+    terminal.agentType = agentType;
     mockPanel('claude', command);
     const panel = panelManager.getPanel('panel-1');
     if (!panel) throw new Error('Missing panel fixture');
-    panel.state.customState = { initialCommand: command, customResume: {
+    panel.state.customState = { initialCommand: command, agentType, customResume: {
       mode: 'reported', initialTemplate: '{command}', resumeTemplate: '{command} --continue {sessionId}',
     } };
+    manager.captureAgentSessionId(terminal, `To continue, run codex resume ${CURSOR_CHAT_ID}\r\n`);
+    expect(terminal.capturedAgentSessionId).toBeUndefined();
     manager.captureAgentSessionId(terminal, '\r\nPANE_AGENT_SESSION_');
     expect(terminal.capturedAgentSessionId).toBeUndefined();
     manager.captureAgentSessionId(terminal, 'ID=custom-thread-123\r\n');
@@ -1169,6 +1193,25 @@ describe('TerminalPanelManager agent session capture', () => {
     expect(panelManager.updatePanel).toHaveBeenCalledWith('panel-1', { state: expect.objectContaining({
       customState: expect.objectContaining({ agentSessionId: 'custom-thread-123' }),
     }) });
+    disposeFlowControlRecord(terminal.flowControl);
+  });
+
+  it('keeps an allocated custom resume ID after detecting Codex', () => {
+    const manager = testAccess<AgentSessionCaptureAccess & LaunchCommandAccess>(new TerminalPanelManager());
+    const terminal = createTerminal({ agentType: 'codex' });
+    mockPanel('codex', 'wrapper');
+    const panel = panelManager.getPanel('panel-1');
+    if (!panel) throw new Error('Missing panel fixture');
+    const customState: TerminalPanelState = {
+      initialCommand: 'wrapper', agentType: 'codex', agentSessionId: 'allocated-thread', customResumeStarted: true,
+      customResume: { mode: 'generated', initialTemplate: '{command} --id {sessionId}', resumeTemplate: '{command} --continue {sessionId}' },
+    };
+    panel.state.customState = customState;
+    manager.captureAgentSessionId(terminal, `To continue, run codex resume ${CURSOR_CHAT_ID}\r\n`);
+    expect(panelManager.updatePanel).not.toHaveBeenCalled();
+    const launch = manager.resolveCliLaunchCommand('panel-1', 'wrapper', customState);
+    expect(launch.commandToRun).toBe('wrapper --continue "allocated-thread"');
+    expect(launch.customState.agentType).toBe('codex');
     disposeFlowControlRecord(terminal.flowControl);
   });
 

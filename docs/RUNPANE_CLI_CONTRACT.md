@@ -102,6 +102,7 @@ runpane doctor --json
 runpane daemon repair --pane-dir ~/.pane_remote --yes --json
 runpane agent-context
 runpane agent-context --command "panes create" --json
+runpane mcp
 runpane repos list --json
 runpane repos add --path /path/to/repo --name Pane --yes --json
 runpane panes list --repo active --json
@@ -124,11 +125,17 @@ runpane sessions set-agent --session <id|name> --agent <codex|claude|cursor> [--
 runpane sessions associate --session <id|name> --pane <pane-id> [--json] [--pane-dir <path>]
 runpane sessions detach --session <id|name> [--pane <pane-id>] [--json] [--pane-dir <path>]
 runpane sessions overview --session <id|name> [--json] [--pane-dir <path>]
+runpane agents start --repo active --name fix-login --agent claude --prompt "Fix the login redirect" --yes --json
+runpane agents status --pane <pane-id> --json
+runpane agents send --pane <pane-id> --text "Also add a test" --yes --json
+runpane docs search --query "archive a pane" --json
+runpane links create --pane <pane-id> --json
+runpane panes git-status --pane <pane-id> --json
 runpane help
 runpane <command> --help
 ```
 
-`runpane` with no arguments and `runpane setup` open an interactive wizard when stdin and stdout are TTYs. In non-interactive shells or CI, both forms must print help, common commands, and agent discovery hints, then exit successfully instead of waiting for input.
+`runpane` with no arguments and `runpane setup` open an interactive wizard when stdin and stdout are TTYs. The remote-host wizard asks only for a name, then runs interactive Tailscale setup with automatic port selection; explicit install daemon flags remain available for SSH and manual URLs. In non-interactive shells or CI, both forms must print help, common commands, and agent discovery hints, then exit successfully instead of waiting for input.
 
 `runpane install` is an alias for `runpane install client`.
 
@@ -150,6 +157,8 @@ The wrapper must stream Pane stdout/stderr without reformatting because `pane --
 
 `runpane agent-context --command "panes create"` prints the detailed definition for one command. Add `--json` for machine-readable output.
 
+`runpane mcp` runs a stdio MCP server whose tools are generated from this contract: every command with result `jsonSchemas` becomes a tool that runs `runpane <command> --json` and returns its output. Only the npm package and the Pane app include it; the Python wrapper prints how to run it with Node and exits non-zero.
+
 `runpane repos list` connects to the running local Pane daemon and prints saved repository records.
 
 `runpane repos add` registers an existing git repository with the running local Pane daemon. It does not create directories or initialize git repositories by default.
@@ -158,7 +167,7 @@ The wrapper must stream Pane stdout/stderr without reformatting because `pane --
 
 `runpane panes cost` reports estimated token costs per Pane for the last 30 days, including per-model breakdowns and cache efficiency; unscoped output includes an Unattributed bucket that reconciles against workspace totals.
 
-`runpane panes create` connects to the running local Pane daemon, resolves the requested saved base repository, creates user-visible Pane sessions backed by Pane-managed worktrees/branches, opens terminal-backed tool tabs, and optionally sends initial input to the started tool. Built-in agent panes and `--source agent` default to background/no-focus unless `--focus` is passed. New Panes are pinned into the UI's favorite/pin set by default, except when the CLI runs inside a Session orchestrator (`PANE_ORCHESTRATION_SESSION_ID`), where child worktrees default to unpinned. Explicit `--pinned` / `--no-pinned` override creation defaults. First Session association clears an existing pin; manual pins applied afterward are preserved. Panes created interactively in the Pane UI are unaffected.
+`runpane panes create` connects to the running local Pane daemon, resolves the requested saved base repository, creates user-visible Pane sessions backed by Pane-managed worktrees/branches, opens terminal-backed tool tabs, and optionally sends initial input to the started tool. Built-in agent panes and `--source agent` default to background/no-focus unless `--focus` is passed. New Panes are pinned into the UI's favorite/pin set by default, except when the CLI runs inside a Session orchestrator (`PANE_ORCHESTRATION_SESSION_ID`), where child worktrees default to unpinned. Explicit `--pinned` / `--no-pinned` override creation defaults. First Session association clears an existing pin; manual pins applied afterward are preserved. Panes created interactively in the Pane UI are unaffected. Inside a Session orchestrator (`PANE_ORCHESTRATION_SESSION_ID` set), new Panes are associated with that Session automatically; `--no-associate` opts out. A failed association is reported on the item and never undoes the Pane.
 
 For `panes create --wait-ready`, `initialInput.verifiedSubmitted: true` is reported only after argument attachment or composer-clear plus activity evidence. Routing input does not by itself verify submission.
 
@@ -197,6 +206,14 @@ When running from WSL while Pane is installed on Windows, the Linux wrapper may 
 `sessions detach` detach a Pane from a named Session.
 
 `sessions overview` read a live status, activity, git, and pull request overview for a named Session.
+
+`runpane agents start|status|send` finish the three common agent jobs in one call each: start an agent on a task in a repository, check on it, and send it a follow-up.
+
+Commands with a contract `daemonAction` (the `panes` git, script, restore, and move commands, `folders list|create`, and `links open`) call the same Pane daemon channel as the matching button in the app and print `{ ok, data, error }`. Destructive ones add a pane:// `link` to review the Pane.
+
+`runpane links create` builds `pane://open?...` links; opening one in Pane selects what it names and never changes Pane state.
+
+`runpane docs search|read` search and read Pane docs, help, and installed Pane Chat skills offline. They ship in the npm package and the Pane app only.
 
 ## Agent Context
 
@@ -251,53 +268,11 @@ Managed AGENTS.md block body:
 ```md
 ## Pane
 
-The developer is using Pane for this repository. Pane can manage saved repositories and create user-visible Panes with terminal-backed tools for planning, discussion, implementation, and review work.
+This repository is used with [Pane](https://runpane.com). Drive it with the CLI or the `pane` MCP server.
 
-This managed guidance was created by [runpane.com](https://runpane.com) for the [Pane repository](https://github.com/dcouple/Pane). Do not delete or overwrite this block; the developer uses it for their workflow and it should remain committed to the main repository unless they explicitly ask to remove it.
+CLI: `npm i -g runpane` (or `npx --yes runpane@latest`), then `runpane doctor --json`. Full command reference: `runpane agent-context --json`.
 
-Pane mental model: a repository is the saved base repo; a Pane is a user-visible feature/PR workspace (Pane session) that normally maps to one Pane-managed git worktree and branch; a panel/tab is a terminal inside one Pane and shares that Pane's worktree; an agent is the CLI process running in a panel.
-
-Default happy path when the user asks you to use Pane or RunPane: run `runpane doctor --json`; read `runpane agent-context --json`; resolve the saved base repository with `runpane repos list --json` or add it once with `runpane repos add --path <repo> --yes --json`; create one visible Pane (Pane session) for the requested feature/PR with a complete command such as `runpane panes create --repo <repo> --name <name> --agent <agent> --prompt "<task>" --source agent --no-focus --wait-ready --yes --json` or the equivalent `--tool-command <command>` form; then validate with `runpane panels wait` or `runpane panels screen` before reporting progress. For long-lived supervision, use `runpane watch --follow` instead of polling wait or screen.
-
-Use Pane when the user wants visible Panes or co-drivable parallel feature/PR workspaces. Do not use Pane as your default private delegation mechanism; for private background decomposition, use your normal subagent/worktree workflow.
-
-Register the main/base repository once. Do not register pre-created git worktrees as separate Pane repositories unless the user explicitly asks.
-
-Use `runpane panes create` for separate visible Panes (Pane sessions) for feature/PR work. Use `runpane panels create` for reviewer/helper tabs inside an existing Pane that should share that Pane's worktree.
-
-Typical workflow: register the saved base repository once; create one Pane (Pane session) per feature/PR; use panels/tabs inside that Pane for helper or reviewer agents that should share the worktree; archive the Pane after the PR is done to remove it from active Panes and clean up its managed worktree when applicable.
-
-Skill routing reference: Pane installs its skills in `<PANE_DIR>/skills/pane-chat/skills/` (also in `<PANE_DIR>/.claude/skills/` and `<PANE_DIR>/.codex/skills/`), and the Pane Chat entry point is `<PANE_DIR>/skills/pane-chat/pane-orchestrator/SKILL.md`. When the user asks to discuss, plan, implement, review, or test, read the matching skill there, for example `discussion`, `options`, `brief`, `create-ticket`, `tdd`, `quick-verify`, `prepare-pr`, `review`, or `verify-app`.
-Choose the phase from the request: discuss or investigate until the work is clear enough to delegate, then ticket, implement, review, verify, and open the PR as appropriate. Reconcile the skills with the user's request instead of treating any one list as fixed.
-For the Pane implementation source of truth: `main/src/services/skillCacheManager.ts` installs the bundle from `main/src/services/paneChatBundle/` into `<PANE_DIR>/skills/pane-chat/` and generates `pane-orchestrator`; `main/src/services/paneChatManager.ts` owns the tiny bootstrap prompt that tells the selected Pane Chat agent to read it.
-Do not hardcode a specific assistant brand in workflow guidance. Use the Pane agent or custom tool command the user selected, and use `runpane agents doctor --agent <agent> --repo <selector> --json` only when checking a built-in agent template.
-
-Start with `runpane doctor --json` before taking Pane actions. Use it to understand wrapper/runtime details, daemon reachability, and the next safe commands.
-
-In a Pane repository checkout, if `runpane` is not on PATH, use the built local wrapper with Node 22: `PATH=/opt/homebrew/opt/node@22/bin:$PATH node packages/runpane/dist/cli.js doctor --json`.
-
-Use `runpane agent-context --json` for full Pane CLI context. Use `runpane agent-context --command "watch" --json` or another command name for detailed schema only when needed.
-
-Default to context-safe validation: after creating Panes or sending terminal input, run `runpane panels wait` or `runpane panels screen` before reporting success. For ongoing supervision, `runpane watch --follow` is the canonical monitor; do not poll wait or screen. Prefer `runpane panels submit` for normal text plus Enter; use `runpane panels input` only for exact bytes such as Ctrl-C or escape sequences.
-
-Pane terminals draw inline images: sixel, iTerm2 inline images, and the kitty graphics protocol. Tools that need kitty graphics, such as [terminal-browser](https://github.com/zenbu-labs/terminal-browser) and [terminal-doom](https://github.com/dcouple/terminal-doom), run inside a Pane panel. `runpane doctor --json` reports the protocol list under `terminal.graphicsProtocols`.
-
-Common commands:
-- `runpane doctor --json`
-- `runpane agent-context --json`
-- `runpane repos list --json`
-- `runpane repos add --path <repo> --yes --json`
-- `runpane agents doctor --agent <agent> --repo active --json`
-- `runpane panes create --repo active --name <name> --agent <agent> --prompt "<task>" --source agent --no-focus --wait-ready --yes --json`
-- `runpane panels create --pane <pane-id> --agent <agent> --source agent --no-focus --wait-ready --yes --json`
-- `runpane panels list --pane <pane-id> --json`
-- `runpane panels screen --panel <panel-id> --limit 80 --json`
-- `runpane panels wait --panel <panel-id> --for ready --timeout-ms 30000 --json`
-- `runpane watch --follow --json`
-- `runpane panels submit --panel <panel-id> --text "<answer>" --yes --json`
-- `runpane panels input --panel <panel-id> --input-file <path|-> --yes --json`
-
-WSL note: if `runpane doctor --json` cannot find `/tmp/pane-daemon.../daemon.sock` or `runpane` resolves to a broken Windows shim, Pane may be running on Windows. Try `powershell.exe -NoProfile -Command 'Set-Location $env:TEMP; runpane doctor --json'`, then create Panes through the same PowerShell form using the saved WSL repo name or id. Use `runpane agents doctor --agent <agent> --repo <selector> --json` to diagnose the repo environment Pane will actually use.
+MCP: packaged Pane registers a stdio server named `pane` with Claude Code, Codex, and Cursor. Check the connection with `claude mcp list`, `codex mcp list`, or `agent mcp list`. Cursor may ask you to enable `pane` with `agent mcp enable pane`. If tools are missing, add it in the agent's MCP settings: Claude Code `claude mcp add --scope user pane -- npx --yes runpane@latest mcp`; Codex (`~/.codex/config.toml`) table `[mcp_servers.pane]` with `command = "npx"` and `args = ["--yes", "runpane@latest", "mcp"]`; Cursor (`~/.cursor/mcp.json`) uses `mcpServers.pane` with the same `npx` command and args; any other stdio client uses them too.
 ```
 
 ## Wrapper Flags
@@ -362,12 +337,19 @@ These flags are consumed by local daemon-control commands:
 --min-interval <milliseconds>
 --body-file <path|->
 --session <id|name>
+--message <message>
+--query <text>
+--doc <path>
+--url <pane-url>
+--toolsets <name,...>
+--keys <name,...>
 --json
 --wait-ready
 --no-focus
 --focus
 --pinned
 --no-pinned
+--no-associate
 --force
 --launch
 --follow
@@ -380,6 +362,7 @@ These flags are consumed by local daemon-control commands:
 --self-test
 --idle-backoff
 --report
+--read-only
 ```
 
 `runpane doctor --json`, `runpane repos list`, `runpane panes ...`, and `runpane panels ...` commands use or describe the local framed daemon socket/pipe for a running Pane app. `--pane-dir` points the wrapper at a non-default Pane data directory, such as `PANE_DIR=~/.pane_test` in development. `runpane agent-context` is local/offline and can be used before Pane is running. In a Pane repository checkout, if `runpane` is not on PATH, use the built local wrapper with Node 22, for example `PATH=/opt/homebrew/opt/node@22/bin:$PATH node packages/runpane/dist/cli.js doctor --json`. From WSL, if the user runs Windows Pane, call the Windows wrapper through `powershell.exe -NoProfile -Command 'Set-Location $env:TEMP; runpane ...'` so the command can reach the Windows named-pipe daemon and avoid UNC cwd issues.

@@ -7,7 +7,7 @@ Pane release artifact only when you run `runpane install` or `runpane update`.
 
 ## Quick Start
 
-Run the guided setup:
+Run the guided setup (Node 20 or newer):
 
 ```bash
 npx --yes runpane@latest
@@ -20,8 +20,27 @@ npm i -g runpane
 runpane setup
 ```
 
+Use the arrow keys and Enter to choose an action; Esc or Ctrl+C cancels.
+
 The wizard can install Pane on this machine, configure this machine as a remote
-host, update Pane, or run diagnostics.
+host, update Pane, or run diagnostics. For remote access, choose **Set up a remote
+host**, accept or enter a name, and follow the Tailscale login
+prompts. Copy the connection code into Pane on your other device or
+[runpane.com/app](https://runpane.com/app/). Sign that device into the same
+Tailscale network first. No tunnel flags are needed in the wizard.
+
+## MCP Server
+
+`runpane mcp` runs a stdio MCP server whose tools mirror the `runpane`
+commands, generated from the CLI contract. The Pane desktop app registers it
+with Claude Code, Codex, and Cursor automatically. To register it yourself:
+
+```bash
+claude mcp add --scope user pane -- npx --yes runpane@latest mcp
+codex mcp add pane -- npx --yes runpane@latest mcp
+```
+
+See [docs/PANE_MCP.md](https://github.com/greenfield-inc/Pane/blob/main/docs/PANE_MCP.md).
 
 ## Developing This Repository
 

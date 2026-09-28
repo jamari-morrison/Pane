@@ -30,6 +30,7 @@ export class TerminalStateEmulator {
   private currentTitle = '';
   private currentProgress = '';
   private win32InputMode = false;
+  private mouseEncoding: 1006 | 1016 | undefined;
 
   constructor(cols: number, rows: number) {
     this.terminal = new Terminal({
@@ -47,14 +48,22 @@ export class TerminalStateEmulator {
     this.terminal.unicode.activeVersion = '11';
     // The headless 6.0 model/serializer does not know DECSET 9001. Retain it
     // explicitly so a renderer reset or remount does not lose ConPTY's request.
+    // The serializer also omits SGR/SGR-pixel mouse encoding; preserve xterm's
+    // active encoding separately from its serialized mouse tracking protocol.
     for (const [final, enabled] of [['h', true], ['l', false]] as const) {
       this.terminal.parser.registerCsiHandler({ prefix: '?', final }, (params) => {
-        if (params.includes(9001)) this.win32InputMode = enabled;
+        for (const param of params) {
+          if (param === 9001) this.win32InputMode = enabled;
+          // xterm has one active encoding: the last SET wins, while either
+          // RESET returns to DEFAULT, even when resetting the other encoding.
+          if (param === 1006 || param === 1016) this.mouseEncoding = enabled ? param : undefined;
+        }
         return false;
       });
     }
     this.terminal.parser.registerEscHandler({ final: 'c' }, () => {
       this.win32InputMode = false;
+      this.mouseEncoding = undefined;
       return false;
     });
     this.terminal.parser.registerCsiHandler({ intermediates: '!', final: 'p' }, () => {
@@ -120,7 +129,9 @@ export class TerminalStateEmulator {
       ? cached.serialized
       : this.serializeAddon.serialize({
           scrollback: includeScrollback ? HEADLESS_SCROLLBACK_LINES : 0,
-        }) + (this.win32InputMode ? '\x1b[?9001h' : '');
+        }) + (this.win32InputMode ? '\x1b[?9001h' : '')
+          // Append after buffer activation and serialized tracking modes.
+          + (this.mouseEncoding ? `\x1b[?${this.mouseEncoding}h` : '');
     // Only a fully parsed buffer is safe to reuse; mid-parse reads are partial.
     if (this.pendingWrites === 0) restoreCache.set(this, { includeScrollback, serialized });
     const oldest = restoreCache.size > RESTORE_CACHE_LIMIT ? restoreCache.keys().next().value : undefined;

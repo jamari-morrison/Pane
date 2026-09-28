@@ -662,15 +662,32 @@ def build_repo_add_request(parsed: Any) -> Dict[str, Any]:
 def build_panel_input_request(parsed: Any, command: str = "input") -> Dict[str, Any]:
     if not parsed.panel_id:
         raise ValueError(f"runpane panels {command} requires --panel.")
-    if parsed.panel_input is not None and parsed.panel_input_file:
-        raise ValueError("Use either --text or --input-file, not both.")
-    if parsed.panel_input is None and not parsed.panel_input_file:
-        raise ValueError(f"runpane panels {command} requires --text or --input-file.")
+    sources = sum([parsed.panel_input is not None, bool(parsed.panel_input_file), parsed.keys is not None])
+    if sources > 1:
+        raise ValueError("Use only one of --text, --keys, or --input-file.")
+    if sources == 0:
+        raise ValueError(f"runpane panels {command} requires --text, --keys, or --input-file.")
+    if parsed.keys is not None and command != "input":
+        raise ValueError("--keys is for panels input; panels submit sends text followed by Enter.")
 
-    return {
-        "panelId": parsed.panel_id,
-        "input": read_input_source(parsed.panel_input_file) if parsed.panel_input_file else parsed.panel_input or "",
-    }
+    if parsed.keys is not None:
+        text = keys_to_bytes(parsed.keys)
+    elif parsed.panel_input_file:
+        text = read_input_source(parsed.panel_input_file)
+    else:
+        text = parsed.panel_input or ""
+    return {"panelId": parsed.panel_id, "input": text}
+
+
+def keys_to_bytes(keys: Any) -> str:
+    named = RUNPANE_CONTRACT["terminalKeys"]
+    out = []
+    for key in keys:
+        value = named.get(key.lower(), key if len(key) == 1 else None)
+        if value is None:
+            raise ValueError(f'Unknown key "{key}". Use {", ".join(named)}, or a single character.')
+        out.append(value)
+    return "".join(out)
 
 
 def build_panel_create_request(parsed: Any) -> Dict[str, Any]:
@@ -721,6 +738,10 @@ def build_pane_create_request(parsed: Any) -> Dict[str, Any]:
             for item in payload.get("panes", [])
         ]
         apply_pane_focus_options(parsed, payload)
+        if parsed.no_associate:
+            payload.pop("associateSession", None)
+        else:
+            payload.update(optional_value("associateSession", resolve_associate_session(parsed)))
         return payload
 
     if not parsed.repo:
@@ -750,7 +771,15 @@ def build_pane_create_request(parsed: Any) -> Dict[str, Any]:
         **optional_value("noFocus", True if not parsed.focus and (parsed.no_focus or parsed.source == "agent" or bool(parsed.agent)) else None),
         **optional_value("focus", True if parsed.focus else None),
         **optional_value("source", parsed.source),
+        **optional_value("associateSession", resolve_associate_session(parsed)),
     }
+
+
+def resolve_associate_session(parsed: Any) -> Optional[str]:
+    """Inside a Session orchestrator, new Panes join that Session unless --no-associate."""
+    if parsed.no_associate:
+        return None
+    return (os.environ.get("PANE_ORCHESTRATION_SESSION_ID") or "").strip() or None
 
 
 def apply_pane_focus_options(parsed: Any, request: Dict[str, Any]) -> None:
@@ -1112,6 +1141,12 @@ def print_pane_create_result(result: Dict[str, Any]) -> None:
                 blocked = readiness.get("blocked")
                 if blocked:
                     print(f"  Blocked: {blocked.get('message')}")
+            association = item.get("association")
+            if association:
+                if association.get("ok"):
+                    print(f"  Associated with Session {association.get('sessionId')}")
+                else:
+                    print(f"  Not associated with Session {association.get('sessionId')}: {association.get('error', 'unknown error')}")
             if item.get("nextCommand"):
                 print(f"  Next: {item.get('nextCommand')}")
         else:

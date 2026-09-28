@@ -492,6 +492,7 @@ describe('OrchestrationSessionManager', () => {
     const created = await fixture.manager.create({ name: 'Profile change', profile: 'Original profile' });
     vi.mocked(terminalPanelManager.isTerminalInitialized).mockReturnValue(true);
     await fixture.manager.update({ sessionId: created.session.id }, { profile: 'New profile' });
+    await fixture.manager.getView({ sessionId: created.session.id });
     expect(fs.readFileSync(path.join(created.cwd, 'AGENTS.md'), 'utf8')).toContain('Original profile');
     expect(panelManager.getPanel(created.panel.id)?.state.customState?.orchestrationProfile).toBe('New profile');
     vi.mocked(terminalPanelManager.isTerminalInitialized).mockReturnValue(false);

@@ -1,3 +1,4 @@
+import { installRunpaneShimBestEffort } from '../services/runpaneShim';
 import path from 'path';
 import { powerMonitor, type App, type BrowserWindow } from 'electron';
 import { startupPanelBufferMigration, startupRetentionResult } from '../services/database';
@@ -19,6 +20,7 @@ import { WorktreeNameGenerator } from '../services/worktreeNameGenerator';
 import { RunCommandManager } from '../services/runCommandManager';
 import { VersionChecker } from '../services/versionChecker';
 import { SkillCacheManager } from '../services/skillCacheManager';
+import { applyManagedAgentsMdSetting } from '../services/agentContextManager';
 import { PaneChatManager } from '../services/paneChatManager';
 import { OrchestrationSessionManager } from '../services/orchestrationSessionManager';
 import { TaskQueue } from '../services/taskQueue';
@@ -199,10 +201,25 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
   const worktreeNameGenerator = new WorktreeNameGenerator(configManager);
   const runCommandManager = new RunCommandManager(databaseService);
   const versionChecker = new VersionChecker(configManager, logger);
+  // Terminals launched below find this build's runpane first on PATH.
+  installRunpaneShimBestEffort(getAppDirectory());
   const skillCacheManager = new SkillCacheManager();
   await skillCacheManager.start().catch(error => {
     logger.warn('[SkillCache] Failed to install Pane Chat skills', error instanceof Error ? error : undefined);
   });
+  await skillCacheManager.syncHomeSkill(configManager.getConfig(), databaseService.getAllProjects());
+  if (configManager.getConfig().agentContext?.cleanupPending && configManager.getConfig().agentContext?.managedAgentsMd !== true) {
+    // Retry until all saved repositories are available, without delaying startup.
+    const migrationConfig = configManager.getConfig();
+    void applyManagedAgentsMdSetting(migrationConfig, {
+      all: () => databaseService.getAllProjects(),
+      active: () => sessionManager.getActiveProject(),
+    }).then(async succeeded => {
+      if (succeeded && configManager.getConfig() === migrationConfig) {
+        await configManager.updateConfig({ agentContext: { cleanupPending: false } });
+      }
+    }).catch(error => console.warn('[AgentContext] Could not finish startup cleanup:', error));
+  }
   const paneChatManager = new PaneChatManager(configManager, sessionManager, skillCacheManager);
   await paneChatManager.getOrCreate().catch(error => {
     logger.warn('[PaneChat] Failed to ensure startup Pane Chat session', error instanceof Error ? error : undefined);

@@ -7,7 +7,9 @@ import type { RemotePwaAffordances } from '../../../shared/types/remoteDaemon';
 import type { VoiceTranscriptionMode } from '../../../shared/types/voiceTranscription';
 import { ShellDetector } from '../utils/shellDetector';
 import { syncAutoStartOnBoot } from '../utils/autoStart';
-import { ensureProjectAgentContext } from '../services/agentContextManager';
+import { applyManagedAgentsMdSetting } from '../services/agentContextManager';
+import { syncPaneMcpForApp } from '../services/paneMcpRegistration';
+import { isPaneHomeSkillEnabled, syncPaneHomeSkill } from '../services/paneHomeSkill';
 import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
 import { AppearanceValidationError } from '../../../shared/types/appearance';
 
@@ -56,8 +58,18 @@ export function registerConfigHandlers(
                                updates.claudeExecutablePath !== oldConfig.claudeExecutablePath;
       const managedAgentsMdChanged = updates.agentContext?.managedAgentsMd !== undefined
         && updates.agentContext.managedAgentsMd !== oldConfig.agentContext?.managedAgentsMd;
+      const registerMcpChanged = (updates.agentContext?.registerMcp !== undefined
+        && updates.agentContext.registerMcp !== (oldConfig.agentContext?.registerMcp !== false))
+        || (updates.agentContext?.mcpToolsets !== undefined
+          && updates.agentContext.mcpToolsets.join(',') !== (oldConfig.agentContext?.mcpToolsets ?? []).join(','));
+      const homeSkillChanged = updates.agentContext?.homeSkill !== undefined
+        && updates.agentContext.homeSkill !== isPaneHomeSkillEnabled(oldConfig);
 
-      const updatedConfig = await configManager.updateConfig(updates);
+      let updatedConfig = await configManager.updateConfig(
+        managedAgentsMdChanged && updates.agentContext?.managedAgentsMd === false
+          ? { ...updates, agentContext: { ...updates.agentContext, cleanupPending: true } }
+          : updates,
+      );
 
       if (updates.autoStartOnBoot !== undefined) {
         syncAutoStartOnBoot(app, updates.autoStartOnBoot !== false);
@@ -70,19 +82,28 @@ export function registerConfigHandlers(
       }
 
       if (managedAgentsMdChanged) {
-        const nextConfig = configManager.getConfig();
-        const activeProject = sessionManager.getActiveProject();
-        const projects = nextConfig.agentContext?.managedAgentsMd === false
-          ? databaseService.getAllProjects()
-          : activeProject ? [activeProject] : [];
-
-        for (const project of projects) {
-          try {
-            await ensureProjectAgentContext(project, nextConfig);
-          } catch (error) {
-            console.warn('[Config] Failed to update Pane agent context after setting change:', error);
-          }
+        const cleanupSucceeded = await applyManagedAgentsMdSetting(configManager.getConfig(), {
+          all: () => databaseService.getAllProjects(),
+          active: () => sessionManager.getActiveProject(),
+        });
+        if (updates.agentContext?.managedAgentsMd === false && cleanupSucceeded) {
+          updatedConfig = await configManager.updateConfig({ agentContext: { cleanupPending: false } });
         }
+      }
+
+      if (homeSkillChanged) {
+        const distros = databaseService.getAllProjects()
+          .flatMap(project => project.wsl_enabled && project.wsl_distribution ? [project.wsl_distribution] : []);
+        await syncPaneHomeSkill(configManager.getConfig(), undefined, distros)
+          .catch(error => console.warn('[Config] Failed to update the Pane home skill after setting change:', error));
+      }
+
+      if (registerMcpChanged) {
+        syncPaneMcpForApp({
+          isPackaged: app.isPackaged,
+          config: configManager.getConfig(),
+          getProjects: () => databaseService.getAllProjects(),
+        });
       }
 
       // Apply UI scale live

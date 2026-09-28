@@ -79,6 +79,19 @@ export const RUNPANE_CONTRACT = {
       "description": "Open a Cursor Agent terminal tab and allow the initial input to drive the agent."
     }
   },
+  "terminalKeys": {
+    "enter": "\r",
+    "escape": "\u001b",
+    "tab": "\t",
+    "backspace": "",
+    "space": " ",
+    "up": "\u001b[A",
+    "down": "\u001b[B",
+    "right": "\u001b[C",
+    "left": "\u001b[D",
+    "ctrl-c": "\u0003",
+    "ctrl-d": "\u0004"
+  },
   "commands": [
     {
       "name": "help",
@@ -127,9 +140,14 @@ export const RUNPANE_CONTRACT = {
     {
       "name": "doctor",
       "summary": "Run platform, release, installed Pane, daemon reachability, and remote setup diagnostics.",
+      "openWorld": true,
       "usage": [
         "runpane doctor [--json] [--pane-dir <path>] [--pane-path <path>] [--format <format>] [--verbose]",
         "runpane doctor --report [--title <text>] --body-file <path|-> [--yes] [--json]"
+      ],
+      "toolsets": [
+        "core",
+        "admin"
       ],
       "jsonSchemas": [
         "doctorResult"
@@ -142,6 +160,9 @@ export const RUNPANE_CONTRACT = {
         "runpane daemon repair [--pane-dir <path>] [--pane-path <path>] [--yes] [--json]"
       ],
       "mutates": true,
+      "toolsets": [
+        "admin"
+      ],
       "jsonSchemas": [
         "daemonRepairResult"
       ]
@@ -151,6 +172,9 @@ export const RUNPANE_CONTRACT = {
       "summary": "Diagnose whether a built-in agent command is available in a Pane repository environment.",
       "usage": [
         "runpane agents doctor --agent <codex|claude|cursor> [--repo <selector>] [--json]"
+      ],
+      "toolsets": [
+        "admin"
       ],
       "jsonSchemas": [
         "agentDoctorResult"
@@ -163,9 +187,23 @@ export const RUNPANE_CONTRACT = {
         "runpane agent-context [--json]",
         "runpane agent-context --command <command> [--json]"
       ],
+      "toolsets": [
+        "admin",
+        "docs"
+      ],
       "jsonSchemas": [
         "agentContextBriefResult",
         "agentContextCommandResult"
+      ]
+    },
+    {
+      "name": "mcp",
+      "summary": "Run the Pane MCP server over stdio so coding agents can call runpane commands as tools.",
+      "usage": [
+        "runpane mcp [--toolsets <name,...>] [--read-only]"
+      ],
+      "wrappers": [
+        "npm"
       ]
     },
     {
@@ -173,6 +211,10 @@ export const RUNPANE_CONTRACT = {
       "summary": "List repositories saved in the running Pane app.",
       "usage": [
         "runpane repos list [--json] [--pane-dir <path>]"
+      ],
+      "toolsets": [
+        "core",
+        "repos"
       ],
       "jsonSchemas": [
         "repoListResult"
@@ -185,6 +227,12 @@ export const RUNPANE_CONTRACT = {
         "runpane repos add --path <path> [--name <name>] [--json] [--yes]"
       ],
       "mutates": true,
+      "additive": true,
+      "idempotent": true,
+      "toolsets": [
+        "core",
+        "repos"
+      ],
       "jsonSchemas": [
         "repoAddRequest",
         "repoAddResult"
@@ -196,6 +244,10 @@ export const RUNPANE_CONTRACT = {
       "usage": [
         "runpane panes list [--repo <selector>] [--json]"
       ],
+      "toolsets": [
+        "core",
+        "panes"
+      ],
       "jsonSchemas": [
         "paneListResult"
       ]
@@ -205,6 +257,9 @@ export const RUNPANE_CONTRACT = {
       "summary": "Report estimated token cost per Pane, with per-model breakdown and cache efficiency.",
       "usage": [
         "runpane panes cost [--repo <selector>] [--pane <pane-id>] [--json]"
+      ],
+      "toolsets": [
+        "panes"
       ],
       "jsonSchemas": [
         "paneCostRequest",
@@ -217,6 +272,10 @@ export const RUNPANE_CONTRACT = {
       "usage": [
         "runpane workspace state [--repo <selector>] [--json]"
       ],
+      "toolsets": [
+        "core",
+        "agents"
+      ],
       "jsonSchemas": [
         "workspaceStateResult"
       ]
@@ -226,6 +285,9 @@ export const RUNPANE_CONTRACT = {
       "summary": "Wait for workspace agent and Pane transitions using a daemon-held cursor.",
       "usage": [
         "runpane watch [--as <name>|--since <generation>] [--follow] [--format <lines|json>] [--heartbeat <seconds>] [--idle-after <ms>] [--settle <ms>] [--blocked-settle <ms>] [--min-interval <ms>] [--idle-backoff] [--all-managed|--pane <id>] [--include-shells] [--self-test] [--kinds <kind,...>] [--repo <selector>] [--name-contains <text>] [--timeout-ms <ms>] [--from <now|earliest>] [--json]"
+      ],
+      "toolsets": [
+        "agents"
       ],
       "jsonSchemas": [
         "workspaceWaitRequest",
@@ -240,6 +302,10 @@ export const RUNPANE_CONTRACT = {
         "runpane panes create --from-json <path|-> [--yes] [--json]"
       ],
       "mutates": true,
+      "additive": true,
+      "toolsets": [
+        "panes"
+      ],
       "jsonSchemas": [
         "paneCreateRequest",
         "paneCreateResult"
@@ -249,9 +315,13 @@ export const RUNPANE_CONTRACT = {
       "name": "panes adopt",
       "summary": "Adopt an existing externally managed git worktree as a Pane without changing the worktree.",
       "usage": [
-        "runpane panes adopt --repo <selector> --path <dir> --name <name> --agent <codex|claude|cursor> [--resume <id>] [--folder <name>] [--launch] [--no-pinned] [--dry-run] [--yes] [--json]"
+        "runpane panes adopt --repo <selector> --path <dir> --name <name> --agent <codex|claude|cursor> [--resume <id>] [--folder <name>] [--launch] [--no-pinned] [--no-associate] [--dry-run] [--yes] [--json]"
       ],
       "mutates": true,
+      "additive": true,
+      "toolsets": [
+        "panes"
+      ],
       "jsonSchemas": [
         "paneCreateResult"
       ]
@@ -263,6 +333,10 @@ export const RUNPANE_CONTRACT = {
         "runpane panes archive --pane <pane-id> [--source user|agent] [--force] [--dry-run] --yes [--json]"
       ],
       "mutates": true,
+      "toolsets": [
+        "core",
+        "panes"
+      ],
       "jsonSchemas": [
         "paneArchiveRequest",
         "paneArchiveResult"
@@ -275,6 +349,10 @@ export const RUNPANE_CONTRACT = {
         "runpane panes pin --pane <pane-id> --yes [--dry-run] [--json]"
       ],
       "mutates": true,
+      "idempotent": true,
+      "toolsets": [
+        "panes"
+      ],
       "jsonSchemas": [
         "panePinRequest",
         "panePinResult"
@@ -287,6 +365,10 @@ export const RUNPANE_CONTRACT = {
         "runpane panes unpin --pane <pane-id> --yes [--dry-run] [--json]"
       ],
       "mutates": true,
+      "idempotent": true,
+      "toolsets": [
+        "panes"
+      ],
       "jsonSchemas": [
         "panePinRequest",
         "panePinResult"
@@ -299,6 +381,10 @@ export const RUNPANE_CONTRACT = {
         "runpane panes rename --pane <pane-id> --name <new-name> --yes [--dry-run] [--json]"
       ],
       "mutates": true,
+      "idempotent": true,
+      "toolsets": [
+        "panes"
+      ],
       "jsonSchemas": [
         "paneRenameRequest",
         "paneRenameResult"
@@ -311,6 +397,11 @@ export const RUNPANE_CONTRACT = {
         "runpane panes focus --pane <pane-id> [--panel <panel-id>] --source user|agent --yes [--json]"
       ],
       "mutates": true,
+      "additive": true,
+      "idempotent": true,
+      "toolsets": [
+        "panes"
+      ],
       "jsonSchemas": [
         "paneFocusRequest",
         "paneFocusResult"
@@ -324,6 +415,10 @@ export const RUNPANE_CONTRACT = {
         "runpane panels create --pane <pane-id> --tool-command <command> [--title <title>] [--focus|--no-focus] --yes [--json]"
       ],
       "mutates": true,
+      "additive": true,
+      "toolsets": [
+        "panels"
+      ],
       "jsonSchemas": [
         "panelCreateRequest",
         "panelCreateResult"
@@ -335,6 +430,9 @@ export const RUNPANE_CONTRACT = {
       "usage": [
         "runpane panels list --pane <pane-id> [--json]"
       ],
+      "toolsets": [
+        "panels"
+      ],
       "jsonSchemas": [
         "panelListResult"
       ]
@@ -344,6 +442,9 @@ export const RUNPANE_CONTRACT = {
       "summary": "Read recent terminal output from a panel.",
       "usage": [
         "runpane panels output --panel <panel-id> [--limit <count>] [--json]"
+      ],
+      "toolsets": [
+        "panels"
       ],
       "jsonSchemas": [
         "panelOutputResult"
@@ -355,6 +456,9 @@ export const RUNPANE_CONTRACT = {
       "usage": [
         "runpane panels screen --panel <panel-id> [--limit <count>] [--json]"
       ],
+      "toolsets": [
+        "panels"
+      ],
       "jsonSchemas": [
         "panelScreenResult"
       ]
@@ -363,9 +467,13 @@ export const RUNPANE_CONTRACT = {
       "name": "panels input",
       "summary": "Send input bytes to a terminal panel.",
       "usage": [
-        "runpane panels input --panel <panel-id> (--text <text>|--input-file <path|->) --yes [--json]"
+        "runpane panels input --panel <panel-id> (--text <text>|--keys <name,...>|--input-file <path|->) --yes [--json]"
       ],
       "mutates": true,
+      "toolsets": [
+        "core",
+        "panels"
+      ],
       "jsonSchemas": [
         "panelInputRequest",
         "panelInputResult"
@@ -378,6 +486,9 @@ export const RUNPANE_CONTRACT = {
         "runpane panels submit --panel <panel-id> (--text <text>|--input-file <path|->) --yes [--json]"
       ],
       "mutates": true,
+      "toolsets": [
+        "panels"
+      ],
       "jsonSchemas": [
         "panelSubmitRequest",
         "panelSubmitResult"
@@ -390,6 +501,9 @@ export const RUNPANE_CONTRACT = {
         "runpane panels submit-composer --panel <panel-id> [--strategy auto|codex-ctrl-enter|enter] --yes [--json]"
       ],
       "mutates": true,
+      "toolsets": [
+        "panels"
+      ],
       "jsonSchemas": [
         "panelSubmitComposerRequest",
         "panelSubmitComposerResult"
@@ -401,8 +515,475 @@ export const RUNPANE_CONTRACT = {
       "usage": [
         "runpane panels wait --panel <panel-id> [--for initialized|ready|idle|text] [--contains <text>] [--timeout-ms <ms>] [--interval-ms <ms>] [--json]"
       ],
+      "toolsets": [
+        "panels"
+      ],
       "jsonSchemas": [
         "panelWaitResult"
+      ]
+    },
+    {
+      "name": "panes git-status",
+      "summary": "Read the git status of a Pane worktree: uncommitted, unpushed, and behind-main counts.",
+      "usage": [
+        "runpane panes git-status --pane <pane-id> [--json] [--pane-dir <path>]"
+      ],
+      "daemonAction": {
+        "channel": "sessions:get-git-status",
+        "args": [
+          "--pane"
+        ]
+      },
+      "toolsets": [
+        "core",
+        "git"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes commit",
+      "summary": "Stage all changes in a Pane worktree and commit them.",
+      "usage": [
+        "runpane panes commit --pane <pane-id> --message <message> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "additive": true,
+      "daemonAction": {
+        "channel": "sessions:git-stage-and-commit",
+        "args": [
+          "--pane",
+          "--message"
+        ]
+      },
+      "toolsets": [
+        "git"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes push",
+      "summary": "Push a Pane branch to its remote.",
+      "usage": [
+        "runpane panes push --pane <pane-id> --yes [--json] [--pane-dir <path>]"
+      ],
+      "openWorld": true,
+      "mutates": true,
+      "additive": true,
+      "idempotent": true,
+      "daemonAction": {
+        "channel": "sessions:git-push",
+        "args": [
+          "--pane"
+        ]
+      },
+      "toolsets": [
+        "git"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes pull",
+      "summary": "Pull the remote branch into a Pane worktree.",
+      "usage": [
+        "runpane panes pull --pane <pane-id> --yes [--json] [--pane-dir <path>]"
+      ],
+      "openWorld": true,
+      "mutates": true,
+      "daemonAction": {
+        "channel": "sessions:git-pull",
+        "args": [
+          "--pane"
+        ]
+      },
+      "toolsets": [
+        "git"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes rebase-main",
+      "summary": "Rebase a Pane branch onto the latest main branch.",
+      "usage": [
+        "runpane panes rebase-main --pane <pane-id> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "daemonAction": {
+        "channel": "sessions:rebase-main-into-worktree",
+        "args": [
+          "--pane"
+        ]
+      },
+      "toolsets": [
+        "git"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes restore",
+      "summary": "Restore an archived Pane, recreating its worktree.",
+      "usage": [
+        "runpane panes restore --pane <pane-id> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "additive": true,
+      "idempotent": true,
+      "daemonAction": {
+        "channel": "sessions:restore",
+        "args": [
+          "--pane"
+        ]
+      },
+      "toolsets": [
+        "core",
+        "panes"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes squash-rebase",
+      "summary": "Squash a Pane branch into one commit and rebase it onto main.",
+      "usage": [
+        "runpane panes squash-rebase --pane <pane-id> --message <message> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "daemonAction": {
+        "channel": "sessions:squash-and-rebase-to-main",
+        "args": [
+          "--pane",
+          "--message"
+        ]
+      },
+      "toolsets": [
+        "git"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes stash",
+      "summary": "Stash uncommitted changes in a Pane worktree.",
+      "usage": [
+        "runpane panes stash --pane <pane-id> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "daemonAction": {
+        "channel": "sessions:git-stash",
+        "args": [
+          "--pane"
+        ]
+      },
+      "toolsets": [
+        "git"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes stash-pop",
+      "summary": "Apply and drop the latest stash in a Pane worktree.",
+      "usage": [
+        "runpane panes stash-pop --pane <pane-id> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "daemonAction": {
+        "channel": "sessions:git-stash-pop",
+        "args": [
+          "--pane"
+        ]
+      },
+      "toolsets": [
+        "git"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes soft-reset",
+      "summary": "Undo the last commit in a Pane, keeping its changes staged.",
+      "usage": [
+        "runpane panes soft-reset --pane <pane-id> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "daemonAction": {
+        "channel": "sessions:git-soft-reset",
+        "args": [
+          "--pane"
+        ]
+      },
+      "toolsets": [
+        "git"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes fetch",
+      "summary": "Fetch the remote for a Pane worktree.",
+      "usage": [
+        "runpane panes fetch --pane <pane-id> --yes [--json] [--pane-dir <path>]"
+      ],
+      "openWorld": true,
+      "mutates": true,
+      "additive": true,
+      "idempotent": true,
+      "daemonAction": {
+        "channel": "sessions:git-fetch",
+        "args": [
+          "--pane"
+        ]
+      },
+      "toolsets": [
+        "git"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes run-script",
+      "summary": "Run the repository's run script in a Pane.",
+      "usage": [
+        "runpane panes run-script --pane <pane-id> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "additive": true,
+      "daemonAction": {
+        "channel": "sessions:run-script",
+        "args": [
+          "--pane"
+        ]
+      },
+      "toolsets": [
+        "panes"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes stop-script",
+      "summary": "Stop the run script running in a Pane.",
+      "usage": [
+        "runpane panes stop-script --pane <pane-id> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "idempotent": true,
+      "daemonAction": {
+        "channel": "sessions:stop-script",
+        "args": [
+          "--pane"
+        ]
+      },
+      "toolsets": [
+        "panes"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "panes move",
+      "summary": "Move a Pane into a sidebar folder.",
+      "usage": [
+        "runpane panes move --pane <pane-id> --folder <folder-id> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "idempotent": true,
+      "daemonAction": {
+        "channel": "folders:move-session",
+        "args": [
+          "--pane",
+          "--folder"
+        ]
+      },
+      "toolsets": [
+        "panes"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "folders list",
+      "summary": "List the sidebar folders of a repository.",
+      "usage": [
+        "runpane folders list --repo <repo-id> [--json] [--pane-dir <path>]"
+      ],
+      "daemonAction": {
+        "channel": "folders:get-by-project",
+        "args": [
+          "--repo"
+        ]
+      },
+      "toolsets": [
+        "panes"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "folders create",
+      "summary": "Create a sidebar folder in a repository.",
+      "usage": [
+        "runpane folders create --repo <repo-id> --name <name> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "additive": true,
+      "daemonAction": {
+        "channel": "folders:create",
+        "args": [
+          "--name",
+          "--repo"
+        ]
+      },
+      "toolsets": [
+        "panes"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "links create",
+      "summary": "Build a pane:// link that opens a Pane, panel, repository, or Session in the Pane app.",
+      "usage": [
+        "runpane links create --pane <pane-id> [--panel <panel-id>] [--json]",
+        "runpane links create --repo <repo-id> [--json]",
+        "runpane links create --session <session-id> [--json]"
+      ],
+      "toolsets": [
+        "core",
+        "links"
+      ],
+      "jsonSchemas": [
+        "linkCreateResult"
+      ]
+    },
+    {
+      "name": "links open",
+      "summary": "Open a pane:// link in the running Pane app.",
+      "usage": [
+        "runpane links open --url <pane-url> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "additive": true,
+      "idempotent": true,
+      "daemonAction": {
+        "channel": "runpane:links:open",
+        "args": [
+          "--url"
+        ]
+      },
+      "toolsets": [
+        "links"
+      ],
+      "jsonSchemas": [
+        "daemonActionResult"
+      ]
+    },
+    {
+      "name": "docs search",
+      "summary": "Search Pane's docs, runpane help, and the Pane Chat skills.",
+      "usage": [
+        "runpane docs search --query <text> [--limit <count>] [--json]"
+      ],
+      "wrappers": [
+        "npm"
+      ],
+      "toolsets": [
+        "core",
+        "docs"
+      ],
+      "jsonSchemas": [
+        "docsSearchResult"
+      ]
+    },
+    {
+      "name": "docs read",
+      "summary": "Read one Pane doc, help topic, or skill in full.",
+      "usage": [
+        "runpane docs read --doc <path> [--json]"
+      ],
+      "wrappers": [
+        "npm"
+      ],
+      "toolsets": [
+        "core",
+        "docs"
+      ],
+      "jsonSchemas": [
+        "docsReadResult"
+      ]
+    },
+    {
+      "name": "agents start",
+      "summary": "Start an agent on a task: create a Pane in a repository, launch the agent with the prompt, and wait until it is ready.",
+      "usage": [
+        "runpane agents start --repo <selector> --name <name> (--agent <codex|claude|cursor>|--tool-command <command>) --prompt <task> [--base-branch <branch>] --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "additive": true,
+      "wrappers": [
+        "npm"
+      ],
+      "toolsets": [
+        "core",
+        "agents"
+      ],
+      "jsonSchemas": [
+        "agentTaskResult"
+      ]
+    },
+    {
+      "name": "agents status",
+      "summary": "Check on an agent: whether it is working, ready, blocked, or idle, plus its current screen.",
+      "usage": [
+        "runpane agents status (--pane <pane-id>|--panel <panel-id>) [--limit <count>] [--json] [--pane-dir <path>]"
+      ],
+      "wrappers": [
+        "npm"
+      ],
+      "toolsets": [
+        "core",
+        "agents"
+      ],
+      "jsonSchemas": [
+        "agentStatusResult"
+      ]
+    },
+    {
+      "name": "agents send",
+      "summary": "Send a follow-up message to an agent and confirm it was submitted.",
+      "usage": [
+        "runpane agents send (--pane <pane-id>|--panel <panel-id>) --text <message> --yes [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "wrappers": [
+        "npm"
+      ],
+      "toolsets": [
+        "core",
+        "agents"
+      ],
+      "jsonSchemas": [
+        "agentSendResult"
       ]
     },
     {
@@ -410,6 +991,9 @@ export const RUNPANE_CONTRACT = {
       "summary": "List durable named orchestration Sessions.",
       "usage": [
         "runpane sessions list [--json] [--pane-dir <path>]"
+      ],
+      "toolsets": [
+        "sessions"
       ],
       "jsonSchemas": [
         "sessionListResult"
@@ -422,6 +1006,10 @@ export const RUNPANE_CONTRACT = {
         "runpane sessions create --from-json <path|-> [--json] [--pane-dir <path>]"
       ],
       "mutates": true,
+      "additive": true,
+      "toolsets": [
+        "sessions"
+      ],
       "jsonSchemas": [
         "sessionResult"
       ]
@@ -431,6 +1019,9 @@ export const RUNPANE_CONTRACT = {
       "summary": "Read one durable named orchestration Session.",
       "usage": [
         "runpane sessions get --session <id|name> [--json] [--pane-dir <path>]"
+      ],
+      "toolsets": [
+        "sessions"
       ],
       "jsonSchemas": [
         "sessionResult"
@@ -443,6 +1034,10 @@ export const RUNPANE_CONTRACT = {
         "runpane sessions update --session <id|name> --from-json <path|-> [--json] [--pane-dir <path>]"
       ],
       "mutates": true,
+      "idempotent": true,
+      "toolsets": [
+        "sessions"
+      ],
       "jsonSchemas": [
         "sessionResult"
       ]
@@ -454,6 +1049,10 @@ export const RUNPANE_CONTRACT = {
         "runpane sessions set-agent --session <id|name> --agent <codex|claude|cursor> [--json] [--pane-dir <path>]"
       ],
       "mutates": true,
+      "idempotent": true,
+      "toolsets": [
+        "sessions"
+      ],
       "jsonSchemas": [
         "sessionResult"
       ]
@@ -465,6 +1064,11 @@ export const RUNPANE_CONTRACT = {
         "runpane sessions associate --session <id|name> --pane <pane-id> [--json] [--pane-dir <path>]"
       ],
       "mutates": true,
+      "additive": true,
+      "idempotent": true,
+      "toolsets": [
+        "sessions"
+      ],
       "jsonSchemas": [
         "sessionResult"
       ]
@@ -476,6 +1080,10 @@ export const RUNPANE_CONTRACT = {
         "runpane sessions detach --session <id|name> [--pane <pane-id>] [--json] [--pane-dir <path>]"
       ],
       "mutates": true,
+      "idempotent": true,
+      "toolsets": [
+        "sessions"
+      ],
       "jsonSchemas": [
         "sessionResult"
       ]
@@ -485,6 +1093,9 @@ export const RUNPANE_CONTRACT = {
       "summary": "Read a live status, activity, git, and pull request overview for a named Session.",
       "usage": [
         "runpane sessions overview --session <id|name> [--json] [--pane-dir <path>]"
+      ],
+      "toolsets": [
+        "sessions"
       ],
       "jsonSchemas": [
         "sessionOverviewResult"
@@ -788,6 +1399,36 @@ export const RUNPANE_CONTRACT = {
         "name": "--session",
         "value": "<id|name>",
         "description": "Named orchestration Session id or exact name."
+      },
+      {
+        "name": "--message",
+        "value": "<message>",
+        "description": "Commit message for panes commit."
+      },
+      {
+        "name": "--query",
+        "value": "<text>",
+        "description": "Search words for docs search."
+      },
+      {
+        "name": "--doc",
+        "value": "<path>",
+        "description": "Doc path for docs read."
+      },
+      {
+        "name": "--url",
+        "value": "<pane-url>",
+        "description": "pane:// link for links open."
+      },
+      {
+        "name": "--toolsets",
+        "value": "<name,...>",
+        "description": "MCP toolsets for runpane mcp."
+      },
+      {
+        "name": "--keys",
+        "value": "<name,...>",
+        "description": "Named keys for panels input, such as down,enter."
       }
     ],
     "localBoolean": [
@@ -814,6 +1455,10 @@ export const RUNPANE_CONTRACT = {
       {
         "name": "--no-pinned",
         "description": "Create the pane unpinned instead of the default pinned (the UI's favorite/pin star)."
+      },
+      {
+        "name": "--no-associate",
+        "description": "Inside a Session orchestrator, do not associate the created pane with that Session."
       },
       {
         "name": "--force",
@@ -862,6 +1507,10 @@ export const RUNPANE_CONTRACT = {
       {
         "name": "--report",
         "description": "Prepare a redacted doctor report; external filing still requires --yes."
+      },
+      {
+        "name": "--read-only",
+        "description": "Serve only read-only MCP tools."
       }
     ]
   },
@@ -878,6 +1527,7 @@ export const RUNPANE_CONTRACT = {
         "  runpane doctor --report --body-file <path|->",
         "  runpane daemon repair [--pane-dir <path>] [--yes] [--json]",
         "  runpane agent-context [--json]",
+        "  runpane mcp [--toolsets <name,...>] [--read-only]",
         "  runpane agents doctor --agent <codex|claude|cursor> [--repo <selector>] [--json]",
         "  runpane repos list [--json]",
         "  runpane repos add --path <path> [--name <name>]",
@@ -899,10 +1549,33 @@ export const RUNPANE_CONTRACT = {
         "  runpane panels list --pane <pane-id> [--json]",
         "  runpane panels output --panel <panel-id> [--limit <count>] [--json]",
         "  runpane panels screen --panel <panel-id> [--limit <count>] [--json]",
-        "  runpane panels input --panel <panel-id> (--text <text>|--input-file <path|->) --yes [--json]",
+        "  runpane panels input --panel <panel-id> (--text <text>|--keys <name,...>|--input-file <path|->) --yes [--json]",
         "  runpane panels submit --panel <panel-id> (--text <text>|--input-file <path|->) --yes [--json]",
         "  runpane panels submit-composer --panel <panel-id> [--strategy auto|codex-ctrl-enter|enter] --yes [--json]",
         "  runpane panels wait --panel <panel-id> [--for initialized|ready|idle|text] [--json]",
+        "  runpane panes git-status --pane <pane-id> [--json] [--pane-dir <path>]",
+        "  runpane panes commit --pane <pane-id> --message <message> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes push --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes pull --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes rebase-main --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes restore --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane links create --pane <pane-id> [--panel <panel-id>] [--json]",
+        "  runpane links open --url <pane-url> --yes [--json] [--pane-dir <path>]",
+        "  runpane docs search --query <text> [--limit <count>] [--json]",
+        "  runpane docs read --doc <path> [--json]",
+        "  runpane agents start --repo <selector> --name <name> (--agent <codex|claude|cursor>|--tool-command <command>) --prompt <task> [--base-branch <branch>] --yes [--json] [--pane-dir <path>]",
+        "  runpane agents status (--pane <pane-id>|--panel <panel-id>) [--limit <count>] [--json] [--pane-dir <path>]",
+        "  runpane agents send (--pane <pane-id>|--panel <panel-id>) --text <message> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes squash-rebase --pane <pane-id> --message <message> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes stash --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes stash-pop --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes soft-reset --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes fetch --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes run-script --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes stop-script --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes move --pane <pane-id> --folder <folder-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane folders list --repo <repo-id> [--json] [--pane-dir <path>]",
+        "  runpane folders create --repo <repo-id> --name <name> --yes [--json] [--pane-dir <path>]",
         "  runpane help [command]",
         "",
         "Quick start:",
@@ -1168,6 +1841,7 @@ export const RUNPANE_CONTRACT = {
         "  --focus                        Explicitly focus the created pane",
         "  --pinned                       Accepted for compatibility; creation already pins by default",
         "  --no-pinned                    Create unpinned instead of the default pinned (the UI's favorite/pin star)",
+        "  --no-associate                 Inside a Session orchestrator, do not associate the new pane with that Session",
         "  --pane-dir <path>              Connect to a specific Pane data directory",
         "  --json                         Print machine-readable output",
         "  --dry-run                      Validate and preview without creating panes",
@@ -1179,7 +1853,7 @@ export const RUNPANE_CONTRACT = {
         "",
         "Adopts an existing externally managed git worktree without creating, syncing, or deleting it.",
         "",
-        "Options: --resume <id> stages the agent resume command; --launch runs it immediately; --folder <name> groups the pane; --no-pinned opts out of pinning; --dry-run previews."
+        "Options: --resume <id> stages the agent resume command; --launch runs it immediately; --folder <name> groups the pane; --no-pinned opts out of pinning; --no-associate skips automatic Session association; --dry-run previews."
       ],
       "panes archive": [
         "Usage:",
@@ -1293,13 +1967,14 @@ export const RUNPANE_CONTRACT = {
       ],
       "panels input": [
         "Usage:",
-        "  runpane panels input --panel <panel-id> (--text <text>|--input-file <path|->) --yes [--json]",
+        "  runpane panels input --panel <panel-id> (--text <text>|--keys <name,...>|--input-file <path|->) --yes [--json]",
         "",
         "Sends exact input bytes to a terminal panel. Include a newline in the input when you mean Enter.",
         "",
         "Options:",
         "  --panel <panel-id>             Terminal panel id",
         "  --text <text>                  Text bytes to send",
+        "  --keys <name,...>              Keys to press: enter, escape, tab, up, down, ctrl-c, ...",
         "  --input-file <path|->          Read input from a file or stdin",
         "  --pane-dir <path>              Connect to a specific Pane data directory",
         "  --json                         Print machine-readable output",
@@ -1321,6 +1996,21 @@ export const RUNPANE_CONTRACT = {
         "  runpane agent-context --json",
         "  runpane agent-context --command \"panes create\"",
         "  runpane agent-context --command \"panes create\" --json"
+      ],
+      "mcp": [
+        "Usage:",
+        "  runpane mcp [--toolsets <name,...>] [--read-only]",
+        "",
+        "Runs the Pane MCP server over stdio. Each runpane command with a JSON result becomes a tool that returns the same JSON as `runpane <command> --json`. Commands that need --yes take `yes: true` instead.",
+        "Pane registers this server with Claude Code, Codex, and Cursor automatically (Settings > AI & Agents). To register it by hand:",
+        "  claude mcp add --scope user pane -- npx --yes runpane@latest mcp",
+        "  codex mcp add pane -- npx --yes runpane@latest mcp",
+        "",
+        "The MCP server ships in the npm package and inside the Pane app. The Python package does not include it.",
+        "",
+        "Options:",
+        "  --toolsets <name,...>          core (default), all, read, repos, panes, panels, agents, sessions, git, docs, links, admin",
+        "  --read-only                    Serve only read-only tools"
       ],
       "agents doctor": [
         "Usage:",
@@ -1497,6 +2187,292 @@ export const RUNPANE_CONTRACT = {
         "  --agent <codex|claude|cursor>  Agent terminal to use.",
         "  --json                       Print JSON output."
       ],
+      "panes git-status": [
+        "Usage:",
+        "  runpane panes git-status --pane <pane-id> [--json] [--pane-dir <path>]",
+        "",
+        "Read the git status of a Pane worktree: uncommitted, unpushed, and behind-main counts.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes commit": [
+        "Usage:",
+        "  runpane panes commit --pane <pane-id> --message <message> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Stage all changes in a Pane worktree and commit them.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --message <message>             Commit message; the first line is the title.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes push": [
+        "Usage:",
+        "  runpane panes push --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Push a Pane branch to its remote.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes pull": [
+        "Usage:",
+        "  runpane panes pull --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Pull the remote branch into a Pane worktree.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes rebase-main": [
+        "Usage:",
+        "  runpane panes rebase-main --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Rebase a Pane branch onto the latest main branch.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes restore": [
+        "Usage:",
+        "  runpane panes restore --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Restore an archived Pane, recreating its worktree.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes squash-rebase": [
+        "Usage:",
+        "  runpane panes squash-rebase --pane <pane-id> --message <message> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Squash a Pane branch into one commit and rebase it onto main.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --message <message>             Commit message; the first line is the title.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes stash": [
+        "Usage:",
+        "  runpane panes stash --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Stash uncommitted changes in a Pane worktree.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes stash-pop": [
+        "Usage:",
+        "  runpane panes stash-pop --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Apply and drop the latest stash in a Pane worktree.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes soft-reset": [
+        "Usage:",
+        "  runpane panes soft-reset --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Undo the last commit in a Pane, keeping its changes staged.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes fetch": [
+        "Usage:",
+        "  runpane panes fetch --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Fetch the remote for a Pane worktree.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes run-script": [
+        "Usage:",
+        "  runpane panes run-script --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Run the repository's run script in a Pane.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes stop-script": [
+        "Usage:",
+        "  runpane panes stop-script --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Stop the run script running in a Pane.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes move": [
+        "Usage:",
+        "  runpane panes move --pane <pane-id> --folder <folder-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Move a Pane into a sidebar folder.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --folder <folder-id>            Folder id from folders list.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "folders list": [
+        "Usage:",
+        "  runpane folders list --repo <repo-id> [--json] [--pane-dir <path>]",
+        "",
+        "List the sidebar folders of a repository.",
+        "",
+        "Options:",
+        "  --repo <repo-id>                Numeric repository id from repos list.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "folders create": [
+        "Usage:",
+        "  runpane folders create --repo <repo-id> --name <name> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Create a sidebar folder in a repository.",
+        "",
+        "Options:",
+        "  --repo <repo-id>                Numeric repository id from repos list.",
+        "  --name <name>                   Folder name.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "links create": [
+        "Usage:",
+        "  runpane links create --pane <pane-id> [--panel <panel-id>] [--json]",
+        "  runpane links create --repo <repo-id> [--json]",
+        "  runpane links create --session <session-id> [--json]",
+        "",
+        "Build a pane:// link that opens a Pane, panel, repository, or Session in the Pane app.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane to open.",
+        "  --panel <panel-id>              Panel inside the Pane to select.",
+        "  --repo <repo-id>                Repository id from repos list.",
+        "  --session <session-id>          Session id or name from sessions list.",
+        "  --json                          Print machine-readable output."
+      ],
+      "links open": [
+        "Usage:",
+        "  runpane links open --url <pane-url> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Open a pane:// link in the running Pane app.",
+        "",
+        "Options:",
+        "  --url <pane-url>                A pane://open link from links create.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "docs search": [
+        "Usage:",
+        "  runpane docs search --query <text> [--limit <count>] [--json]",
+        "",
+        "Search Pane's docs, runpane help, and the Pane Chat skills.",
+        "",
+        "Options:",
+        "  --query <text>                  Words to search for.",
+        "  --limit <count>                 Maximum results; defaults to 5.",
+        "  --json                          Print machine-readable output."
+      ],
+      "docs read": [
+        "Usage:",
+        "  runpane docs read --doc <path> [--json]",
+        "",
+        "Read one Pane doc, help topic, or skill in full.",
+        "",
+        "Options:",
+        "  --doc <path>                    Path from docs search, such as docs/PANE_MCP.md.",
+        "  --json                          Print machine-readable output."
+      ],
+      "agents start": [
+        "Usage:",
+        "  runpane agents start --repo <selector> --name <name> (--agent <codex|claude|cursor>|--tool-command <command>) --prompt <task> [--base-branch <branch>] --yes [--json] [--pane-dir <path>]",
+        "",
+        "Start an agent on a task: create a Pane in a repository, launch the agent with the prompt, and wait until it is ready.",
+        "",
+        "Options:",
+        "  --repo <selector>               Repository: active, id, exact path, or saved name.",
+        "  --name <name>                   Name for the new Pane.",
+        "  --agent <codex|claude|cursor>   Built-in agent to launch.",
+        "  --tool-command <command>        Custom terminal command instead of a built-in agent.",
+        "  --prompt <task>                 The task to send once the agent is ready.",
+        "  --base-branch <branch>          Branch to start the worktree from.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "agents status": [
+        "Usage:",
+        "  runpane agents status (--pane <pane-id>|--panel <panel-id>) [--limit <count>] [--json] [--pane-dir <path>]",
+        "",
+        "Check on an agent: whether it is working, ready, blocked, or idle, plus its current screen.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id; its agent panel is used.",
+        "  --panel <panel-id>              Panel id.",
+        "  --limit <count>                 Screen lines to return; defaults to 40.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "agents send": [
+        "Usage:",
+        "  runpane agents send (--pane <pane-id>|--panel <panel-id>) --text <message> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Send a follow-up message to an agent and confirm it was submitted.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id; its agent panel is used.",
+        "  --panel <panel-id>              Panel id.",
+        "  --text <message>                The message to submit.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
       "sessions": [
         "Usage:",
         "  runpane sessions <list|create|get|update|set-agent|associate|detach|overview> [options]",
@@ -1516,6 +2492,7 @@ export const RUNPANE_CONTRACT = {
         "  runpane doctor --report --body-file <path|->",
         "  runpane daemon repair [--pane-dir <path>] [--yes] [--json]",
         "  runpane agent-context [--json]",
+        "  runpane mcp [--toolsets <name,...>] [--read-only]",
         "  runpane agents doctor --agent <codex|claude|cursor> [--repo <selector>] [--json]",
         "  runpane repos list [--json]",
         "  runpane repos add --path <path> [--name <name>]",
@@ -1529,10 +2506,33 @@ export const RUNPANE_CONTRACT = {
         "  runpane panels list --pane <pane-id> [--json]",
         "  runpane panels output --panel <panel-id> [--limit <count>] [--json]",
         "  runpane panels screen --panel <panel-id> [--limit <count>] [--json]",
-        "  runpane panels input --panel <panel-id> (--text <text>|--input-file <path|->) --yes [--json]",
+        "  runpane panels input --panel <panel-id> (--text <text>|--keys <name,...>|--input-file <path|->) --yes [--json]",
         "  runpane panels submit --panel <panel-id> (--text <text>|--input-file <path|->) --yes [--json]",
         "  runpane panels submit-composer --panel <panel-id> [--strategy auto|codex-ctrl-enter|enter] --yes [--json]",
         "  runpane panels wait --panel <panel-id> [--for initialized|ready|idle|text] [--json]",
+        "  runpane panes git-status --pane <pane-id> [--json] [--pane-dir <path>]",
+        "  runpane panes commit --pane <pane-id> --message <message> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes push --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes pull --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes rebase-main --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes restore --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane links create --pane <pane-id> [--panel <panel-id>] [--json]",
+        "  runpane links open --url <pane-url> --yes [--json] [--pane-dir <path>]",
+        "  runpane docs search --query <text> [--limit <count>] [--json]",
+        "  runpane docs read --doc <path> [--json]",
+        "  runpane agents start --repo <selector> --name <name> (--agent <codex|claude|cursor>|--tool-command <command>) --prompt <task> [--base-branch <branch>] --yes [--json] [--pane-dir <path>]",
+        "  runpane agents status (--pane <pane-id>|--panel <panel-id>) [--limit <count>] [--json] [--pane-dir <path>]",
+        "  runpane agents send (--pane <pane-id>|--panel <panel-id>) --text <message> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes squash-rebase --pane <pane-id> --message <message> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes stash --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes stash-pop --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes soft-reset --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes fetch --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes run-script --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes stop-script --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane panes move --pane <pane-id> --folder <folder-id> --yes [--json] [--pane-dir <path>]",
+        "  runpane folders list --repo <repo-id> [--json] [--pane-dir <path>]",
+        "  runpane folders create --repo <repo-id> --name <name> --yes [--json] [--pane-dir <path>]",
         "  runpane help [command]",
         "",
         "Quick start:",
@@ -1787,6 +2787,7 @@ export const RUNPANE_CONTRACT = {
         "  --focus                        Explicitly focus the created pane",
         "  --pinned                       Accepted for compatibility; creation already pins by default",
         "  --no-pinned                    Create unpinned instead of the default pinned (the UI's favorite/pin star)",
+        "  --no-associate                 Inside a Session orchestrator, do not associate the new pane with that Session",
         "  --pane-dir <path>              Connect to a specific Pane data directory",
         "  --json                         Print machine-readable output",
         "  --dry-run                      Validate and preview without creating panes",
@@ -1798,7 +2799,7 @@ export const RUNPANE_CONTRACT = {
         "",
         "Adopts an existing externally managed git worktree without creating, syncing, or deleting it.",
         "",
-        "Options: --resume <id> stages the agent resume command; --launch runs it immediately; --folder <name> groups the pane; --no-pinned opts out of pinning; --dry-run previews."
+        "Options: --resume <id> stages the agent resume command; --launch runs it immediately; --folder <name> groups the pane; --no-pinned opts out of pinning; --no-associate skips automatic Session association; --dry-run previews."
       ],
       "panes archive": [
         "Usage:",
@@ -1912,13 +2913,14 @@ export const RUNPANE_CONTRACT = {
       ],
       "panels input": [
         "Usage:",
-        "  runpane panels input --panel <panel-id> (--text <text>|--input-file <path|->) --yes [--json]",
+        "  runpane panels input --panel <panel-id> (--text <text>|--keys <name,...>|--input-file <path|->) --yes [--json]",
         "",
         "Sends exact input bytes to a terminal panel. Include a newline in the input when you mean Enter.",
         "",
         "Options:",
         "  --panel <panel-id>",
         "  --text <text>",
+        "  --keys <name,...>              Keys to press: enter, escape, tab, up, down, ctrl-c, ...",
         "  --input-file <path|->",
         "  --pane-dir <path>",
         "  --json",
@@ -1940,6 +2942,13 @@ export const RUNPANE_CONTRACT = {
         "  runpane agent-context --json",
         "  runpane agent-context --command \"panes create\"",
         "  runpane agent-context --command \"panes create\" --json"
+      ],
+      "mcp": [
+        "Usage:",
+        "  runpane mcp",
+        "",
+        "The Pane MCP server ships in the npm package and inside the Pane app, not in the Python package.",
+        "Run it with Node instead: npx --yes runpane@latest mcp"
       ],
       "agents doctor": [
         "Usage:",
@@ -2116,6 +3125,262 @@ export const RUNPANE_CONTRACT = {
         "  --agent <codex|claude|cursor>  Agent terminal to use.",
         "  --json                       Print JSON output."
       ],
+      "panes git-status": [
+        "Usage:",
+        "  runpane panes git-status --pane <pane-id> [--json] [--pane-dir <path>]",
+        "",
+        "Read the git status of a Pane worktree: uncommitted, unpushed, and behind-main counts.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes commit": [
+        "Usage:",
+        "  runpane panes commit --pane <pane-id> --message <message> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Stage all changes in a Pane worktree and commit them.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --message <message>             Commit message; the first line is the title.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes push": [
+        "Usage:",
+        "  runpane panes push --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Push a Pane branch to its remote.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes pull": [
+        "Usage:",
+        "  runpane panes pull --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Pull the remote branch into a Pane worktree.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes rebase-main": [
+        "Usage:",
+        "  runpane panes rebase-main --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Rebase a Pane branch onto the latest main branch.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes restore": [
+        "Usage:",
+        "  runpane panes restore --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Restore an archived Pane, recreating its worktree.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes squash-rebase": [
+        "Usage:",
+        "  runpane panes squash-rebase --pane <pane-id> --message <message> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Squash a Pane branch into one commit and rebase it onto main.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --message <message>             Commit message; the first line is the title.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes stash": [
+        "Usage:",
+        "  runpane panes stash --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Stash uncommitted changes in a Pane worktree.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes stash-pop": [
+        "Usage:",
+        "  runpane panes stash-pop --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Apply and drop the latest stash in a Pane worktree.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes soft-reset": [
+        "Usage:",
+        "  runpane panes soft-reset --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Undo the last commit in a Pane, keeping its changes staged.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes fetch": [
+        "Usage:",
+        "  runpane panes fetch --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Fetch the remote for a Pane worktree.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes run-script": [
+        "Usage:",
+        "  runpane panes run-script --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Run the repository's run script in a Pane.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes stop-script": [
+        "Usage:",
+        "  runpane panes stop-script --pane <pane-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Stop the run script running in a Pane.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "panes move": [
+        "Usage:",
+        "  runpane panes move --pane <pane-id> --folder <folder-id> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Move a Pane into a sidebar folder.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane id from panes list or agents start.",
+        "  --folder <folder-id>            Folder id from folders list.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "folders list": [
+        "Usage:",
+        "  runpane folders list --repo <repo-id> [--json] [--pane-dir <path>]",
+        "",
+        "List the sidebar folders of a repository.",
+        "",
+        "Options:",
+        "  --repo <repo-id>                Numeric repository id from repos list.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "folders create": [
+        "Usage:",
+        "  runpane folders create --repo <repo-id> --name <name> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Create a sidebar folder in a repository.",
+        "",
+        "Options:",
+        "  --repo <repo-id>                Numeric repository id from repos list.",
+        "  --name <name>                   Folder name.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "links create": [
+        "Usage:",
+        "  runpane links create --pane <pane-id> [--panel <panel-id>] [--json]",
+        "  runpane links create --repo <repo-id> [--json]",
+        "  runpane links create --session <session-id> [--json]",
+        "",
+        "Build a pane:// link that opens a Pane, panel, repository, or Session in the Pane app.",
+        "",
+        "Options:",
+        "  --pane <pane-id>                Pane to open.",
+        "  --panel <panel-id>              Panel inside the Pane to select.",
+        "  --repo <repo-id>                Repository id from repos list.",
+        "  --session <session-id>          Session id or name from sessions list.",
+        "  --json                          Print machine-readable output."
+      ],
+      "links open": [
+        "Usage:",
+        "  runpane links open --url <pane-url> --yes [--json] [--pane-dir <path>]",
+        "",
+        "Open a pane:// link in the running Pane app.",
+        "",
+        "Options:",
+        "  --url <pane-url>                A pane://open link from links create.",
+        "  --yes                           Confirm this change; required in non-interactive shells.",
+        "  --json                          Print machine-readable output.",
+        "  --pane-dir <path>               Connect to a specific Pane data directory."
+      ],
+      "docs search": [
+        "Usage:",
+        "  runpane docs search --query <text> [--limit <count>] [--json]",
+        "",
+        "`runpane docs search` ships in the npm package and the Pane app, not in the Python package.",
+        "Run it with Node instead: npx --yes runpane@latest docs search"
+      ],
+      "docs read": [
+        "Usage:",
+        "  runpane docs read --doc <path> [--json]",
+        "",
+        "`runpane docs read` ships in the npm package and the Pane app, not in the Python package.",
+        "Run it with Node instead: npx --yes runpane@latest docs read"
+      ],
+      "agents start": [
+        "Usage:",
+        "  runpane agents start --repo <selector> --name <name> (--agent <codex|claude|cursor>|--tool-command <command>) --prompt <task> [--base-branch <branch>] --yes [--json] [--pane-dir <path>]",
+        "",
+        "`runpane agents start` ships in the npm package and the Pane app, not in the Python package.",
+        "Run it with Node instead: npx --yes runpane@latest agents start"
+      ],
+      "agents status": [
+        "Usage:",
+        "  runpane agents status (--pane <pane-id>|--panel <panel-id>) [--limit <count>] [--json] [--pane-dir <path>]",
+        "",
+        "`runpane agents status` ships in the npm package and the Pane app, not in the Python package.",
+        "Run it with Node instead: npx --yes runpane@latest agents status"
+      ],
+      "agents send": [
+        "Usage:",
+        "  runpane agents send (--pane <pane-id>|--panel <panel-id>) --text <message> --yes [--json] [--pane-dir <path>]",
+        "",
+        "`runpane agents send` ships in the npm package and the Pane app, not in the Python package.",
+        "Run it with Node instead: npx --yes runpane@latest agents send"
+      ],
       "sessions": [
         "Usage:",
         "  runpane sessions <list|create|get|update|set-agent|associate|detach|overview> [options]",
@@ -2190,6 +3455,7 @@ export const RUNPANE_CONTRACT = {
       "runpane daemon repair --pane-dir ~/.pane_remote --yes --json",
       "runpane agent-context",
       "runpane agent-context --command \"panes create\" --json",
+      "runpane mcp",
       "runpane repos list --json",
       "runpane repos add --path /path/to/repo --name Pane --yes --json",
       "runpane panes list --repo active --json",
@@ -2212,11 +3478,17 @@ export const RUNPANE_CONTRACT = {
       "runpane sessions associate --session <id|name> --pane <pane-id> [--json] [--pane-dir <path>]",
       "runpane sessions detach --session <id|name> [--pane <pane-id>] [--json] [--pane-dir <path>]",
       "runpane sessions overview --session <id|name> [--json] [--pane-dir <path>]",
+      "runpane agents start --repo active --name fix-login --agent claude --prompt \"Fix the login redirect\" --yes --json",
+      "runpane agents status --pane <pane-id> --json",
+      "runpane agents send --pane <pane-id> --text \"Also add a test\" --yes --json",
+      "runpane docs search --query \"archive a pane\" --json",
+      "runpane links create --pane <pane-id> --json",
+      "runpane panes git-status --pane <pane-id> --json",
       "runpane help",
       "runpane <command> --help"
     ],
     "commandDescriptions": [
-      "`runpane` with no arguments and `runpane setup` open an interactive wizard when stdin and stdout are TTYs. In non-interactive shells or CI, both forms must print help, common commands, and agent discovery hints, then exit successfully instead of waiting for input.",
+      "`runpane` with no arguments and `runpane setup` open an interactive wizard when stdin and stdout are TTYs. The remote-host wizard asks only for a name, then runs interactive Tailscale setup with automatic port selection; explicit install daemon flags remain available for SSH and manual URLs. In non-interactive shells or CI, both forms must print help, common commands, and agent discovery hints, then exit successfully instead of waiting for input.",
       "`runpane install` is an alias for `runpane install client`.",
       "`runpane install client` downloads the selected Pane desktop artifact and installs, opens, or launches it for the current platform.",
       "`runpane install daemon` downloads or installs Pane, resolves a stable Pane executable path, and spawns `<pane executable> --remote-setup <forwarded remote setup args>`.",
@@ -2227,11 +3499,12 @@ export const RUNPANE_CONTRACT = {
       "`runpane daemon repair` rewrites and restarts only the managed remote-daemon launcher/service. It never creates pairing credentials, changes tunnels, or downloads Pane; doctor only recommends it and never runs it automatically.",
       "`runpane agent-context` prints a brief, token-efficient command schema for coding agents without connecting to the Pane daemon.",
       "`runpane agent-context --command \"panes create\"` prints the detailed definition for one command. Add `--json` for machine-readable output.",
+      "`runpane mcp` runs a stdio MCP server whose tools are generated from this contract: every command with result `jsonSchemas` becomes a tool that runs `runpane <command> --json` and returns its output. Only the npm package and the Pane app include it; the Python wrapper prints how to run it with Node and exits non-zero.",
       "`runpane repos list` connects to the running local Pane daemon and prints saved repository records.",
       "`runpane repos add` registers an existing git repository with the running local Pane daemon. It does not create directories or initialize git repositories by default.",
       "`runpane panes list` lists Pane sessions, optionally scoped to one saved repository.",
       "`runpane panes cost` reports estimated token costs per Pane for the last 30 days, including per-model breakdowns and cache efficiency; unscoped output includes an Unattributed bucket that reconciles against workspace totals.",
-      "`runpane panes create` connects to the running local Pane daemon, resolves the requested saved base repository, creates user-visible Pane sessions backed by Pane-managed worktrees/branches, opens terminal-backed tool tabs, and optionally sends initial input to the started tool. Built-in agent panes and `--source agent` default to background/no-focus unless `--focus` is passed. New Panes are pinned into the UI's favorite/pin set by default, except when the CLI runs inside a Session orchestrator (`PANE_ORCHESTRATION_SESSION_ID`), where child worktrees default to unpinned. Explicit `--pinned` / `--no-pinned` override creation defaults. First Session association clears an existing pin; manual pins applied afterward are preserved. Panes created interactively in the Pane UI are unaffected.",
+      "`runpane panes create` connects to the running local Pane daemon, resolves the requested saved base repository, creates user-visible Pane sessions backed by Pane-managed worktrees/branches, opens terminal-backed tool tabs, and optionally sends initial input to the started tool. Built-in agent panes and `--source agent` default to background/no-focus unless `--focus` is passed. New Panes are pinned into the UI's favorite/pin set by default, except when the CLI runs inside a Session orchestrator (`PANE_ORCHESTRATION_SESSION_ID`), where child worktrees default to unpinned. Explicit `--pinned` / `--no-pinned` override creation defaults. First Session association clears an existing pin; manual pins applied afterward are preserved. Panes created interactively in the Pane UI are unaffected. Inside a Session orchestrator (`PANE_ORCHESTRATION_SESSION_ID` set), new Panes are associated with that Session automatically; `--no-associate` opts out. A failed association is reported on the item and never undoes the Pane.",
       "For `panes create --wait-ready`, `initialInput.verifiedSubmitted: true` is reported only after argument attachment or composer-clear plus activity evidence. Routing input does not by itself verify submission.",
       "`runpane panes archive` refreshes the configured upstream, reports exact unpushed commit evidence, and refuses unsafe archive operations unless `--force` is used. Add `--dry-run` to inspect the same evidence without archiving. Successful archives wait for worktree removal and report `worktreeCleanup`.",
       "`runpane panes rename` trims and updates a Pane's display name without changing its worktree, branch, panels, or focus, and returns the updated pane summary.",
@@ -2250,7 +3523,11 @@ export const RUNPANE_CONTRACT = {
       "`sessions set-agent` switch the durable terminal agent for a named Session.",
       "`sessions associate` associate a user-visible Pane with a named Session.",
       "`sessions detach` detach a Pane from a named Session.",
-      "`sessions overview` read a live status, activity, git, and pull request overview for a named Session."
+      "`sessions overview` read a live status, activity, git, and pull request overview for a named Session.",
+      "`runpane agents start|status|send` finish the three common agent jobs in one call each: start an agent on a task in a repository, check on it, and send it a follow-up.",
+      "Commands with a contract `daemonAction` (the `panes` git, script, restore, and move commands, `folders list|create`, and `links open`) call the same Pane daemon channel as the matching button in the app and print `{ ok, data, error }`. Destructive ones add a pane:// `link` to review the Pane.",
+      "`runpane links create` builds `pane://open?...` links; opening one in Pane selects what it names and never changes Pane state.",
+      "`runpane docs search|read` search and read Pane docs, help, and installed Pane Chat skills offline. They ship in the npm package and the Pane app only."
     ],
     "wrapperFlagNote": "The top-level `runpane --version` form prints the wrapper version. The install subcommand form `runpane install --version vX.Y.Z` selects a Pane release.",
     "localControlFlagNote": "`runpane doctor --json`, `runpane repos list`, `runpane panes ...`, and `runpane panels ...` commands use or describe the local framed daemon socket/pipe for a running Pane app. `--pane-dir` points the wrapper at a non-default Pane data directory, such as `PANE_DIR=~/.pane_test` in development. `runpane agent-context` is local/offline and can be used before Pane is running. In a Pane repository checkout, if `runpane` is not on PATH, use the built local wrapper with Node 22, for example `PATH=/opt/homebrew/opt/node@22/bin:$PATH node packages/runpane/dist/cli.js doctor --json`. From WSL, if the user runs Windows Pane, call the Windows wrapper through `powershell.exe -NoProfile -Command 'Set-Location $env:TEMP; runpane ...'` so the command can reach the Windows named-pipe daemon and avoid UNC cwd issues.",
@@ -2459,6 +3736,7 @@ export const RUNPANE_CONTRACT = {
         "--source",
         "agent",
         "--no-pinned",
+        "--no-associate",
         "--dry-run",
         "--yes",
         "--json"
@@ -2664,6 +3942,120 @@ export const RUNPANE_CONTRACT = {
         "demo",
         "--from-json",
         "-"
+      ],
+      [
+        "panels",
+        "submit",
+        "--panel=panel-1",
+        "--text=- [ ] item",
+        "--yes",
+        "--json"
+      ],
+      [
+        "panes",
+        "commit",
+        "--pane",
+        "pane-1",
+        "--message",
+        "fix: title\n\nbody",
+        "--yes",
+        "--json"
+      ],
+      [
+        "links",
+        "create",
+        "--pane",
+        "pane-1",
+        "--panel",
+        "panel-1",
+        "--json"
+      ],
+      [
+        "links",
+        "open",
+        "--url=pane://open?pane=pane-1",
+        "--yes"
+      ],
+      [
+        "mcp",
+        "--toolsets",
+        "core,git",
+        "--read-only"
+      ],
+      [
+        "docs",
+        "search",
+        "--query",
+        "archive a pane",
+        "--limit",
+        "3"
+      ],
+      [
+        "docs",
+        "read",
+        "--doc",
+        "docs/PANE_MCP.md"
+      ],
+      [
+        "agents",
+        "start",
+        "--repo",
+        "active",
+        "--name",
+        "fix-login",
+        "--agent",
+        "claude",
+        "--prompt",
+        "Fix the login redirect",
+        "--yes",
+        "--json"
+      ],
+      [
+        "agents",
+        "send",
+        "--pane",
+        "pane-1",
+        "--text=- [ ] item",
+        "--yes"
+      ],
+      [
+        "panels",
+        "input",
+        "--panel",
+        "panel-1",
+        "--keys",
+        "down,enter",
+        "--yes",
+        "--json"
+      ],
+      [
+        "panes",
+        "squash-rebase",
+        "--pane",
+        "pane-1",
+        "--message",
+        "feat: land it",
+        "--yes",
+        "--json"
+      ],
+      [
+        "folders",
+        "create",
+        "--repo",
+        "3",
+        "--name",
+        "Reviews",
+        "--yes"
+      ],
+      [
+        "panes",
+        "move",
+        "--pane",
+        "pane-1",
+        "--folder",
+        "folder-9",
+        "--yes",
+        "--json"
       ]
     ],
     "topLevelHelpIncludes": [
@@ -3378,6 +4770,10 @@ export const RUNPANE_CONTRACT = {
             "user",
             "agent"
           ]
+        },
+        "associateSession": {
+          "type": "string",
+          "description": "Session id to associate each created Pane with; the CLI sets it from PANE_ORCHESTRATION_SESSION_ID unless --no-associate."
         }
       },
       "additionalProperties": false
@@ -3654,6 +5050,25 @@ export const RUNPANE_CONTRACT = {
                           "observed",
                           "unverifiable"
                         ]
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "association": {
+                    "type": "object",
+                    "required": [
+                      "sessionId",
+                      "ok"
+                    ],
+                    "properties": {
+                      "sessionId": {
+                        "type": "string"
+                      },
+                      "ok": {
+                        "type": "boolean"
+                      },
+                      "error": {
+                        "type": "string"
                       }
                     },
                     "additionalProperties": false
@@ -5861,6 +7276,270 @@ export const RUNPANE_CONTRACT = {
         }
       },
       "additionalProperties": false
+    },
+    "daemonActionResult": {
+      "type": "object",
+      "required": [
+        "ok"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "data": {},
+        "error": {
+          "type": "object",
+          "required": [
+            "message"
+          ],
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "link": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "linkCreateResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "url",
+        "target"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "url": {
+          "type": "string"
+        },
+        "target": {
+          "type": "object",
+          "required": [
+            "kind",
+            "id"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "pane",
+                "repo",
+                "session"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "panelId": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "docsSearchResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "query",
+        "results"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "query": {
+          "type": "string"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "title",
+              "kind",
+              "excerpt"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "doc",
+                  "skill",
+                  "help",
+                  "command"
+                ]
+              },
+              "excerpt": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "docsReadResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "path",
+        "title",
+        "kind",
+        "text"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "path": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "doc",
+            "skill",
+            "help",
+            "command"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "agentTaskResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "paneId",
+        "panelId",
+        "link",
+        "ready"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "paneId": {
+          "type": "string"
+        },
+        "panelId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "worktreePath": {
+          "type": "string"
+        },
+        "link": {
+          "type": "string"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "promptDelivered": {
+          "type": "boolean"
+        },
+        "next": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "agentStatusResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "paneId",
+        "panelId",
+        "status",
+        "screen"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "paneId": {
+          "type": "string"
+        },
+        "panelId": {
+          "type": "string"
+        },
+        "paneName": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "working",
+            "ready",
+            "blocked",
+            "idle",
+            "exited",
+            "unknown"
+          ]
+        },
+        "screen": {
+          "type": "string"
+        },
+        "hasUndeliveredText": {
+          "type": "boolean"
+        },
+        "link": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "agentSendResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "paneId",
+        "panelId",
+        "delivered"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "paneId": {
+          "type": "string"
+        },
+        "panelId": {
+          "type": "string"
+        },
+        "delivered": {
+          "type": "boolean"
+        },
+        "blocked": {
+          "type": "string"
+        },
+        "next": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "agentContext": {
@@ -5971,6 +7650,7 @@ export const RUNPANE_CONTRACT = {
             "--source <user|agent>",
             "--pinned",
             "--no-pinned",
+            "--no-associate",
             "--no-focus",
             "--focus",
             "--wait-ready",
@@ -6414,6 +8094,34 @@ export const RUNPANE_CONTRACT = {
           "`--command` accepts canonical spaced names and common copied forms, including `panes.create` and `runpane panes create`."
         ]
       },
+      "mcp": {
+        "name": "mcp",
+        "summary": "Run the Pane MCP server over stdio so coding agents can call runpane commands as tools.",
+        "details": "Use this to register Pane with an MCP client. Pane registers it with Claude Code, Codex, and Cursor automatically; each tool mirrors one runpane command and returns its --json result.",
+        "requiresPaneDaemon": false,
+        "mutates": false,
+        "arguments": [
+          {
+            "name": "--toolsets",
+            "value": "<name,...>",
+            "required": false,
+            "description": "Comma-separated toolsets to serve: core (default), all, read, repos, panes, panels, agents, sessions, git, docs, links, admin."
+          },
+          {
+            "name": "--read-only",
+            "required": false,
+            "description": "Serve only read-only tools."
+          }
+        ],
+        "examples": [
+          "claude mcp add --scope user pane -- npx --yes runpane@latest mcp",
+          "codex mcp add pane -- npx --yes runpane@latest mcp"
+        ],
+        "notes": [
+          "Only the npm package and the Pane app include the MCP server; the Python package prints how to run it with Node.",
+          "Commands that need --yes in the CLI take `yes: true` as a tool input."
+        ]
+      },
       "repos list": {
         "name": "repos list",
         "summary": "List repositories saved in the running Pane app.",
@@ -6653,6 +8361,11 @@ export const RUNPANE_CONTRACT = {
             "description": "Create the pane unpinned instead of the default pinned (the Pane UI's favorite/pin star). Pinning never implies focus."
           },
           {
+            "name": "--no-associate",
+            "required": false,
+            "description": "Inside a Session orchestrator, do not associate the created pane with that Session (associated automatically by default)."
+          },
+          {
             "name": "--yes",
             "required": false,
             "description": "Skip confirmation for mutating commands."
@@ -6699,7 +8412,7 @@ export const RUNPANE_CONTRACT = {
           "`panes create` is for user-visible Pane orchestration, not the agent's default private delegation mechanism.",
           "Register the saved base repository once. Pane creates and owns the worktree/branch for each new Pane.",
           "Use `panels create` instead when a reviewer/helper should share an existing Pane's worktree.",
-          "Agent-created Panes should pass `--source agent --no-focus --wait-ready --yes --json` unless the user explicitly wants focus moved. `panes create` pins the new Pane by default, so a follow-up `panes pin` call is unnecessary; pass `--no-pinned` for throwaway shells or bulk imports. `--pinned` is still accepted and is now a no-op.",
+          "Agent-created Panes should pass `--source agent --no-focus --wait-ready --yes --json` unless the user explicitly wants focus moved. `panes create` pins the new Pane by default, so a follow-up `panes pin` call is unnecessary; pass `--no-pinned` for throwaway shells or bulk imports. `--pinned` is still accepted and is now a no-op. Inside a Session orchestrator (`PANE_ORCHESTRATION_SESSION_ID` set), new Panes are associated with that Session automatically; `--no-associate` opts out. A failed association is reported on the item and never undoes the Pane.",
           "The built-in agent templates come from the runpane contract; custom terminal commands can pass agent-specific flags when requested by the user.",
           "Use --initial-input-file for multi-line prompts or shell-sensitive initial input.",
           "With --wait-ready, verifiedSubmitted is earned from delivery evidence; routing initial input alone does not imply verified submission.",
@@ -6765,6 +8478,11 @@ export const RUNPANE_CONTRACT = {
             "name": "--no-pinned",
             "required": false,
             "description": "Do not pin the adopted pane."
+          },
+          {
+            "name": "--no-associate",
+            "required": false,
+            "description": "Inside a Session orchestrator, do not associate the adopted pane with that Session (associated automatically by default)."
           },
           {
             "name": "--dry-run",
@@ -6847,7 +8565,8 @@ export const RUNPANE_CONTRACT = {
           "Inspect safetyCheck.unpushedCommitDetails for exact commit IDs and subjects; upstreamRefreshed confirms the tracking ref was refreshed first.",
           "A --dry-run result sets dryRun:true and wouldArchive without deleting the Pane or its worktree.",
           "A successful archive waits for the Pane-managed worktree to be removed before returning; check worktreeCleanup in the result for the final outcome.",
-          "Archiving a main-repo Pane (no Pane-managed worktree) always succeeds immediately since nothing is deleted from disk."
+          "Archiving a main-repo Pane (no Pane-managed worktree) always succeeds immediately since nothing is deleted from disk.",
+          "Undo an archive with `runpane panes restore --pane <pane-id> --yes`, which recreates the worktree. `runpane links create --pane <pane-id>` gives the user a link to review the Pane first."
         ]
       },
       "panes pin": {
@@ -7131,6 +8850,12 @@ export const RUNPANE_CONTRACT = {
             "description": "Text bytes to send."
           },
           {
+            "name": "--keys",
+            "value": "<name,...>",
+            "required": false,
+            "description": "Comma-separated key names to press in order: enter, escape, tab, backspace, space, up, down, left, right, ctrl-c, ctrl-d, or any single character."
+          },
+          {
             "name": "--input-file",
             "value": "<path|->",
             "required": false,
@@ -7156,13 +8881,15 @@ export const RUNPANE_CONTRACT = {
         "examples": [
           "printf 'Continue\\n' | runpane panels input --panel <panel-id> --input-file - --yes",
           "printf '\\003' | runpane panels input --panel <panel-id> --input-file - --yes",
-          "runpane panels input --panel <panel-id> --text \"simple text\" --yes --json"
+          "runpane panels input --panel <panel-id> --text \"simple text\" --yes --json",
+          "runpane panels input --panel <panel-id> --keys down,enter --yes --json"
         ],
         "jsonSchemas": [
           "panelInputRequest",
           "panelInputResult"
         ],
         "notes": [
+          "To answer a menu or prompt, prefer `--keys` (for example `--keys down,enter`) over escape sequences in `--text`.",
           "Input is sent exactly as provided. Include a real newline byte when the terminal should receive Enter; across shells, `--input-file` is safer than `--text \"...\\n\"`.",
           "Use `--input-file -` or a temp file for multi-line input, quotes, Ctrl-C, or shell-sensitive text.",
           "If interrupting a running process, send Ctrl-C first, validate/read output, then send the next command in a separate `panels input` call so bytes are not dropped.",
@@ -7710,6 +9437,1004 @@ export const RUNPANE_CONTRACT = {
           "The daemon treats omitted idleAfterMs as disabled so older clients never receive agent.idle unexpectedly."
         ]
       },
+      "panes git-status": {
+        "name": "panes git-status",
+        "summary": "Read the git status of a Pane worktree: uncommitted, unpushed, and behind-main counts.",
+        "details": "Use this to check whether a Pane has work to commit, push, or rebase before archiving it or opening a PR.",
+        "requiresPaneDaemon": true,
+        "mutates": false,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes git-status --pane <pane-id> --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message."
+        ]
+      },
+      "panes commit": {
+        "name": "panes commit",
+        "summary": "Stage all changes in a Pane worktree and commit them.",
+        "details": "Use this to commit a Pane's work the way the app's commit action does. The message needs a title line.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--message",
+            "value": "<message>",
+            "required": true,
+            "description": "Commit message; the first line is the title."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes commit --pane <pane-id> --message <message> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message."
+        ]
+      },
+      "panes push": {
+        "name": "panes push",
+        "summary": "Push a Pane branch to its remote.",
+        "details": "Use this to publish a Pane's commits, the way the app's push action does.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes push --pane <pane-id> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message."
+        ]
+      },
+      "panes pull": {
+        "name": "panes pull",
+        "summary": "Pull the remote branch into a Pane worktree.",
+        "details": "Use this to bring remote commits into a Pane, the way the app's pull action does.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes pull --pane <pane-id> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message."
+        ]
+      },
+      "panes rebase-main": {
+        "name": "panes rebase-main",
+        "summary": "Rebase a Pane branch onto the latest main branch.",
+        "details": "Use this to bring main's changes into a Pane. It rewrites the Pane branch history; conflicts are reported, not resolved.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes rebase-main --pane <pane-id> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message."
+        ]
+      },
+      "panes restore": {
+        "name": "panes restore",
+        "summary": "Restore an archived Pane, recreating its worktree.",
+        "details": "Use this to undo `panes archive`.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes restore --pane <pane-id> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message."
+        ]
+      },
+      "panes squash-rebase": {
+        "name": "panes squash-rebase",
+        "summary": "Squash a Pane branch into one commit and rebase it onto main.",
+        "details": "Use this to land a Pane's work on the repository's main branch the way the app's squash-and-rebase action does. It rewrites the Pane branch and updates main.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--message",
+            "value": "<message>",
+            "required": true,
+            "description": "Commit message; the first line is the title."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes squash-rebase --pane <pane-id> --message <message> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message.",
+          "The result includes `link`, a pane:// link the user can open to review the Pane."
+        ]
+      },
+      "panes stash": {
+        "name": "panes stash",
+        "summary": "Stash uncommitted changes in a Pane worktree.",
+        "details": "Use this to set aside work in progress, the way the app's stash action does. `panes stash-pop` brings it back.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes stash --pane <pane-id> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message.",
+          "The result includes `link`, a pane:// link the user can open to review the Pane."
+        ]
+      },
+      "panes stash-pop": {
+        "name": "panes stash-pop",
+        "summary": "Apply and drop the latest stash in a Pane worktree.",
+        "details": "Use this to bring back work set aside with `panes stash`.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes stash-pop --pane <pane-id> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message.",
+          "The result includes `link`, a pane:// link the user can open to review the Pane."
+        ]
+      },
+      "panes soft-reset": {
+        "name": "panes soft-reset",
+        "summary": "Undo the last commit in a Pane, keeping its changes staged.",
+        "details": "Use this to reword or regroup the latest commit, the way the app's soft reset action does.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes soft-reset --pane <pane-id> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message.",
+          "The result includes `link`, a pane:// link the user can open to review the Pane."
+        ]
+      },
+      "panes fetch": {
+        "name": "panes fetch",
+        "summary": "Fetch the remote for a Pane worktree.",
+        "details": "Use this to refresh remote branches before checking git status or rebasing.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes fetch --pane <pane-id> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message."
+        ]
+      },
+      "panes run-script": {
+        "name": "panes run-script",
+        "summary": "Run the repository's run script in a Pane.",
+        "details": "Use this to start the dev server or app for a Pane, the way the app's Run button does.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes run-script --pane <pane-id> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message."
+        ]
+      },
+      "panes stop-script": {
+        "name": "panes stop-script",
+        "summary": "Stop the run script running in a Pane.",
+        "details": "Use this to stop what `panes run-script` started.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes stop-script --pane <pane-id> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message.",
+          "The result includes `link`, a pane:// link the user can open to review the Pane."
+        ]
+      },
+      "panes move": {
+        "name": "panes move",
+        "summary": "Move a Pane into a sidebar folder.",
+        "details": "Use this to organize Panes. Folder ids come from `runpane folders list`.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": true,
+            "description": "Pane id from panes list or agents start."
+          },
+          {
+            "name": "--folder",
+            "value": "<folder-id>",
+            "required": true,
+            "description": "Folder id from folders list."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes move --pane <pane-id> --folder <folder-id> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message.",
+          "The result includes `link`, a pane:// link the user can open to review the Pane."
+        ]
+      },
+      "folders list": {
+        "name": "folders list",
+        "summary": "List the sidebar folders of a repository.",
+        "details": "Use this to find folder ids for `panes move`.",
+        "requiresPaneDaemon": true,
+        "mutates": false,
+        "arguments": [
+          {
+            "name": "--repo",
+            "value": "<repo-id>",
+            "required": true,
+            "description": "Numeric repository id from repos list."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane folders list --repo <repo-id> --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message."
+        ]
+      },
+      "folders create": {
+        "name": "folders create",
+        "summary": "Create a sidebar folder in a repository.",
+        "details": "Use this to add a folder for grouping Panes.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--repo",
+            "value": "<repo-id>",
+            "required": true,
+            "description": "Numeric repository id from repos list."
+          },
+          {
+            "name": "--name",
+            "value": "<name>",
+            "required": true,
+            "description": "Folder name."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane folders create --repo <repo-id> --name <name> --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Runs the same Pane action as the button in the app, through the running Pane daemon.",
+          "Output is `{ ok, data, error }`; `ok: false` exits non-zero with the error message."
+        ]
+      },
+      "links create": {
+        "name": "links create",
+        "summary": "Build a pane:// link that opens a Pane, panel, repository, or Session in the Pane app.",
+        "details": "Use this to hand the user a clickable link. It only builds the URL; opening it navigates and never changes Pane state.",
+        "requiresPaneDaemon": false,
+        "mutates": false,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": false,
+            "description": "Pane to open."
+          },
+          {
+            "name": "--panel",
+            "value": "<panel-id>",
+            "required": false,
+            "description": "Panel inside the Pane to select."
+          },
+          {
+            "name": "--repo",
+            "value": "<repo-id>",
+            "required": false,
+            "description": "Repository id from repos list."
+          },
+          {
+            "name": "--session",
+            "value": "<session-id>",
+            "required": false,
+            "description": "Session id or name from sessions list."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          }
+        ],
+        "examples": [
+          "runpane links create --pane <pane-id> --json"
+        ],
+        "jsonSchemas": [
+          "linkCreateResult"
+        ],
+        "notes": [
+          "Links look like `pane://open?pane=<pane-id>&panel=<panel-id>`. Give exactly one of --pane, --repo, or --session."
+        ]
+      },
+      "links open": {
+        "name": "links open",
+        "summary": "Open a pane:// link in the running Pane app.",
+        "details": "Use this to navigate the app to a Pane, panel, repository, or Session. It raises the Pane window, so run it only when the user asked.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--url",
+            "value": "<pane-url>",
+            "required": true,
+            "description": "A pane://open link from links create."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane links open --url \"pane://open?pane=<pane-id>\" --yes --json"
+        ],
+        "jsonSchemas": [
+          "daemonActionResult"
+        ],
+        "notes": [
+          "Opening a link never changes Pane state; it selects what the link names."
+        ]
+      },
+      "docs search": {
+        "name": "docs search",
+        "summary": "Search Pane's docs, runpane help, and the Pane Chat skills.",
+        "details": "Use this before guessing how Pane works. Results are short excerpts with a path; read the full text with `runpane docs read`.",
+        "requiresPaneDaemon": false,
+        "mutates": false,
+        "arguments": [
+          {
+            "name": "--query",
+            "value": "<text>",
+            "required": true,
+            "description": "Words to search for."
+          },
+          {
+            "name": "--limit",
+            "value": "<count>",
+            "required": false,
+            "description": "Maximum results; defaults to 5."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          }
+        ],
+        "examples": [
+          "runpane docs search --query \"archive a pane\" --json"
+        ],
+        "jsonSchemas": [
+          "docsSearchResult"
+        ],
+        "notes": [
+          "Works offline. Skills are found in the Pane data directory when the Pane app has installed them."
+        ]
+      },
+      "docs read": {
+        "name": "docs read",
+        "summary": "Read one Pane doc, help topic, or skill in full.",
+        "details": "Use this with a path from `runpane docs search`.",
+        "requiresPaneDaemon": false,
+        "mutates": false,
+        "arguments": [
+          {
+            "name": "--doc",
+            "value": "<path>",
+            "required": true,
+            "description": "Path from docs search, such as docs/PANE_MCP.md."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          }
+        ],
+        "examples": [
+          "runpane docs read --doc docs/PANE_MCP.md --json"
+        ],
+        "jsonSchemas": [
+          "docsReadResult"
+        ],
+        "notes": [
+          "Paths come from docs search: `docs/<file>.md`, `skills/<name>/SKILL.md`, `help/<topic>`, or `command/<name>`."
+        ]
+      },
+      "agents start": {
+        "name": "agents start",
+        "summary": "Start an agent on a task: create a Pane in a repository, launch the agent with the prompt, and wait until it is ready.",
+        "details": "Use this for the common job \"have an agent work on X in repo Y\". It returns the pane and panel ids and a pane:// link to hand the user.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--repo",
+            "value": "<selector>",
+            "required": true,
+            "description": "Repository: active, id, exact path, or saved name."
+          },
+          {
+            "name": "--name",
+            "value": "<name>",
+            "required": true,
+            "description": "Name for the new Pane."
+          },
+          {
+            "name": "--agent",
+            "value": "<codex|claude|cursor>",
+            "required": false,
+            "description": "Built-in agent to launch."
+          },
+          {
+            "name": "--tool-command",
+            "value": "<command>",
+            "required": false,
+            "description": "Custom terminal command instead of a built-in agent."
+          },
+          {
+            "name": "--prompt",
+            "value": "<task>",
+            "required": true,
+            "description": "The task to send once the agent is ready."
+          },
+          {
+            "name": "--base-branch",
+            "value": "<branch>",
+            "required": false,
+            "description": "Branch to start the worktree from."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane agents start --repo active --name fix-login --agent claude --prompt \"Fix the login redirect\" --yes --json"
+        ],
+        "jsonSchemas": [
+          "agentTaskResult"
+        ],
+        "notes": [
+          "Creates the Pane in the background (no focus change), pinned, and waits for the agent to be ready before sending the prompt.",
+          "Check on it with `runpane agents status`; send follow-ups with `runpane agents send`."
+        ]
+      },
+      "agents status": {
+        "name": "agents status",
+        "summary": "Check on an agent: whether it is working, ready, blocked, or idle, plus its current screen.",
+        "details": "Use this to see how an agent started with `agents start` is doing, or whether it needs input.",
+        "requiresPaneDaemon": true,
+        "mutates": false,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": false,
+            "description": "Pane id; its agent panel is used."
+          },
+          {
+            "name": "--panel",
+            "value": "<panel-id>",
+            "required": false,
+            "description": "Panel id."
+          },
+          {
+            "name": "--limit",
+            "value": "<count>",
+            "required": false,
+            "description": "Screen lines to return; defaults to 40."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane agents status --pane <pane-id> --json"
+        ],
+        "jsonSchemas": [
+          "agentStatusResult"
+        ],
+        "notes": [
+          "`status` is `working`, `ready`, `blocked`, `idle`, `exited`, or `unknown`. `blocked` means the agent is waiting on a person."
+        ]
+      },
+      "agents send": {
+        "name": "agents send",
+        "summary": "Send a follow-up message to an agent and confirm it was submitted.",
+        "details": "Use this to answer an agent or give it the next instruction.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": false,
+            "description": "Pane id; its agent panel is used."
+          },
+          {
+            "name": "--panel",
+            "value": "<panel-id>",
+            "required": false,
+            "description": "Panel id."
+          },
+          {
+            "name": "--text",
+            "value": "<message>",
+            "required": true,
+            "description": "The message to submit."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm this change; required in non-interactive shells."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane agents send --pane <pane-id> --text \"Also add a test\" --yes --json"
+        ],
+        "jsonSchemas": [
+          "agentSendResult"
+        ],
+        "notes": [
+          "`delivered` is true only when Pane saw the message leave the composer.",
+          "It types the text and presses Enter, so it is for messages, not keys. To answer a menu, use `runpane panels input --panel <panel-id> --keys down,enter --yes`, then check the screen with `runpane agents status`."
+        ]
+      },
       "sessions list": {
         "name": "sessions list",
         "summary": "List durable named orchestration Sessions.",
@@ -7792,7 +10517,7 @@ export const RUNPANE_CONTRACT = {
       "sessions associate": {
         "name": "sessions associate",
         "summary": "Associate a user-visible Pane with a named Session.",
-        "details": "Associate a user-visible Pane with a named Session.",
+        "details": "Associate a user-visible Pane with a named Session. `panes create` and `panes adopt` already do this automatically when run inside a Session orchestrator; use this for existing Panes or after `--no-associate`.",
         "requiresPaneDaemon": true,
         "mutates": true,
         "arguments": [],
@@ -7838,53 +10563,11 @@ export const RUNPANE_CONTRACT = {
     "managedBlock": [
       "## Pane",
       "",
-      "The developer is using Pane for this repository. Pane can manage saved repositories and create user-visible Panes with terminal-backed tools for planning, discussion, implementation, and review work.",
+      "This repository is used with [Pane](https://runpane.com). Drive it with the CLI or the `pane` MCP server.",
       "",
-      "This managed guidance was created by [runpane.com](https://runpane.com) for the [Pane repository](https://github.com/dcouple/Pane). Do not delete or overwrite this block; the developer uses it for their workflow and it should remain committed to the main repository unless they explicitly ask to remove it.",
+      "CLI: `npm i -g runpane` (or `npx --yes runpane@latest`), then `runpane doctor --json`. Full command reference: `runpane agent-context --json`.",
       "",
-      "Pane mental model: a repository is the saved base repo; a Pane is a user-visible feature/PR workspace (Pane session) that normally maps to one Pane-managed git worktree and branch; a panel/tab is a terminal inside one Pane and shares that Pane's worktree; an agent is the CLI process running in a panel.",
-      "",
-      "Default happy path when the user asks you to use Pane or RunPane: run `runpane doctor --json`; read `runpane agent-context --json`; resolve the saved base repository with `runpane repos list --json` or add it once with `runpane repos add --path <repo> --yes --json`; create one visible Pane (Pane session) for the requested feature/PR with a complete command such as `runpane panes create --repo <repo> --name <name> --agent <agent> --prompt \"<task>\" --source agent --no-focus --wait-ready --yes --json` or the equivalent `--tool-command <command>` form; then validate with `runpane panels wait` or `runpane panels screen` before reporting progress. For long-lived supervision, use `runpane watch --follow` instead of polling wait or screen.",
-      "",
-      "Use Pane when the user wants visible Panes or co-drivable parallel feature/PR workspaces. Do not use Pane as your default private delegation mechanism; for private background decomposition, use your normal subagent/worktree workflow.",
-      "",
-      "Register the main/base repository once. Do not register pre-created git worktrees as separate Pane repositories unless the user explicitly asks.",
-      "",
-      "Use `runpane panes create` for separate visible Panes (Pane sessions) for feature/PR work. Use `runpane panels create` for reviewer/helper tabs inside an existing Pane that should share that Pane's worktree.",
-      "",
-      "Typical workflow: register the saved base repository once; create one Pane (Pane session) per feature/PR; use panels/tabs inside that Pane for helper or reviewer agents that should share the worktree; archive the Pane after the PR is done to remove it from active Panes and clean up its managed worktree when applicable.",
-      "",
-      "Skill routing reference: Pane installs its skills in `<PANE_DIR>/skills/pane-chat/skills/` (also in `<PANE_DIR>/.claude/skills/` and `<PANE_DIR>/.codex/skills/`), and the Pane Chat entry point is `<PANE_DIR>/skills/pane-chat/pane-orchestrator/SKILL.md`. When the user asks to discuss, plan, implement, review, or test, read the matching skill there, for example `discussion`, `options`, `brief`, `create-ticket`, `tdd`, `quick-verify`, `prepare-pr`, `review`, or `verify-app`.",
-      "Choose the phase from the request: discuss or investigate until the work is clear enough to delegate, then ticket, implement, review, verify, and open the PR as appropriate. Reconcile the skills with the user's request instead of treating any one list as fixed.",
-      "For the Pane implementation source of truth: `main/src/services/skillCacheManager.ts` installs the bundle from `main/src/services/paneChatBundle/` into `<PANE_DIR>/skills/pane-chat/` and generates `pane-orchestrator`; `main/src/services/paneChatManager.ts` owns the tiny bootstrap prompt that tells the selected Pane Chat agent to read it.",
-      "Do not hardcode a specific assistant brand in workflow guidance. Use the Pane agent or custom tool command the user selected, and use `runpane agents doctor --agent <agent> --repo <selector> --json` only when checking a built-in agent template.",
-      "",
-      "Start with `runpane doctor --json` before taking Pane actions. Use it to understand wrapper/runtime details, daemon reachability, and the next safe commands.",
-      "",
-      "In a Pane repository checkout, if `runpane` is not on PATH, use the built local wrapper with Node 22: `PATH=/opt/homebrew/opt/node@22/bin:$PATH node packages/runpane/dist/cli.js doctor --json`.",
-      "",
-      "Use `runpane agent-context --json` for full Pane CLI context. Use `runpane agent-context --command \"watch\" --json` or another command name for detailed schema only when needed.",
-      "",
-      "Default to context-safe validation: after creating Panes or sending terminal input, run `runpane panels wait` or `runpane panels screen` before reporting success. For ongoing supervision, `runpane watch --follow` is the canonical monitor; do not poll wait or screen. Prefer `runpane panels submit` for normal text plus Enter; use `runpane panels input` only for exact bytes such as Ctrl-C or escape sequences.",
-      "",
-      "Pane terminals draw inline images: sixel, iTerm2 inline images, and the kitty graphics protocol. Tools that need kitty graphics, such as [terminal-browser](https://github.com/zenbu-labs/terminal-browser) and [terminal-doom](https://github.com/dcouple/terminal-doom), run inside a Pane panel. `runpane doctor --json` reports the protocol list under `terminal.graphicsProtocols`.",
-      "",
-      "Common commands:",
-      "- `runpane doctor --json`",
-      "- `runpane agent-context --json`",
-      "- `runpane repos list --json`",
-      "- `runpane repos add --path <repo> --yes --json`",
-      "- `runpane agents doctor --agent <agent> --repo active --json`",
-      "- `runpane panes create --repo active --name <name> --agent <agent> --prompt \"<task>\" --source agent --no-focus --wait-ready --yes --json`",
-      "- `runpane panels create --pane <pane-id> --agent <agent> --source agent --no-focus --wait-ready --yes --json`",
-      "- `runpane panels list --pane <pane-id> --json`",
-      "- `runpane panels screen --panel <panel-id> --limit 80 --json`",
-      "- `runpane panels wait --panel <panel-id> --for ready --timeout-ms 30000 --json`",
-      "- `runpane watch --follow --json`",
-      "- `runpane panels submit --panel <panel-id> --text \"<answer>\" --yes --json`",
-      "- `runpane panels input --panel <panel-id> --input-file <path|-> --yes --json`",
-      "",
-      "WSL note: if `runpane doctor --json` cannot find `/tmp/pane-daemon.../daemon.sock` or `runpane` resolves to a broken Windows shim, Pane may be running on Windows. Try `powershell.exe -NoProfile -Command 'Set-Location $env:TEMP; runpane doctor --json'`, then create Panes through the same PowerShell form using the saved WSL repo name or id. Use `runpane agents doctor --agent <agent> --repo <selector> --json` to diagnose the repo environment Pane will actually use."
+      "MCP: packaged Pane registers a stdio server named `pane` with Claude Code, Codex, and Cursor. Check the connection with `claude mcp list`, `codex mcp list`, or `agent mcp list`. Cursor may ask you to enable `pane` with `agent mcp enable pane`. If tools are missing, add it in the agent's MCP settings: Claude Code `claude mcp add --scope user pane -- npx --yes runpane@latest mcp`; Codex (`~/.codex/config.toml`) table `[mcp_servers.pane]` with `command = \"npx\"` and `args = [\"--yes\", \"runpane@latest\", \"mcp\"]`; Cursor (`~/.cursor/mcp.json`) uses `mcpServers.pane` with the same `npx` command and args; any other stdio client uses them too."
     ]
   }
 } as const;

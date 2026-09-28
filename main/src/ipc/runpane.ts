@@ -1,4 +1,4 @@
-import { execFileSync } from 'child_process';
+import { resolveProjectRegistration, projectRegistrationKey, validateProjectRepository } from '../services/projectRegistration';
 import fs from 'fs';
 import path from 'path';
 import type { IpcMain } from 'electron';
@@ -12,6 +12,7 @@ import { terminalPanelManager, type TerminalPanelSnapshot } from '../services/te
 import { databaseService as panelDatabase } from '../services/database';
 import type { PanelBuffers } from '../database/panelBuffers';
 import { ensureProjectAgentContext } from '../services/agentContextManager';
+import { syncPaneHomeSkill } from '../services/paneHomeSkill';
 import { fastCheckWorkingDirectory, listCommitsAhead } from '../services/gitPlumbingCommands';
 import { assessComposerEvidence, isSlashCommandInput } from './runpaneComposerEvidence';
 import { projectWorkspaceEntry } from '../services/workspaceJournal';
@@ -59,6 +60,7 @@ import type {
   RunpanePaneCreateRequest,
   RunpanePaneCreateResult,
   RunpanePaneCreateResultItem,
+  RunpanePaneAssociationOutcome,
   RunpanePaneReadiness,
   RunpanePaneSummary,
   RunpanePanelActivityStatus,
@@ -109,7 +111,7 @@ import type {
 } from '../../../shared/types/orchestrationSession';
 import type { PaneChatAgent } from '../../../shared/types/paneChat';
 import { getAppDirectory } from '../utils/appDirectory';
-import { collectRemoteDaemonExecutableHealth } from '../daemon/remoteDaemonExecutableHealth';
+import { collectRemoteDaemonExecutableHealthAsync } from '../daemon/remoteDaemonExecutableHealth';
 import {
   WorkspaceJournal,
   matchesFilter,
@@ -267,7 +269,7 @@ export function registerRunpaneHandlers(
   services.workspaceCursorStore = workspaceCursorStore;
 
   commandRegistry.register('runpane:doctor', async (): Promise<RunpaneDoctorResult> => {
-    return withRunpaneAction(services, 'doctor', {}, () => {
+    return withRunpaneAction(services, 'doctor', {}, async () => {
       const repos = databaseService.getAllProjects().map((project) =>
         projectToRepoSummary(project, sessionManager.getSessionsForProject(project.id).length)
       );
@@ -282,7 +284,7 @@ export function registerRunpaneHandlers(
         },
         daemon: {
           channels: [...runpaneDaemonChannels()],
-          executableHealth: collectRemoteDaemonExecutableHealth(getAppDirectory()),
+          executableHealth: await collectRemoteDaemonExecutableHealthAsync(getAppDirectory()),
         },
         repos: {
           count: repos.length,
@@ -339,14 +341,15 @@ export function registerRunpaneHandlers(
         };
       }
 
-      validateRepositoryPath(normalized.path);
+      const registration = resolveProjectRegistration(normalized.path);
+      await validateProjectRepository(registration);
 
       const preview = {
         name: normalized.name,
-        path: normalized.path,
+        path: registration.path,
         alreadyExists: false,
         wouldCreate: true,
-        environment: new PathResolver({ path: normalized.path }).environment,
+        environment: registration.pathResolver.environment,
       };
 
       if (normalized.dryRun) {
@@ -360,15 +363,21 @@ export function registerRunpaneHandlers(
 
       const project = databaseService.createProject(
         normalized.name,
-        normalized.path,
+        registration.path,
         undefined,
         undefined,
         undefined,
         'ignore',
+        undefined,
+        registration.wsl_enabled || undefined,
+        registration.wsl_distribution,
       );
 
       try {
         await ensureProjectAgentContext(project, configManager.getConfig());
+        if (project.wsl_enabled && project.wsl_distribution) {
+          await syncPaneHomeSkill(configManager.getConfig(), [], [project.wsl_distribution]);
+        }
       } catch (error) {
         console.warn('[Runpane] Failed to update Pane agent context after repo add:', error);
       }
@@ -487,7 +496,7 @@ export function registerRunpaneHandlers(
           panes = [pane];
         } else {
           const session = databaseService.getSession(normalized.paneId);
-          if (!session) throw new Error(`No Pane pane found with id ${normalized.paneId}`);
+          if (!session) throw new Error(`No Pane pane found with id ${normalized.paneId}. Run \`runpane panes list\` to see Pane ids.`);
           panes = [{
             paneId: session.id,
             paneName: session.name,
@@ -663,6 +672,7 @@ export function registerRunpaneHandlers(
           waitReady: normalized.waitReady,
           readyTimeoutMs: normalized.readyTimeoutMs,
           activate: resolvePaneCreateActivation(normalized, item),
+          associateSession: normalized.associateSession,
         }),
       );
 
@@ -722,16 +732,14 @@ export function registerRunpaneHandlers(
           await sessionManager.updateSession(session.id, { status: 'stopped' });
           const stoppedSession = sessionManager.getSession(session.id);
           if (!stoppedSession) throw new Error(`Created session ${session.id} was not found after status update`);
+          const association = await associateCreatedPane(services, normalized.associateSession, session.id);
           await Promise.all([
             panelManager.ensureExplorerPanel(session.id),
             panelManager.ensureDiffPanel(session.id),
           ]);
 
-          const resumeCommand = item.resume && tool.agent
-            ? buildAdoptResumeCommand(tool.agent, item.resume)
-            : tool.command;
           const initialState: TerminalPanelState = {
-            initialCommand: item.launch ? resumeCommand : undefined,
+            initialCommand: item.launch ? tool.command : undefined,
             agentType: tool.agent,
             agentSessionId: item.resume,
             hasClaudeSessionId: tool.agent === 'claude' && Boolean(item.resume),
@@ -747,7 +755,7 @@ export function registerRunpaneHandlers(
           const context = sessionManager.getProjectContext(session.id);
           await terminalPanelManager.initializeTerminal(panel, storedWorktreePath, context?.commandRunner.wslContext ?? null);
           if (!item.launch) {
-            terminalPanelManager.writeToTerminal(panel.id, resumeCommand);
+            await terminalPanelManager.stageInitialCommand(panel.id, tool.command);
           }
           sessionManager.emitSessionCreated(stoppedSession, {
             activateOnCreate: normalized.focus === true,
@@ -766,6 +774,7 @@ export function registerRunpaneHandlers(
             active: Boolean(panel.state.isActive),
             focused: Boolean(panel.state.isActive),
             nextCommand: panelOutputCommand(panel.id),
+            association,
           });
         } catch (error) {
           let failureSessionId = createdSessionId;
@@ -1400,6 +1409,7 @@ interface PaneCreateItemOptions {
   waitReady?: boolean;
   readyTimeoutMs?: number;
   activate?: boolean;
+  associateSession?: string;
 }
 
 interface TerminalPanelCreateOptions {
@@ -1700,6 +1710,7 @@ async function createPaneItem(
       throw new Error(`Created session ${sessionResult.sessionId} was not found`);
     }
     createdWorktreePath = session.worktreePath;
+    const association = await associateCreatedPane(services, options.associateSession, session.id);
 
     const { panel, readiness, initialInput } = await createTerminalPanelForSession(services, session, tool, {
       activate: options.activate,
@@ -1723,6 +1734,7 @@ async function createPaneItem(
       focused: Boolean(panel.state.isActive),
       readiness,
       initialInput,
+      association,
     };
   } catch (error) {
     return createFailureItem(index, item, error, createdSessionId, createdWorktreePath);
@@ -2669,6 +2681,7 @@ function parsePaneCreateRequest(value: PaneCommandValue): RunpanePaneCreateReque
     noFocus: optionalBoolean(value.noFocus),
     focus: optionalBoolean(value.focus),
     source: value.source === 'user' || value.source === 'agent' ? value.source : undefined,
+    associateSession: optionalString(value.associateSession)?.trim() || undefined,
   };
 }
 
@@ -2703,7 +2716,27 @@ function parsePaneAdoptRequest(value: PaneCommandValue): RunpanePaneAdoptRequest
     noFocus: optionalBoolean(value.noFocus),
     focus: optionalBoolean(value.focus),
     source: value.source === 'user' || value.source === 'agent' ? value.source : undefined,
+    associateSession: optionalString(value.associateSession)?.trim() || undefined,
   };
+}
+
+/**
+ * Panes created from inside a Session orchestrator become that Session's
+ * children in the same call, so agents cannot forget `sessions associate`.
+ * A failed association is reported on the item and never undoes the Pane.
+ */
+async function associateCreatedPane(
+  services: AppServices,
+  sessionId: string | undefined,
+  paneId: string,
+): Promise<RunpanePaneAssociationOutcome | undefined> {
+  if (!sessionId) return undefined;
+  try {
+    await requireOrchestrationSessionManager(services).associate({ sessionId }, { paneId });
+    return { sessionId, ok: true };
+  } catch (error) {
+    return { sessionId, ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 async function validateAdoptedWorktree(
@@ -2779,13 +2812,6 @@ function findSessionByWorktreeIdentity<T extends { worktree_path: string }>(
       return false;
     }
   });
-}
-
-function buildAdoptResumeCommand(agent: RunpaneAgentId, sessionId: string): string {
-  const id = escapeShellArg(sessionId);
-  if (agent === 'claude') return `claude --resume ${id} --dangerously-skip-permissions`;
-  if (agent === 'codex') return `codex resume --yolo ${id}`;
-  return `cursor-agent --force --trust --resume ${id}`;
 }
 
 function resolveOrCreateAdoptFolder(
@@ -3004,7 +3030,8 @@ function parseRepoAddRequest(value: PaneCommandValue): Required<Pick<RunpaneRepo
 
   const repoPath = expandUserRepoPath(requestedPath);
   const providedName = optionalString(value.name)?.trim();
-  const defaultName = path.basename(repoPath) || repoPath;
+  const location = resolveProjectRegistration(repoPath);
+  const defaultName = path.posix.basename(location.path.replace(/\\/g, '/')) || location.path;
 
   return {
     path: repoPath,
@@ -3016,7 +3043,7 @@ function parseRepoAddRequest(value: PaneCommandValue): Required<Pick<RunpaneRepo
 function resolvePane(sessionManager: AppServices['sessionManager'], paneId: string): Session {
   const session = sessionManager.getSession(paneId);
   if (!session) {
-    throw new Error(`No Pane pane found with id ${paneId}`);
+    throw new Error(`No Pane pane found with id ${paneId}. Run \`runpane panes list\` to see Pane ids.`);
   }
   return session;
 }
@@ -3281,7 +3308,7 @@ function parsePaneFocusRequest(value: PaneCommandValue): RunpanePaneFocusRequest
 function resolvePanel(panelId: string): ToolPanel {
   const panel = panelManager.getPanel(panelId);
   if (!panel) {
-    throw new Error(`No Pane panel found with id ${panelId}`);
+    throw new Error(`No Pane panel found with id ${panelId}. Run \`runpane panels list --pane <pane-id>\` to see panel ids.`);
   }
   return panel;
 }
@@ -3306,34 +3333,6 @@ function parsePaneCreateItem(value: PaneCommandValue, index: number): RunpanePan
     pinned: optionalBoolean(value.pinned) ?? true,
     tool: parseRunpaneToolSpec(value.tool, `Pane create item ${index}`),
   };
-}
-
-function validateRepositoryPath(repoPath: string): void {
-  const resolvedPath = expandUserRepoPath(repoPath);
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(resolvedPath);
-  } catch {
-    throw new Error(`Repo path does not exist: ${resolvedPath}`);
-  }
-
-  if (!stat.isDirectory()) {
-    throw new Error(`Repo path must be a directory: ${resolvedPath}`);
-  }
-
-  try {
-    const output = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
-      cwd: resolvedPath,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-
-    if (output !== 'true') {
-      throw new Error('not inside work tree');
-    }
-  } catch {
-    throw new Error(`Repo path must be an existing git repository: ${resolvedPath}`);
-  }
 }
 
 function parseRunpaneToolSpec(value: PaneCommandValue, label: string): RunpaneToolSpec {
@@ -3415,7 +3414,7 @@ function resolveRepoSelector(projects: Project[], selector: RunpaneRepoSelector)
   if (selectorObject.id !== undefined) {
     const project = projects.find(candidate => candidate.id === selectorObject.id);
     if (!project) {
-      throw new Error(`No Pane repo found with id ${selectorObject.id}`);
+      throw new Error(`No Pane repo found with id ${selectorObject.id}. Run \`runpane repos list\` to see saved repos, or \`runpane repos add --path <absolute path> --yes\` to add one.`);
     }
     return project;
   }
@@ -3423,7 +3422,7 @@ function resolveRepoSelector(projects: Project[], selector: RunpaneRepoSelector)
   if (selectorObject.path !== undefined) {
     const project = resolveProjectByPath(projects, selectorObject.path);
     if (!project) {
-      throw new Error(`No Pane repo found at path ${selectorObject.path}`);
+      throw new Error(`No Pane repo found at path ${selectorObject.path}. Run \`runpane repos list\` to see saved repos, or \`runpane repos add --path <absolute path> --yes\` to add one.`);
     }
     return project;
   }
@@ -3444,14 +3443,14 @@ function resolveActiveProject(projects: Project[]): Project {
 }
 
 function resolveProjectByPath(projects: Project[], selectorPath: string): Project | undefined {
-  const normalized = path.resolve(selectorPath);
-  return projects.find(project => project.path === selectorPath || path.resolve(project.path) === normalized);
+  const key = projectRegistrationKey({ path: selectorPath });
+  return projects.find(project => projectRegistrationKey(project) === key);
 }
 
 function resolveProjectByName(projects: Project[], selectorName: string): Project {
   const matches = projects.filter(project => project.name.toLowerCase() === selectorName.toLowerCase());
   if (matches.length === 0) {
-    throw new Error(`No Pane repo found named "${selectorName}"`);
+    throw new Error(`No Pane repo found named "${selectorName}". Run \`runpane repos list\` to see saved repos, or \`runpane repos add --path <absolute path> --yes\` to add one.`);
   }
   if (matches.length > 1) {
     throw new Error(`Multiple Pane repos are named "${selectorName}". Use --repo-id or an exact path.`);

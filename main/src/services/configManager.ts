@@ -25,6 +25,8 @@ import {
 const DEFAULT_POSTHOG_API_KEY = 'phc_wir25CCsjr2NsZGEdlWNdvwcNG1XDjhxc9RyL5KDCf1';
 const LEGACY_POSTHOG_HOST = 'https://us.i.posthog.com';
 const DEFAULT_POSTHOG_HOST = 'https://runpane.com/api/c';
+/** Bump when agentContext defaults change for existing configs (2: repo AGENTS.md off). */
+export const AGENT_CONTEXT_DEFAULTS_VERSION = 2;
 
 function defaultAnalyticsConfig(): NonNullable<AppConfig['analytics']> {
   return {
@@ -91,7 +93,11 @@ export class ConfigManager extends EventEmitter {
       },
       analytics: defaultAnalyticsConfig(),
       agentContext: {
-        managedAgentsMd: true
+        managedAgentsMd: false,
+        homeSkill: true,
+        defaultsVersion: AGENT_CONTEXT_DEFAULTS_VERSION,
+        registerMcp: true,
+        cleanupPending: false,
       },
       remoteDaemon: createDefaultRemoteDaemonConfig(),
       keyboardShortcutsEnabled: true,
@@ -204,6 +210,24 @@ export class ConfigManager extends EventEmitter {
       };
 
       let shouldPersistMigration = normalizedAppearance.migrated;
+      if (loadedConfig.agentContext?.registerMcp === undefined) {
+        this.config.agentContext = { ...this.config.agentContext, registerMcp: true };
+        shouldPersistMigration = true;
+        console.log('[ConfigManager] Pane now registers its MCP server with Claude Code, Codex, and Cursor.');
+      }
+      if ((loadedConfig.agentContext?.defaultsVersion ?? 0) < AGENT_CONTEXT_DEFAULTS_VERSION) {
+        // Version 2 stopped editing repositories by default. Configs saved under
+        // the old default carry managedAgentsMd: true without the user choosing
+        // it, so turn it off once; the caller then removes Pane's section from
+        // repos exactly as the settings toggle does. A later opt-in sticks.
+        this.config.agentContext = {
+          ...this.config.agentContext,
+          managedAgentsMd: false,
+          defaultsVersion: AGENT_CONTEXT_DEFAULTS_VERSION,
+          cleanupPending: true,
+        };
+        shouldPersistMigration = true;
+      }
       if (this.config.analytics?.posthogHost === LEGACY_POSTHOG_HOST) {
         this.config.analytics.posthogHost = DEFAULT_POSTHOG_HOST;
         shouldPersistMigration = true;

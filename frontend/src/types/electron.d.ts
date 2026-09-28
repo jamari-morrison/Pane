@@ -51,6 +51,7 @@ import type { LeaderboardResponse, LeaderboardStatus, LeaderboardSubmitResult } 
 import type { CreateSessionRequest } from './session';
 import type { DetectedProjectConfig } from '../../../shared/types/projectConfig';
 import type { RunpanePaneFocusRequestedEvent } from '../../../shared/types/runpaneOrchestration';
+import type { PaneLinkNavigation } from '../../../shared/types/paneLinks';
 import type { UpdateCapabilities } from '../../../shared/types/updater';
 import type {
   ProjectDashboardData,
@@ -209,7 +210,6 @@ interface ElectronAPI {
 
     // Script operations
     hasRunScript: (sessionId: string) => Promise<IPCResponse>;
-    getRunningSession: () => Promise<IPCResponse>;
     runScript: (sessionId: string) => Promise<IPCResponse>;
     stopScript: (sessionId?: string) => Promise<IPCResponse>;
     runTerminalCommand: (sessionId: string, command: string) => Promise<IPCResponse>;
@@ -406,6 +406,7 @@ interface ElectronAPI {
     onSessionCreated: (callback: (session: Session) => void) => () => void;
     onSessionUpdated: (callback: (session: Session) => void) => () => void;
     onPaneFocusRequested: (callback: (data: RunpanePaneFocusRequestedEvent) => void) => () => void;
+    onPaneOpenLink: (callback: (target: PaneLinkNavigation) => void) => () => void;
     onSessionDeleted: (callback: (session: Pick<Session, 'id'>) => void) => () => void;
     onSessionsLoaded: (callback: (sessions: Session[]) => void) => () => void;
     onSessionOutput: (callback: (output: SessionOutput) => void) => () => void;

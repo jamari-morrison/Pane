@@ -199,6 +199,7 @@ interface PaneCreateRequest {
   noFocus?: boolean;
   focus?: boolean;
   source?: 'user' | 'agent';
+  associateSession?: string;
 }
 
 interface PaneAdoptRequest {
@@ -217,6 +218,7 @@ interface PaneAdoptRequest {
   noFocus?: boolean;
   focus?: boolean;
   source?: 'user' | 'agent';
+  associateSession?: string;
 }
 
 interface PaneCreateItem {
@@ -244,6 +246,7 @@ interface PaneCreateSuccessItem {
   nextCommand?: string;
   readiness?: PanelReadiness;
   initialInput?: InitialInputDeliveryResult;
+  association?: { sessionId: string; ok: boolean; error?: string };
 }
 
 interface PaneCreateFailureItem {
@@ -707,6 +710,7 @@ interface PaneCreateRequestInput {
   noFocus?: boolean;
   focus?: boolean;
   source?: 'user' | 'agent';
+  associateSession?: string;
 }
 
 interface PaneAdoptRequestInput extends Omit<PaneAdoptRequest, 'panes'> {
@@ -1021,7 +1025,7 @@ const paneCostResultSchema: BoundarySchema<PaneCostResult> = boundary.object({
   unattributed: boundary.optional(paneCostSliceResultSchema),
   totals: boundary.optional(usageTotalsResultSchema),
 });
-const paneCreateResultSchema: BoundarySchema<PaneCreateResult> = boundary.object({
+export const paneCreateResultSchema: BoundarySchema<PaneCreateResult> = boundary.object({
   ok: boundary.boolean,
   generation: boundary.optional(boundary.number),
   repo: repoSummarySchema,
@@ -1037,6 +1041,11 @@ const paneCreateResultSchema: BoundarySchema<PaneCreateResult> = boundary.object
       nextCommand: boundary.optional(boundary.string),
       readiness: boundary.optional(panelReadinessSchema),
       initialInput: boundary.optional(initialInputSchema),
+      association: boundary.optional(boundary.object({
+        sessionId: boundary.string,
+        ok: boundary.boolean,
+        error: boundary.optional(boundary.string),
+      })),
     }),
     boundary.object({
       ok: boundary.literal(false),
@@ -1108,7 +1117,7 @@ const paneFocusResultSchema: BoundarySchema<PaneFocusResult> = boundary.object({
   panelId: boundary.optional(boundary.string),
   focused: boundary.literal(true),
 });
-const panelListResultSchema: BoundarySchema<PanelListResult> = boundary.object({
+export const panelListResultSchema: BoundarySchema<PanelListResult> = boundary.object({
   ok: boundary.literal(true),
   paneId: boundary.string,
   panels: boundary.array(panelSummarySchema),
@@ -1153,7 +1162,7 @@ const panelInputResultSchema: BoundarySchema<PanelInputResult> = boundary.object
   sentAt: boundary.string,
   nextCommand: boundary.optional(boundary.string),
 });
-const panelScreenResultSchema: BoundarySchema<PanelScreenResult> = boundary.object({
+export const panelScreenResultSchema: BoundarySchema<PanelScreenResult> = boundary.object({
   ok: boundary.literal(true),
   panelId: boundary.string,
   paneId: boundary.optional(boundary.string),
@@ -1169,7 +1178,7 @@ const panelScreenResultSchema: BoundarySchema<PanelScreenResult> = boundary.obje
   }),
   nextCommand: boundary.optional(boundary.string),
 });
-const panelSubmitResultSchema: BoundarySchema<PanelSubmitResult> = boundary.object({
+export const panelSubmitResultSchema: BoundarySchema<PanelSubmitResult> = boundary.object({
   ok: boundary.boolean,
   generation: boundary.optional(boundary.number),
   panelId: boundary.string,
@@ -1273,7 +1282,7 @@ const workspaceEntrySchema: BoundarySchema<WorkspaceEntry> = boundary.object({
   changedWhileAway: boundary.optional(boundary.boolean),
   panels: boundary.optional(boundary.array(workspacePanelSummarySchema)),
 });
-const workspaceStateResultSchema: BoundarySchema<WorkspaceStateResult> = boundary.object({
+export const workspaceStateResultSchema: BoundarySchema<WorkspaceStateResult> = boundary.object({
   ok: boundary.literal(true),
   epoch: boundary.string,
   generation: boundary.number,
@@ -1322,6 +1331,7 @@ const paneCreateRequestInputSchema: BoundarySchema<PaneCreateRequestInput> = bou
   noFocus: boundary.optional(boundary.boolean),
   focus: boundary.optional(boundary.boolean),
   source: boundary.optional(boundary.enumeration('user', 'agent')),
+  associateSession: boundary.optional(boundary.string),
 });
 const paneAdoptRequestInputSchema: BoundarySchema<PaneAdoptRequestInput> = boundary.object({
   repo: repoSelectorSchema,
@@ -1339,6 +1349,7 @@ const paneAdoptRequestInputSchema: BoundarySchema<PaneAdoptRequestInput> = bound
   noFocus: boundary.optional(boundary.boolean),
   focus: boundary.optional(boundary.boolean),
   source: boundary.optional(boundary.enumeration('user', 'agent')),
+  associateSession: boundary.optional(boundary.string),
 });
 
 export async function runReposList(parsed: ParsedArgs): Promise<number> {
@@ -1725,6 +1736,7 @@ export async function runPanesAdopt(parsed: ParsedArgs): Promise<number> {
         pinned: resolvePinnedOverride(parsed) ?? pane.pinned ?? !process.env.PANE_ORCHESTRATION_SESSION_ID,
         tool: parsePaneToolSpecPayload(pane.tool, index),
       })),
+      associateSession: parsed.noAssociate ? undefined : resolveAssociateSession(parsed) ?? decoded.associateSession,
     };
   } else {
     if (!parsed.repo || !parsed.repoPath || !parsed.name) {
@@ -1747,6 +1759,7 @@ export async function runPanesAdopt(parsed: ParsedArgs): Promise<number> {
     noFocus: parsed.noFocus || undefined,
     focus: parsed.focus || undefined,
     source: parsed.source === 'user' || parsed.source === 'agent' ? parsed.source : undefined,
+    associateSession: resolveAssociateSession(parsed),
     };
   }
   await confirmPaneAdopt(parsed, request);
@@ -2083,21 +2096,37 @@ function buildRepoAddRequest(parsed: ParsedArgs): RepoAddRequest {
   };
 }
 
-function buildPanelInputRequest(parsed: ParsedArgs, command: 'input' | 'submit' = 'input'): PanelInputRequest {
+export function buildPanelInputRequest(parsed: ParsedArgs, command: 'input' | 'submit' = 'input'): PanelInputRequest {
   if (!parsed.panelId) {
     throw new Error(`runpane panels ${command} requires --panel.`);
   }
-  if (parsed.panelInput !== undefined && parsed.panelInputFile) {
-    throw new Error('Use either --text or --input-file, not both.');
+  const sources = [parsed.panelInput !== undefined, Boolean(parsed.panelInputFile), parsed.keys !== undefined].filter(Boolean).length;
+  if (sources > 1) {
+    throw new Error('Use only one of --text, --keys, or --input-file.');
   }
-  if (parsed.panelInput === undefined && !parsed.panelInputFile) {
-    throw new Error(`runpane panels ${command} requires --text or --input-file.`);
+  if (sources === 0) {
+    throw new Error(`runpane panels ${command} requires --text, --keys, or --input-file.`);
+  }
+  if (parsed.keys !== undefined && command !== 'input') {
+    throw new Error('--keys is for panels input; panels submit sends text followed by Enter.');
   }
 
   return {
     panelId: parsed.panelId,
-    input: parsed.panelInputFile ? readInputSource(parsed.panelInputFile) : parsed.panelInput ?? '',
+    input: parsed.keys ? keysToBytes(parsed.keys) : parsed.panelInputFile ? readInputSource(parsed.panelInputFile) : parsed.panelInput ?? '',
   };
+}
+
+/** `--keys down,enter`: named keys from the contract, or a single literal character each. */
+function keysToBytes(keys: string[]): string {
+  const named = new Map<string, string>(Object.entries(RUNPANE_CONTRACT.terminalKeys));
+  return keys.map((key) => {
+    const bytes = named.get(key.toLowerCase()) ?? ([...key].length === 1 ? key : undefined);
+    if (bytes === undefined) {
+      throw new Error(`Unknown key "${key}". Use ${[...named.keys()].join(', ')}, or a single character.`);
+    }
+    return bytes;
+  }).join('');
 }
 
 async function buildPanelCreateRequest(parsed: ParsedArgs): Promise<PanelCreateRequest> {
@@ -2131,7 +2160,7 @@ function resolvePinnedOverride(parsed: ParsedArgs): boolean | undefined {
   return parsed.pinned ? true : undefined;
 }
 
-async function buildPaneCreateRequest(parsed: ParsedArgs): Promise<PaneCreateRequest> {
+export async function buildPaneCreateRequest(parsed: ParsedArgs): Promise<PaneCreateRequest> {
   if (parsed.fromJson) {
     const payload = JSON.parse(stripUtf8Bom(readInputSource(parsed.fromJson)));
     const request = parsePaneCreateRequestPayload(payload);
@@ -2155,6 +2184,7 @@ async function buildPaneCreateRequest(parsed: ParsedArgs): Promise<PaneCreateReq
       ...item, pinned: pinnedOverride ?? item.pinned ?? !process.env.PANE_ORCHESTRATION_SESSION_ID,
     }));
     applyPaneFocusOptions(parsed, request);
+    request.associateSession = parsed.noAssociate ? undefined : resolveAssociateSession(parsed) ?? request.associateSession;
     return request;
   }
 
@@ -2187,9 +2217,16 @@ async function buildPaneCreateRequest(parsed: ParsedArgs): Promise<PaneCreateReq
     noFocus: !parsed.focus && (parsed.noFocus || source === 'agent' || Boolean(parsed.agent)) ? true : undefined,
     focus: parsed.focus || undefined,
     source,
+    associateSession: resolveAssociateSession(parsed),
   };
 
   return request;
+}
+
+/** Inside a Session orchestrator, new Panes join that Session unless --no-associate. */
+function resolveAssociateSession(parsed: ParsedArgs): string | undefined {
+  if (parsed.noAssociate) return undefined;
+  return process.env.PANE_ORCHESTRATION_SESSION_ID?.trim() || undefined;
 }
 
 function applyPaneFocusOptions(parsed: ParsedArgs, request: PaneCreateRequest): void {
@@ -2590,6 +2627,11 @@ function printPaneCreateResult(result: PaneCreateResult): void {
         }
       }
       printInitialInputDelivery(item.initialInput, '  ');
+      if (item.association) {
+        console.log(item.association.ok
+          ? `  Associated with Session ${item.association.sessionId}`
+          : `  Not associated with Session ${item.association.sessionId}: ${item.association.error ?? 'unknown error'}`);
+      }
       if (item.nextCommand) {
         console.log(`  Next: ${item.nextCommand}`);
       }
@@ -2729,12 +2771,7 @@ function isInteractiveShell(): boolean {
 }
 
 function parsePaneCreateRequestPayload(value: JsonValue): PaneCreateRequest {
-  let decoded: PaneCreateRequestInput;
-  try {
-    decoded = decodeBoundary(value, paneCreateRequestInputSchema);
-  } catch {
-    throw new Error('--from-json payload must be an object.');
-  }
+  const decoded = decodeBoundary(value, paneCreateRequestInputSchema);
 
   if (decoded.panes.length === 0) {
     throw new Error('--from-json payload must include at least one pane.');
