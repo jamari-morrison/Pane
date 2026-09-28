@@ -11,6 +11,7 @@ import type {
   PanelGroupNode,
   PanelLayoutNode,
   SessionPanelLayout,
+  ToolPanel,
 } from '../../../shared/types/panels';
 
 interface ReconciledPanelLayout {
@@ -149,6 +150,20 @@ export function addPanelToGroup(
   }
 
   return insert(root);
+}
+
+/**
+ * Open a panel beside the primary group: as a tab in the last other group, or
+ * in a new right-hand group when the layout has only one. Idempotent like
+ * addPanelToGroup.
+ */
+export function placePanelInSplit(root: PanelLayoutNode, panelId: string, activate = true): PanelLayoutNode {
+  if (allPanelIds(root).includes(panelId)) return root;
+  const primary = primaryGroup(root);
+  const side = allGroups(root).filter(group => group.id !== primary.id).pop();
+  return side
+    ? addPanelToGroup(root, side.id, panelId, { activate })
+    : splitGroup(root, primary.id, panelId, 'row', true);
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +492,7 @@ export function removePanelFromLayout(
 export function reconcile(
   layout: SessionPanelLayout,
   livePanelIds: string[],
+  splitPanelIds: ReadonlySet<string> = new Set(),
 ): ReconciledPanelLayout {
   const liveSet = new Set(livePanelIds);
   let changed = false;
@@ -513,7 +529,13 @@ export function reconcile(
 
   // Find orphans (live panels not in the tree)
   const assigned = new Set(allPanelIds(root));
-  const orphans = livePanelIds.filter(id => !assigned.has(id));
+  const unassigned = livePanelIds.filter(id => !assigned.has(id));
+  const orphans = unassigned.filter(id => !splitPanelIds.has(id));
+  for (const id of unassigned) {
+    if (!splitPanelIds.has(id)) continue;
+    changed = true;
+    root = placePanelInSplit(root, id);
+  }
   if (orphans.length > 0) {
     changed = true;
     const primary = primaryGroup(root);
@@ -749,4 +771,13 @@ export function dropZoneFor(
   ];
   edges.sort((a, b) => a[1] - b[1]);
   return edges[0][0];
+}
+
+/** Only a new, explicitly focused reopen request may change the selected tab. */
+export function shouldActivateReopenedPanel(panel: ToolPanel, previous?: ToolPanel): boolean {
+  const state = panel.state.customState;
+  const before = previous?.state.customState;
+  return !!state && 'reopenedAt' in state && !!state.reopenedAt
+    && 'reopenedWithFocus' in state && state.reopenedWithFocus === true
+    && (!before || !('reopenedAt' in before) || before.reopenedAt !== state.reopenedAt);
 }

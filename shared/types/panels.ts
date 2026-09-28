@@ -164,6 +164,9 @@ export type EditorDiffRef = { kind: 'scope'; scope: DiffScope; previousPath?: st
 
 export interface EditorPanelState {
   filePath: string;
+  /** Reload an agent-reopened file when this editor has no pending edits. */
+  reopenedAt?: string;
+  reopenedWithFocus?: boolean;
   /** When set, the tab shows this file's diff instead of an editable file. */
   diff?: EditorDiffRef;
   isPreview?: boolean;
@@ -201,6 +204,9 @@ export interface SetupTasksPanelState {
 export interface BrowserPanelState {
   currentUrl?: string;
   isPopup?: boolean;
+  /** Set when an agent reopens this page (runpane panels open); the tab reloads to show the latest file. */
+  reopenedAt?: string;
+  reopenedWithFocus?: boolean;
 }
 
 export interface ToolPanelMetadata {
@@ -208,6 +214,12 @@ export interface ToolPanelMetadata {
   lastActiveAt: string;
   position: number;              // Tab order
   permanent?: boolean;           // Cannot be closed (for diff panel)
+  /**
+   * Where the renderer places this panel the first time it enters the layout.
+   * 'split' opens it beside the primary group (reusing an existing side group
+   * as tabs). Ignored once the panel is in the stored layout.
+   */
+  openPlacement?: 'split' | 'tab';
 }
 
 export interface CreatePanelRequest {

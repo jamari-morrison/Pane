@@ -41,6 +41,7 @@ import {
   movePanel as movePanelInLayout,
   removePanelFromLayout,
   addPanelToGroup,
+  placePanelInSplit,
   findGroup,
   primaryGroup,
   allGroups,
@@ -49,6 +50,7 @@ import {
   updateSizes,
   findGroupContainingPanel,
   activatePanelInLayout,
+  shouldActivateReopenedPanel,
   subsetInsertIndex,
   mergeAllGroups,
   type DropZone,
@@ -297,8 +299,11 @@ export const SessionView = memo(() => {
           const nowPanels = usePanelStore.getState().panels[sid] || [];
           const pinnedNow = getDockTerminalPanel(nowPanels);
           const liveIdsNow: string[] = [];
+          const splitIdsNow = new Set<string>();
           for (const p of nowPanels) {
-            if (p.id !== pinnedNow?.id && !isInspectorPanelType(p.type)) liveIdsNow.push(p.id);
+            if (p.id === pinnedNow?.id || isInspectorPanelType(p.type)) continue;
+            liveIdsNow.push(p.id);
+            if (p.metadata?.openPlacement === 'split') splitIdsNow.add(p.id);
           }
           // Treat unknown future layout versions as no stored layout rather
           // than reconciling a shape this build doesn't understand.
@@ -307,7 +312,7 @@ export const SessionView = memo(() => {
             sortedLive.map(p => p.id),
             fallbackActiveId,
           );
-          const { layout: reconciledLayout } = reconcileLayout(base, liveIdsNow);
+          const { layout: reconciledLayout } = reconcileLayout(base, liveIdsNow, splitIdsNow);
           const layout = fallbackActiveId
             ? activatePanelInLayout(reconciledLayout, fallbackActiveId)
             : reconciledLayout;
@@ -363,9 +368,12 @@ export const SessionView = memo(() => {
             const focusedGid = usePanelStore.getState().focusedGroupIds[sid];
             const group = (focusedGid && findGroup(currentLayout.root, focusedGid))
               || primaryGroup(currentLayout.root);
-            const nextRoot = addPanelToGroup(currentLayout.root, group.id, panel.id, {
-              activate: panel.state.isActive,
-            });
+            // Agents open pages and files beside their conversation.
+            const nextRoot = panel.metadata?.openPlacement === 'split'
+              ? placePanelInSplit(currentLayout.root, panel.id, panel.state.isActive)
+              : addPanelToGroup(currentLayout.root, group.id, panel.id, {
+                activate: panel.state.isActive,
+              });
             if (nextRoot !== currentLayout.root) {
               applyLayout(sid, { ...currentLayout, root: nextRoot });
             }
@@ -376,7 +384,13 @@ export const SessionView = memo(() => {
 
     const handlePanelUpdated = (updatedPanel: ToolPanel) => {
       if (updatedPanel.sessionId === sid) {
+        const previous = usePanelStore.getState().panels[sid]?.find(panel => panel.id === updatedPanel.id);
+        const shouldFocus = shouldActivateReopenedPanel(updatedPanel, previous);
         updatePanelState(updatedPanel);
+        if (shouldFocus) {
+          const current = usePanelStore.getState().layouts[sid];
+          if (current) applyLayout(sid, activatePanelInLayout(current, updatedPanel.id));
+        }
       }
     };
 

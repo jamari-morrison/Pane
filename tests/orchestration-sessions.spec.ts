@@ -2,6 +2,7 @@ import type { CustomCommandResume } from '../shared/types/customCommandResume';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { installElectronApiMock } from './electronApiMock';
 import type { JsonObject } from '../shared/validation/boundaryDecoder';
+import type { ToolPanel } from '../shared/types/panels';
 
 type UiAssociationFixture = {
   paneId: string;
@@ -1411,6 +1412,68 @@ test('Sessions open persistent shell and Files panels in their own workspace', a
   await fileTab.click();
   await expect(fileTab).toHaveAttribute('aria-selected', 'true');
   await expect.poll(readPanels).toHaveLength(3);
+  const editorLines = page.locator('.monaco-editor .view-lines').filter({ visible: true });
+  await expect(editorLines).toContainText('Session notes');
+  await page.evaluate(async () => {
+    const originalInvoke = window.electronAPI.invoke;
+    Object.assign(window.electronAPI, {
+      invoke: (channel: string, ...args: unknown[]) => channel === 'file:read'
+        ? Promise.resolve({ success: true, content: 'Updated Session notes' })
+        : originalInvoke(channel, ...args),
+    });
+    const response = await window.electronAPI.panels.getSessionPanels('__orchestration_session_toolsterminal__');
+    const editor = response.data?.find(panel => panel.type === 'editor');
+    if (!editor) throw new Error('Expected the open notes editor');
+    // SAFETY: installElectronApiMock installs the same event the desktop receives.
+    const mockWindow = window as typeof window & { __paneTestElectronMock: { emitPanelUpdated: (panel: ToolPanel) => void } };
+    mockWindow.__paneTestElectronMock.emitPanelUpdated({
+      ...editor,
+      state: { ...editor.state, customState: { ...editor.state.customState, reopenedAt: '2026-09-28T12:00:00.000Z' } },
+    });
+  });
+  await expect(editorLines).toContainText('Updated Session notes');
+  await page.evaluate(async () => {
+    const originalInvoke = window.electronAPI.invoke;
+    // SAFETY: the fixture installs these event controls; this test owns the read resolver.
+    const controls = window as typeof window & {
+      __finishEditorRead?: () => void;
+      __paneTestElectronMock: { emitPanelUpdated: (panel: ToolPanel) => void };
+    };
+    Object.assign(window.electronAPI, {
+      invoke: (channel: string, ...args: unknown[]) => {
+        if (channel === 'file:read') return new Promise(resolve => {
+          controls.__finishEditorRead = () => resolve({ success: true, content: 'External replacement' });
+        });
+        return originalInvoke(channel, ...args);
+      },
+    });
+    const response = await window.electronAPI.panels.getSessionPanels('__orchestration_session_toolsterminal__');
+    const editor = response.data?.find(panel => panel.type === 'editor');
+    if (!editor) throw new Error('Expected the open notes editor');
+    controls.__paneTestElectronMock.emitPanelUpdated({
+      ...editor,
+      state: { ...editor.state, customState: { ...editor.state.customState, reopenedAt: '2026-09-28T12:01:00.000Z' } },
+    });
+  });
+  await expect.poll(() => page.evaluate(() => '__finishEditorRead' in window)).toBe(true);
+  const editorInput = page.locator('.monaco-editor textarea.inputarea').filter({ visible: true });
+  await editorInput.focus();
+  await editorInput.press('End');
+  await page.keyboard.type(' local edit');
+  await page.evaluate(() => {
+    // SAFETY: the preceding poll confirmed that the pending file read installed this resolver.
+    (window as typeof window & { __finishEditorRead: () => void }).__finishEditorRead();
+  });
+  await expect(editorLines).toContainText('Updated Session notes local edit');
+  // Restore immediate reads for the close/reopen checks below.
+  await page.evaluate(() => {
+    const originalInvoke = window.electronAPI.invoke;
+    Object.assign(window.electronAPI, {
+      invoke: (channel: string, ...args: unknown[]) => channel === 'file:read'
+        ? Promise.resolve({ success: true, content: 'Updated Session notes local edit' })
+        : originalInvoke(channel, ...args),
+    });
+  });
   const path = testInfo.outputPath('session-tools.png');
   await page.screenshot({ path });
   await testInfo.attach('session-tools.png', { path, contentType: 'image/png' });
@@ -1453,3 +1516,57 @@ test('Sessions can be renamed from their right-click menu', async ({ page }) => 
   await expect(page.getByRole('button', { name: 'Open Session New name', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'New name', exact: true, level: 1 })).toBeAttached();
 });
+
+test('agent-opened pages open as tabs in a split beside the Session conversation', async ({ page }, testInfo) => {
+  await installSessionsFixture(page, [sessionFixture('plans', 'Plan demo', '', '', new Date(0).toISOString())]);
+  await page.goto('/');
+  await page.getByTestId('orchestration-session-plans').click();
+  const titleBarTabs = page.getByTestId('session-workspace-tabs');
+  await expect(titleBarTabs.getByRole('tab').first()).toBeVisible();
+  const openPage = (id: string, title: string, active = true, reused = false) => page.evaluate(({ id, title, active, reused }) => {
+    // SAFETY: installElectronApiMock adds these controls before the app loads.
+    const mockWindow = window as typeof window & { __paneTestElectronMock: { emitPanelCreated: (panel: ToolPanel) => void; emitPanelUpdated: (panel: ToolPanel) => void } };
+    const now = new Date(0).toISOString();
+    const emit = reused ? mockWindow.__paneTestElectronMock.emitPanelUpdated : mockWindow.__paneTestElectronMock.emitPanelCreated;
+    emit({
+      id, sessionId: '__orchestration_session_plansterminal__', type: 'browser', title,
+      state: { isActive: active, hasBeenViewed: false, customState: { currentUrl: 'about:blank', reopenedAt: reused ? new Date().toISOString() : undefined, reopenedWithFocus: reused && active } },
+      metadata: { createdAt: now, lastActiveAt: now, position: 5, openPlacement: 'split' },
+    });
+  }, { id, title, active, reused });
+
+  await openPage('plan-page', 'plan.html');
+  const groupStrips = page.locator('.panel-group-tab-bar');
+  await expect(groupStrips).toHaveCount(2);
+  // The permanent agent tab stays in the workspace toolbar; opened pages get the side strip.
+  await expect(titleBarTabs.getByRole('tab')).toHaveCount(1);
+  await expect(groupStrips.nth(1).getByRole('tab', { name: 'plan.html' })).toHaveAttribute('aria-selected', 'true');
+  await expect(groupStrips.nth(0).getByRole('tab')).toHaveCount(0);
+
+  await openPage('report-page', 'report.html', false);
+  await expect(groupStrips.nth(1).getByRole('tab', { name: 'plan.html' })).toHaveAttribute('aria-selected', 'true');
+  await openPage('report-page', 'report.html', true, true);
+  await expect(groupStrips).toHaveCount(2);
+  await expect(groupStrips.nth(1).getByRole('tab')).toHaveCount(2);
+  await expect(groupStrips.nth(1).getByRole('tab', { name: 'report.html' })).toHaveAttribute('aria-selected', 'true');
+  await page.evaluate(() => {
+    // SAFETY: the fixture installs these event controls; this test owns the read resolver.
+    const controls = window as typeof window & { __paneTestElectronMock: { emitPanelUpdated: (panel: ToolPanel) => void } };
+    const now = new Date().toISOString();
+    controls.__paneTestElectronMock.emitPanelUpdated({
+      id: 'plan-page', sessionId: '__orchestration_session_plansterminal__', type: 'browser', title: 'plan.html',
+      state: { isActive: true, hasBeenViewed: true, customState: { currentUrl: 'about:blank', reopenedAt: now, reopenedWithFocus: false } },
+      metadata: { createdAt: now, lastActiveAt: now, position: 5, openPlacement: 'split' },
+    });
+  });
+  await expect(groupStrips.nth(1).getByRole('tab', { name: 'report.html' })).toHaveAttribute('aria-selected', 'true');
+  const screenshot = testInfo.outputPath('session-split-tabs.png');
+  await page.screenshot({ path: screenshot });
+  await testInfo.attach('session-split-tabs.png', { path: screenshot, contentType: 'image/png' });
+
+  await groupStrips.nth(1).getByRole('button', { name: 'Close report.html' }).click();
+  await groupStrips.nth(1).getByRole('button', { name: 'Close plan.html' }).click();
+  await expect(groupStrips).toHaveCount(0);
+  await expect(titleBarTabs.getByRole('tab')).toHaveCount(1);
+});
+

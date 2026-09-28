@@ -1,20 +1,34 @@
 import { createPortal } from 'react-dom';
 import { useTitleBarSlotStore } from '../stores/titleBarSlotStore';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronUp, PanelRight, Terminal } from 'lucide-react';
-import type { ToolPanel } from '../../../shared/types/panels';
+import type { SessionPanelLayout, ToolPanel } from '../../../shared/types/panels';
 import { panelApi } from '../services/panelApi';
 import { usePanelStore } from '../stores/panelStore';
 import { PanelContainer } from './panels/PanelContainer';
 import { PanelTabStrip } from './panels/PanelTabStrip';
+import { SplitLayout } from './panels/SplitLayout';
 import { useOuterPanelResize } from '../hooks/useOuterPanelResize';
 import { OuterResizeSeparator } from './ui/OuterResizeSeparator';
 import { OUTER_PANEL_CONFIGS } from '../utils/outerPanelSizing';
+import {
+  activatePanelInLayout,
+  shouldActivateReopenedPanel,
+  addPanelToGroup,
+  createSingleGroupLayout,
+  findGroup,
+  placePanelInSplit,
+  primaryGroup,
+  reconcile,
+  removePanelFromLayout,
+  updateSizes,
+} from '../utils/panelLayout';
 
 const EMPTY_PANELS: ToolPanel[] = [];
 const SESSION_INSPECTOR_TABS = ['overview', 'files', 'changes'] as const;
 type SessionInspectorTab = typeof SESSION_INSPECTOR_TABS[number];
-
+/** Panels that live on the Session stage as tabs; terminals and Files dock elsewhere. */
+const STAGE_PANEL_TYPES = new Set<ToolPanel['type']>(['editor', 'browser']);
 
 export function SessionWorkspacePanels({ agentPanel, agentPanelIds, overviewContent, changesContent, toolbarActions }: {
   agentPanel: ToolPanel; agentPanelIds: string[];
@@ -24,7 +38,7 @@ export function SessionWorkspacePanels({ agentPanel, agentPanelIds, overviewCont
   const sessionTabsSlot = useTitleBarSlotStore(state => state.sessionTabsSlot);
   const sessionId = agentPanel.sessionId;
   const panels = usePanelStore(state => state.panels[sessionId] ?? EMPTY_PANELS);
-  const activePanelId = usePanelStore(state => state.activePanels[sessionId]);
+  const layout = usePanelStore(state => state.layouts[sessionId]);
   const [showTerminal, setShowTerminal] = useState(false);
   const [sidebarVisible, setSidebarVisible] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SessionInspectorTab>('overview');
@@ -44,27 +58,77 @@ export function SessionWorkspacePanels({ agentPanel, agentPanelIds, overviewCont
   const creating = useRef(false);
   const terminal = panels.find(panel => panel.type === 'terminal' && !agentPanelIds.includes(panel.id));
   const explorer = panels.find(panel => panel.type === 'explorer');
-  const tabs = [agentPanel, ...panels.filter(panel => panel.type === 'editor')];
-  const active = tabs.find(panel => panel.id === activePanelId) ?? agentPanel;
+  const tabs = useMemo(() => [agentPanel, ...panels.filter(panel => STAGE_PANEL_TYPES.has(panel.type))], [agentPanel, panels]);
+  const agentPanelId = agentPanel.id;
+  const persistTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // Every layout change funnels through here: store, focus mirror, and a
+  // debounced save so sash drags do not write per frame.
+  const applyLayout = useCallback((next: SessionPanelLayout) => {
+    const focusedGroupId = next.focusedGroupId && findGroup(next.root, next.focusedGroupId)
+      ? next.focusedGroupId
+      : primaryGroup(next.root).id;
+    const repaired: SessionPanelLayout = { ...next, focusedGroupId, zoomedGroupId: null };
+    const store = usePanelStore.getState();
+    store.setLayout(sessionId, repaired);
+    store.setFocusedGroup(sessionId, focusedGroupId);
+    const focusedPanelId = findGroup(repaired.root, focusedGroupId)?.activePanelId;
+    if (focusedPanelId && store.activePanels[sessionId] !== focusedPanelId) {
+      store.setActivePanel(sessionId, focusedPanelId);
+      void panelApi.setActivePanel(sessionId, focusedPanelId).catch(() => {});
+    }
+    clearTimeout(persistTimer.current);
+    persistTimer.current = setTimeout(() => {
+      panelApi.setLayout(sessionId, repaired).catch(() => {});
+    }, 300);
+  }, [sessionId]);
+  useEffect(() => () => clearTimeout(persistTimer.current), []);
 
   useEffect(() => {
     let cancelled = false;
-    void panelApi.loadPanelsForSession(sessionId).then(saved => {
+    void panelApi.loadPanelsForSession(sessionId).then(async saved => {
       if (cancelled) return;
       usePanelStore.getState().setPanels(sessionId, saved);
+      const stored = await panelApi.getLayout(sessionId).catch(() => null);
+      if (cancelled) return;
+      const stage = (usePanelStore.getState().panels[sessionId] ?? saved).filter(panel => STAGE_PANEL_TYPES.has(panel.type));
+      const base = stored?.version === 1 ? stored : createSingleGroupLayout([agentPanelId], agentPanelId);
+      const splitIds = new Set(stage.filter(panel => panel.metadata?.openPlacement === 'split').map(panel => panel.id));
+      applyLayout(reconcile(base, [agentPanelId, ...stage.map(panel => panel.id)], splitIds).layout);
       setLoaded(true);
     }).catch(() => {
       if (!cancelled) setError('Could not load Session tools. Reopen the Session to retry.');
     });
     const events = window.electronAPI.events;
     const created = events.onPanelCreated(panel => {
-      if (panel.sessionId === sessionId) usePanelStore.getState().addPanel(panel);
+      if (panel.sessionId !== sessionId) return;
+      usePanelStore.getState().addPanel(panel);
+      const current = usePanelStore.getState().layouts[sessionId];
+      if (!current || !STAGE_PANEL_TYPES.has(panel.type)) return;
+      const focused = findGroup(current.root, current.focusedGroupId ?? '') ?? primaryGroup(current.root);
+      // Agents open pages and files beside the conversation by default.
+      const root = panel.metadata?.openPlacement === 'split'
+        ? placePanelInSplit(current.root, panel.id, panel.state.isActive)
+        : addPanelToGroup(current.root, focused.id, panel.id, { activate: panel.state.isActive });
+      if (root !== current.root) applyLayout({ ...current, root });
     });
     const updated = events.onPanelUpdated(panel => {
-      if (panel.sessionId === sessionId) usePanelStore.getState().updatePanelState(panel);
+      if (panel.sessionId !== sessionId) return;
+      const previous = usePanelStore.getState().panels[sessionId]?.find(saved => saved.id === panel.id);
+      const shouldFocus = shouldActivateReopenedPanel(panel, previous);
+      usePanelStore.getState().updatePanelState(panel);
+      const current = usePanelStore.getState().layouts[sessionId];
+      if (current && shouldFocus && STAGE_PANEL_TYPES.has(panel.type)) {
+        applyLayout(activatePanelInLayout(current, panel.id));
+      }
     });
     const deleted = events.onPanelDeleted(event => {
-      if (event.sessionId === sessionId) usePanelStore.getState().removePanel(sessionId, event.panelId);
+      if (event.sessionId !== sessionId) return;
+      usePanelStore.getState().removePanel(sessionId, event.panelId);
+      const current = usePanelStore.getState().layouts[sessionId];
+      if (!current) return;
+      const root = removePanelFromLayout(current.root, event.panelId);
+      applyLayout(root ? { ...current, root } : createSingleGroupLayout([agentPanelId], agentPanelId));
     });
     return () => {
       cancelled = true;
@@ -72,7 +136,7 @@ export function SessionWorkspacePanels({ agentPanel, agentPanelIds, overviewCont
       updated();
       deleted();
     };
-  }, [sessionId]);
+  }, [sessionId, agentPanelId, applyLayout]);
 
   async function toggleTool(type: 'terminal' | 'explorer') {
     if (!loaded || creating.current) return;
@@ -82,7 +146,6 @@ export function SessionWorkspacePanels({ agentPanel, agentPanelIds, overviewCont
       if (!(type === 'terminal' ? terminal : explorer)) {
         const panel = await panelApi.createPanel({ sessionId, type, title: type === 'terminal' ? 'Terminal' : 'Files' });
         usePanelStore.getState().addPanel(panel);
-        usePanelStore.getState().setActivePanel(sessionId, active.id);
       }
       if (type === 'terminal') setShowTerminal(value => !value);
       else { setSidebarTab('files'); setSidebarVisible(true); }
@@ -98,15 +161,18 @@ export function SessionWorkspacePanels({ agentPanel, agentPanelIds, overviewCont
     else setSidebarTab(tab);
   };
 
-  async function closePanel(panel: ToolPanel) {
-    if (panel.id === agentPanel.id) return;
+  const closePanel = useCallback(async (panel: ToolPanel) => {
+    if (panel.id === agentPanelId) return;
     try {
       await panelApi.deletePanel(panel.id);
       usePanelStore.getState().removePanel(sessionId, panel.id);
+      const current = usePanelStore.getState().layouts[sessionId];
+      const root = current && removePanelFromLayout(current.root, panel.id);
+      if (current) applyLayout(root ? { ...current, root } : createSingleGroupLayout([agentPanelId], agentPanelId));
     } catch {
-      setError('Could not close file. Please try again.');
+      setError('Could not close tab. Please try again.');
     }
-  }
+  }, [sessionId, agentPanelId, applyLayout]);
 
   const sidebarToggle = (
       <button type="button" className="inline-flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-surface-hover" disabled={!loaded}
@@ -115,11 +181,36 @@ export function SessionWorkspacePanels({ agentPanel, agentPanelIds, overviewCont
         aria-expanded={sidebarVisible}
         onClick={() => setSidebarVisible(value => !value)}><PanelRight className="h-4 w-4" aria-hidden="true" /></button>
   );
+  const selectPanel = useCallback((groupId: string, panel: ToolPanel) => {
+    const current = usePanelStore.getState().layouts[sessionId];
+    if (current) applyLayout({ ...activatePanelInLayout(current, panel.id), focusedGroupId: groupId });
+  }, [sessionId, applyLayout]);
+  const focusGroup = useCallback((groupId: string) => {
+    const current = usePanelStore.getState().layouts[sessionId];
+    if (current && current.focusedGroupId !== groupId) applyLayout({ ...current, focusedGroupId: groupId });
+  }, [sessionId, applyLayout]);
+  const resizeSplit = useCallback((splitNodeId: string, sizes: number[]) => {
+    const current = usePanelStore.getState().layouts[sessionId];
+    if (current) applyLayout({ ...current, root: updateSizes(current.root, splitNodeId, sizes) });
+  }, [sessionId, applyLayout]);
+  const handleClose = useCallback((panel: ToolPanel) => { void closePanel(panel); }, [closePanel]);
+  // A single group keeps its tabs in the workspace toolbar. Once split, each group
+  // owns a strip and the toolbar keeps only the permanent agent tab.
+  const isSplit = layout?.root.type === 'split';
+  const primary = layout ? primaryGroup(layout.root) : null;
+  const primaryTabs = primary
+    ? primary.panelIds.map(id => tabs.find(panel => panel.id === id)).filter((panel): panel is ToolPanel => !!panel)
+    : [agentPanel];
+  const titleTabs = isSplit ? primaryTabs.filter(panel => panel.metadata?.permanent === true) : primaryTabs;
+  // The agent tab strip renders in the title bar when it has a slot, otherwise
+  // in the workspace toolbar; the test id follows it to either place.
   const tabStrip = (
-    <PanelTabStrip panels={tabs} activePanelId={active.id} idNamespace={`session-${sessionId}`}
-      alwaysShowClose
-      onPanelSelect={panel => usePanelStore.getState().setActivePanel(sessionId, panel.id)}
-      onPanelClose={panel => { void closePanel(panel); }} />
+    <div data-testid="session-workspace-tabs" className="flex min-w-0 items-center">
+      <PanelTabStrip panels={titleTabs} activePanelId={primary?.activePanelId ?? agentPanelId} idNamespace={`session-${sessionId}`}
+        alwaysShowClose
+        onPanelSelect={panel => { if (primary) selectPanel(primary.id, panel); }}
+        onPanelClose={handleClose} />
+    </div>
   );
   const titleBarActions = (
     <>
@@ -142,11 +233,9 @@ export function SessionWorkspacePanels({ agentPanel, agentPanelIds, overviewCont
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <div className="relative min-h-0 flex-1">
-            {tabs.map(panel => (
-              <div key={panel.id} className="absolute inset-0" style={{ display: active.id === panel.id ? 'block' : 'none' }}>
-                <PanelContainer panel={panel} isActive={active.id === panel.id} autoFocus={active.id === panel.id} />
-              </div>
-            ))}
+            {layout && <SplitLayout layout={layout} panels={tabs} focusedGroupId={layout.focusedGroupId ?? primaryGroup(layout.root).id}
+              isMainRepo={false} onSizesChange={resizeSplit} onPanelSelect={selectPanel} onPanelClose={handleClose}
+              onFocusGroup={focusGroup} showAddTool={false} alwaysShowClose />}
           </div>
           <div className="flex flex-shrink-0 flex-col border-t border-border-primary" style={{ height: showTerminal ? '35%' : 32 }}>
             <button type="button" disabled={!loaded} aria-label={showTerminal ? 'Collapse terminal' : 'Expand terminal'}

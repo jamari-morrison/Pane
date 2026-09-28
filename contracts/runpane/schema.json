@@ -462,6 +462,7 @@
         "panes focus",
         "panels",
         "panels create",
+        "panels open",
         "panels list",
         "panels output",
         "panels input",
@@ -578,6 +579,9 @@
           "$ref": "#/$defs/helpLines"
         },
         "panels create": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "panels open": {
           "$ref": "#/$defs/helpLines"
         },
         "panels list": {
