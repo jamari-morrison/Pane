@@ -470,6 +470,7 @@ interface ElectronAPI {
     onAppMenuAction: (callback: (action: 'open-about' | 'open-settings') => void) => () => void;
     onWindowFocusChanged: (callback: (focused: boolean) => void) => () => void;
     onRemoteDaemonResyncRequested: (callback: () => void) => () => void;
+    onSessionPortsChanged?: (callback: (snapshot: JsonValue) => void) => () => void;
 
     // Spotlight events
     onSpotlightStatusChanged?: (callback: (data: { sessionId: string; projectId: number; active: boolean }) => void) => () => void;

@@ -5,6 +5,8 @@
  * channels `runpane:ports:list|open|close|configure`; clients get `runpane:ports:changed` events.
  */
 
+import { boundary, decodeOptionalBoundary, type JsonValue } from '../validation/boundaryDecoder';
+
 /** Who published a port: a person or agent (`port open`), a repository's `.runpane/ports.json`, or auto-open. */
 export type SessionPortSource = 'user' | 'manifest' | 'auto';
 
@@ -102,3 +104,98 @@ export interface SessionPortsConfigureResult {
 }
 
 export const SESSION_PORTS_CHANGED_EVENT = 'runpane:ports:changed';
+export const SESSION_PORTS_LIST_CHANNEL = 'runpane:ports:list';
+export const SESSION_PORTS_OPEN_CHANNEL = 'runpane:ports:open';
+export const SESSION_PORTS_CLOSE_CHANNEL = 'runpane:ports:close';
+
+/** What the Ports chip row renders: the list result without the daemon's config fields. */
+export type SessionPortsSnapshot = Pick<SessionPortsListResult, 'available' | 'unavailableReason' | 'host' | 'ports' | 'suggested'>;
+
+const sessionPortSchema = boundary.object({
+  name: boundary.string,
+  port: boundary.number,
+  httpsPort: boundary.number,
+  url: boundary.string,
+  scheme: boundary.enumeration('https', 'http'),
+  path: boundary.string,
+  source: boundary.enumeration('user', 'manifest', 'auto'),
+  repo: boundary.optional(boundary.string),
+  createdAt: boundary.string,
+  status: boundary.enumeration('serving', 'missing', 'error'),
+  detail: boundary.optional(boundary.string),
+  reachable: boundary.optional(boundary.nullable(boundary.boolean)),
+});
+
+const suggestedPortSchema = boundary.object({
+  port: boundary.number,
+  address: boundary.string,
+  process: boundary.optional(boundary.string),
+  pid: boundary.optional(boundary.number),
+  paneId: boundary.optional(boundary.string),
+  panelId: boundary.optional(boundary.string),
+  detectedAt: boundary.string,
+});
+
+const snapshotShellSchema = boundary.object({
+  available: boundary.boolean,
+  unavailableReason: boundary.optional(boundary.string),
+  host: boundary.optional(boundary.string),
+  ports: boundary.array(boundary.json),
+  suggested: boundary.array(boundary.json),
+});
+
+const ipcEnvelopeSchema = boundary.object({
+  success: boundary.literal(true),
+  data: boundary.json,
+});
+
+function isValidPort(port: number): boolean {
+  return Number.isInteger(port) && port > 0 && port < 65536;
+}
+
+/** Only http(s) links may reach openExternal / window.open. */
+function isOpenableSessionPortUrl(url: string): boolean {
+  try {
+    const protocol = new URL(url).protocol;
+    return protocol === 'https:' || protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+function decodePort(value: JsonValue): SessionPort | null {
+  const decoded = decodeOptionalBoundary(value, sessionPortSchema);
+  return decoded && isValidPort(decoded.port) && isValidPort(decoded.httpsPort) && isOpenableSessionPortUrl(decoded.url)
+    ? decoded
+    : null;
+}
+
+function decodeSuggested(value: JsonValue): SuggestedPort | null {
+  const decoded = decodeOptionalBoundary(value, suggestedPortSchema);
+  return decoded && isValidPort(decoded.port) ? decoded : null;
+}
+
+/**
+ * Decodes a `runpane:ports:list` result or a `runpane:ports:changed` payload for the UI.
+ * Accepts the bare result or an IPC `{ success, data }` envelope, and drops malformed
+ * entries instead of failing the whole list, so one odd entry never blanks the chip row.
+ * Returns null when the value is not a list result at all.
+ */
+export function decodeSessionPortsSnapshot<Value>(value: Value): SessionPortsSnapshot | null {
+  const unwrapped = decodeOptionalBoundary(value, ipcEnvelopeSchema)?.data ?? value;
+  const shell = decodeOptionalBoundary(unwrapped, snapshotShellSchema);
+  if (!shell) return null;
+  const ports = shell.ports.map(decodePort).filter((port): port is SessionPort => port !== null);
+  const published = new Set(ports.map(port => port.port));
+  const suggested = shell.suggested
+    .map(decodeSuggested)
+    .filter((port): port is SuggestedPort => port !== null && !published.has(port.port));
+  const snapshot: SessionPortsSnapshot = {
+    available: shell.available,
+    ports: ports.sort((a, b) => a.httpsPort - b.httpsPort),
+    suggested: suggested.sort((a, b) => a.port - b.port),
+  };
+  if (shell.host !== undefined) snapshot.host = shell.host;
+  if (shell.unavailableReason !== undefined) snapshot.unavailableReason = shell.unavailableReason;
+  return snapshot;
+}

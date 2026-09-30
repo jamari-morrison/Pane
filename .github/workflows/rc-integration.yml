@@ -55,6 +55,34 @@ jobs:
       if: ${{ !cancelled() }}
       run: CI=1 pnpm --filter frontend test
 
+  session-ports-ui:
+    name: Session ports UI (Playwright, mocked daemon)
+    if: github.repository != 'greenfield-inc/Pane'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Setup Node.js and pnpm
+      uses: ./.github/actions/setup-pnpm
+
+    - name: Install dependencies
+      run: pnpm install --ignore-scripts
+
+    - name: Install Chromium
+      run: pnpm exec playwright install --with-deps chromium
+
+    - name: Ports chip row (desktop renderer + web client)
+      run: CI=1 pnpm exec playwright test --config=playwright.ports.config.ts
+
+    - name: Upload screenshots
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: session-ports-screenshots
+        path: test-results/session-ports
+        if-no-files-found: warn
+
   runpane:
     name: Runpane (contract, MCP, package smoke, unit, cloud assets)
     if: github.repository != 'greenfield-inc/Pane'

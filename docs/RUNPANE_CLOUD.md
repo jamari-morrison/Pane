@@ -183,6 +183,23 @@ runpane cloud pair "api work"     # prints the pane-remote:// code; treat it lik
 The phone app needs the Session on HTTPS: it can't open an `http://` Session (see
 [HTTPS certificates and `--transport`](#https-certificates-and---transport)).
 
+### Session ports in the app
+
+A service an agent runs in the Session (a dev server, a preview) gets a tailnet-only HTTPS link,
+`https://<session>.<tailnet>.ts.net:<port>/` (published with `runpane port open` in the Session, `runpane cloud port
+open` from your laptop, or a repo's `.runpane/ports.json`). Pane shows them as a **Ports** row:
+
+- **Where:** under the tab bar of a Session in Pane desktop, in the Pane Chat header, and under the host bar of the web
+  client (https://runpane.com/app/; on a phone the row scrolls sideways).
+- **A published port** is a chip, `name :port`. Click the name to open the URL: in your default browser from the desktop,
+  in a new tab from the web client. The copy button copies the URL; the × asks, then stops publishing it. An amber dot
+  means the daemon can't serve it right now (hover for why); an `http` tag means the Session has no TLS certificate and
+  the link is plain HTTP inside the tailnet.
+- **A suggested port** (dimmed, dashed) is something a panel started listening on that isn't published. **Open on
+  tailnet** publishes it. If that tailnet port is already taken by another Serve entry, the row asks before replacing it.
+- The row follows the daemon you're connected to: it updates when ports change, when the connection comes back, and every
+  30 s. It stays hidden off a cloud Session and on daemons without ports support.
+
 ### From the CLI
 
 Every daemon command takes `--host <cloud Session>`:

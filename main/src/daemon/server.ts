@@ -35,6 +35,7 @@ const DAEMON_EVENT_EXACT_CHANNELS = new Set<string>([
   'process:ended',
   'project-script-changed',
   'project-script-closing',
+  'runpane:ports:changed',
   'session-log',
   'session-logs-cleared',
   'script-closing',
