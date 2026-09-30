@@ -1,0 +1,33 @@
+name: p5-ui live build (fork, artifact only)
+
+# Throwaway branch rc/p5/p5-ui-dist: builds the .deb + CLI tarball of the p5-ui head for the
+# live Ports-row screenshots (xvfb Electron). Uploads a workflow artifact; publishes nothing.
+on:
+  push:
+    branches:
+      - rc/p5/p5-ui-dist
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository != 'greenfield-inc/Pane'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - name: Setup Node.js and pnpm
+      uses: ./.github/actions/setup-pnpm
+    - name: Install dependencies
+      run: pnpm install
+    - name: Build artifacts
+      run: bash scripts/cloud-dist/build-artifacts.sh dist-cloud
+    - name: Upload
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: p5-ui-dist
+        path: dist-cloud
+        retention-days: 3
