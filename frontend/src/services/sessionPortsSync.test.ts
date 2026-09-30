@@ -155,5 +155,6 @@ describe('createSessionPortsSync', () => {
     expect(isSessionPortConflict(new Error('tailnet port 8787 is already served (tcp); pass --yes to replace'))).toBe(true);
     expect(isSessionPortConflict(new Error('ERR_PORTS_CONFLICT: tailnet :8787 is held by a tcp entry'))).toBe(true);
     expect(isSessionPortConflict(new Error('permission denied'))).toBe(false);
+    expect(isSessionPortConflict(new Error('tailnet port 8787 already serves taste (port 8787); pick another with --https-port'))).toBe(false);
   });
 });

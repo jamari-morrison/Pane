@@ -48,7 +48,8 @@ export function errorMessage(cause: unknown): string {
 
 /** The daemon refused to replace an existing tailnet serve entry without confirmation. */
 export function isSessionPortConflict(cause: unknown): boolean {
-  return /ERR_PORTS_CONFLICT|--yes|already (served|in use|taken)|conflict/i.test(errorMessage(cause));
+  // Not ERR_PORTS_IN_USE (another published port): yes cannot fix that one.
+  return /ERR_PORTS_CONFLICT|--yes|already served/i.test(errorMessage(cause));
 }
 
 function isFailedIpcResponse<Value>(value: Value): string | null {
