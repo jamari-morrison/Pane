@@ -509,7 +509,18 @@
         "lock",
         "lock acquire",
         "lock release",
-        "lock list"
+        "lock list",
+        "cloud",
+        "cloud setup",
+        "cloud new",
+        "cloud list",
+        "cloud status",
+        "cloud stop",
+        "cloud wake",
+        "cloud destroy",
+        "cloud pair",
+        "cloud sync",
+        "cloud coordinator"
       ],
       "properties": {
         "default": {
@@ -729,6 +740,39 @@
           "$ref": "#/$defs/helpLines"
         },
         "lock list": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "cloud": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "cloud setup": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "cloud new": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "cloud list": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "cloud status": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "cloud stop": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "cloud wake": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "cloud destroy": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "cloud pair": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "cloud sync": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "cloud coordinator": {
           "$ref": "#/$defs/helpLines"
         }
       },
