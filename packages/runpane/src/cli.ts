@@ -128,6 +128,11 @@ async function dispatchParsedCommand(parsed: ParsedArgs, telemetryContext: Wrapp
     return runAgentContext(parsed);
   }
 
+  if (parsed.cloudArgv) {
+    const { runCloud } = await import('./cloud');
+    return runCloud(parsed.cloudArgv);
+  }
+
   if (parsed.command === 'mcp') {
     const { runMcpServer } = await import('./mcp');
     return runMcpServer({ toolsets: parsed.toolsets, readOnly: parsed.readOnly === true });
