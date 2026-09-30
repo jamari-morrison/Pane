@@ -7,6 +7,8 @@ import { hashRemoteDaemonToken } from './auth';
 import { boundary, decodeBoundary, type JsonValue } from '../../../shared/validation/boundaryDecoder';
 
 import { PaneRemoteHttpApiServer } from './httpApiServer';
+import { cloudDaemonHealth } from './cloud/readiness';
+import { userClientActivity } from './cloud/clientActivity';
 
 interface ConfigManagerStub {
   getConfig(): { deepgramApiKey?: string; remoteDaemon?: RemoteDaemonConfig };
@@ -455,8 +457,52 @@ describe('PaneRemoteHttpApiServer', () => {
         ok: true,
         status: 'ready',
         transport: 'http+sse',
+        ...JSON.parse(JSON.stringify(cloudDaemonHealth.fields())),
       },
     });
+  });
+
+  it('reports the daemon version and agent readiness on health for cloud wake', async () => {
+    const registry = new PaneCommandRegistry();
+    const server = new PaneRemoteHttpApiServer(registry, createConfigManagerStub(createEnabledRemoteConfig()));
+    activeServers.push(server);
+    await server.start();
+    cloudDaemonHealth.setVersion('2.4.141', 'abc1234');
+    cloudDaemonHealth.markDaemonReady();
+
+    const health = await requestJson(server, 'GET', '/health');
+
+    expect(health.body).toMatchObject({
+      status: 'ready',
+      version: '2.4.141',
+      gitCommit: 'abc1234',
+      readiness: { state: 'ready', daemon: 'ready', agentRestore: 'none' },
+    });
+  });
+
+  it('marks peer calls so they never count as a user using the Session', async () => {
+    const registry = new PaneCommandRegistry();
+    registry.register('runpane:panels:list', () => ({ ok: true }));
+    const config = createEnabledRemoteConfig();
+    config.host.config.pairingRequired = true;
+    config.host.clients = [
+      { id: 'peer-a', label: 'Session A', createdAt: '2026-09-29T00:00:00.000Z', tokenHash: hashRemoteDaemonToken('peer-token') },
+      { id: 'desktop', label: 'MacBook', createdAt: '2026-09-29T00:00:00.000Z', tokenHash: hashRemoteDaemonToken('user-token') },
+    ];
+    Object.assign(config.host.clients[0], { scope: 'peer' });
+    const server = new PaneRemoteHttpApiServer(registry, createConfigManagerStub(config));
+    activeServers.push(server);
+    await server.start();
+    userClientActivity.reset();
+    const invokeSpy = vi.spyOn(registry, 'invoke');
+
+    await requestJson(server, 'POST', '/invoke', { channel: 'runpane:panels:list', args: [], token: 'peer-token' });
+    expect(invokeSpy).toHaveBeenLastCalledWith('runpane:panels:list', [], { origin: 'remote-peer' });
+    expect(userClientActivity.invokedSince(0)).toEqual([]);
+
+    await requestJson(server, 'POST', '/invoke', { channel: 'runpane:panels:list', args: [], token: 'user-token' });
+    expect(invokeSpy).toHaveBeenLastCalledWith('runpane:panels:list', [], { origin: 'remote-user' });
+    expect(userClientActivity.invokedSince(0)).toMatchObject([{ clientId: 'desktop', label: 'MacBook' }]);
   });
 
   it('supports browser CORS preflights for PWA remote clients', async () => {

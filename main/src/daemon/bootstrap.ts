@@ -52,6 +52,10 @@ import { WorkspaceStateReader } from '../services/workspaceStateReader';
 import { WorkspaceCursorStore } from '../services/workspaceCursorStore';
 import { extractWorkspaceHeldInput } from '../services/workspaceHeldInput';
 import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+import { cloudDaemonHealth } from './cloud/readiness';
+import { userClientActivity } from './cloud/clientActivity';
+import { readBuildCommit, registerCloudDaemonHandlers } from './cloud/cloudDaemon';
+import { remoteHostRuntimeStateStore } from './remoteHostRuntimeState';
 
 interface PaneDaemonHostOptions {
   app: App;
@@ -366,6 +370,22 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
   };
 
   const commandRegistry = registerIpcHandlers(services);
+  cloudDaemonHealth.setVersion(options.app.getVersion(), readBuildCommit(options.app.getAppPath()));
+  registerCloudDaemonHandlers({
+    commandRegistry,
+    health: cloudDaemonHealth,
+    clientActivity: userClientActivity,
+    terminals: terminalPanelManager,
+    getPanel: panelId => panelManager.getPanel(panelId),
+    getPanelsForPane: paneId => panelManager.getPanelsForSession(paneId),
+    listPaneIds: () => sessionManager.getAllSessions().map(session => session.id),
+    listLocks: () => namedLockService.list(),
+    pendingPrChecks: maxAgeMs => sessionPrMonitor.pendingChecks(maxAgeMs),
+    connectedClients: () => remoteHostRuntimeStateStore.getState().connectedClients,
+    remoteConfig: () => configManager.getConfig().remoteDaemon,
+    checkpointWal: () => databaseService.checkpointWal(),
+    paneDirectory: getAppDirectory(),
+  });
 
   let paneDaemonServer: PaneDaemonServer | null = null;
   const remoteTransportController = new PaneRemoteTransportController(commandRegistry, configManager, analyticsManager);
@@ -447,6 +467,8 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
       console.error('[Main] Failed to restore spotlight state:', error);
     }
   }
+
+  cloudDaemonHealth.markDaemonReady();
 
   return {
     services,

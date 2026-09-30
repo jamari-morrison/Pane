@@ -1,0 +1,170 @@
+import fs from 'fs';
+import path from 'path';
+import type { RemoteDaemonConfig, RemoteDaemonConnectedClient } from '../../../../shared/types/remoteDaemon';
+import type { RunpaneLockRecord } from '../../../../shared/types/runpaneOrchestration';
+import type { ToolPanel } from '../../../../shared/types/panels';
+import type { AgentState } from '../../../../shared/types/agentStatus';
+import type { CloudWalCheckpoint } from '../../../../shared/types/cloudDaemon';
+import { boundary, decodeOptionalBoundary } from '../../../../shared/validation/boundaryDecoder';
+import { resolveAgentTypeFromCommand } from '../../services/agents/agentIdentity';
+import type { PaneCommandRegistry, PaneCommandValue } from '../commandRegistry';
+import { isPeerClientRecord, type UserClientActivityTracker } from './clientActivity';
+import { flushDurableState } from './durableFlush';
+import type { CloudDaemonHealthState, ReadinessAgentPanel } from './readiness';
+import { runSafeToStop, type SafeToStopSources, type SafeToStopTerminal, type SafeToStopUserClient } from './safeToStop';
+import {
+  CloudUpgradeError,
+  downloadToFile,
+  resolveOwnSystemdUnit,
+  runCloudUpgrade,
+  runDetachedWithSystemd,
+} from './upgrade';
+
+/** Channels whose in-flight calls mean someone is watching for work to finish. */
+export const WATCHER_CHANNELS = ['runpane:workspace:wait', 'runpane:panels:wait'] as const;
+/** safe-to-stop re-polls GitHub when the PR monitor's last round is older than this. */
+const PR_CHECKS_MAX_AGE_MS = 60_000;
+
+const terminalCustomStateSchema = boundary.object({
+  isCliPanel: boundary.optional(boundary.boolean),
+  agentType: boundary.optional(boundary.string),
+  initialCommand: boundary.optional(boundary.string),
+});
+
+interface TerminalReader {
+  getAllPanelIds(): string[];
+  isTerminalInitialized(panelId: string): boolean;
+  getAgentStatus(panelId: string): AgentState | undefined;
+  getLastOutputAt(panelId: string): string | undefined;
+}
+
+export interface CloudDaemonDependencies {
+  commandRegistry: PaneCommandRegistry;
+  health: CloudDaemonHealthState;
+  clientActivity: UserClientActivityTracker;
+  terminals: TerminalReader;
+  getPanel(panelId: string): ToolPanel | undefined;
+  getPanelsForPane(paneId: string): ToolPanel[];
+  /** Non-archived Panes. */
+  listPaneIds(): string[];
+  listLocks(): RunpaneLockRecord[];
+  pendingPrChecks(maxAgeMs: number): Promise<Array<{ paneId: string; prNumber: number }>>;
+  connectedClients(): RemoteDaemonConnectedClient[];
+  remoteConfig(): RemoteDaemonConfig | undefined;
+  checkpointWal(): CloudWalCheckpoint | null;
+  paneDirectory: string;
+  now?: () => number;
+}
+
+/**
+ * Registers the Runpane Cloud channels (`runpane:cloud:safe-to-stop`, `runpane:cloud:upgrade`)
+ * and points `/health` readiness at the live panels. Kept out of runpane.ts: these are for the
+ * coordinator and the sandbox, not for everyday orchestration.
+ */
+export function registerCloudDaemonHandlers(dependencies: CloudDaemonDependencies): void {
+  const now = dependencies.now ?? Date.now;
+  dependencies.health.setAgentPanelSource(() => readinessPanels(dependencies));
+
+  dependencies.commandRegistry.register('runpane:cloud:safe-to-stop', async (request: PaneCommandValue = {}) => {
+    return runSafeToStop({
+      sources: createSafeToStopSources(dependencies, now),
+      flush: () => flushDurableState({
+        checkpointWal: dependencies.checkpointWal,
+        paneDirectory: dependencies.paneDirectory,
+        now,
+      }),
+      version: dependencies.health.getVersion() ?? 'unknown',
+      now,
+    }, request);
+  });
+
+  dependencies.commandRegistry.register('runpane:cloud:upgrade', async (request: PaneCommandValue) => {
+    const currentVersion = dependencies.health.getVersion();
+    if (!currentVersion) {
+      throw new CloudUpgradeError('ERR_CLOUD_UPGRADE_UNSUPPORTED', 'This daemon does not know its own version');
+    }
+    return runCloudUpgrade({
+      currentVersion,
+      downloadDirectory: path.join(dependencies.paneDirectory, 'cloud-upgrades'),
+      resolveServiceUnit: resolveOwnSystemdUnit,
+      download: downloadToFile,
+      runDetached: runDetachedWithSystemd,
+    }, request);
+  });
+}
+
+export function createSafeToStopSources(dependencies: CloudDaemonDependencies, now: () => number): SafeToStopSources {
+  return {
+    terminals: () => dependencies.terminals.getAllPanelIds().map((panelId): SafeToStopTerminal => {
+      const lastOutputAt = dependencies.terminals.getLastOutputAt(panelId);
+      return {
+        panelId,
+        paneId: dependencies.getPanel(panelId)?.sessionId,
+        agentState: dependencies.terminals.getAgentStatus(panelId),
+        lastOutputAt: lastOutputAt ? Date.parse(lastOutputAt) : undefined,
+      };
+    }),
+    locks: () => dependencies.listLocks().map(lock => ({
+      name: lock.name,
+      ownerLabel: lock.owner.label ?? lock.owner.paneId,
+      paneId: lock.owner.paneId,
+      panelId: lock.owner.panelId,
+    })),
+    // Peer waits are left out: a peer must not be able to keep a sandbox awake.
+    watchers: () => WATCHER_CHANNELS.map(channel => ({
+      channel,
+      ...dependencies.commandRegistry.getChannelActivity(channel, ['local', 'remote-user']),
+    })),
+    pendingPrChecks: () => dependencies.pendingPrChecks(PR_CHECKS_MAX_AGE_MS),
+    userClients: (since) => {
+      const records = dependencies.remoteConfig()?.host.clients ?? [];
+      const streams: SafeToStopUserClient[] = dependencies.connectedClients()
+        .filter(client => !isPeerClientRecord(records.find(record => record.id === client.clientId)))
+        .map(client => ({ kind: 'events-stream', clientId: client.clientId, label: client.label, at: now() }));
+      const streamClientIds = new Set(streams.map(client => client.clientId));
+      const invokes: SafeToStopUserClient[] = dependencies.clientActivity.invokedSince(since)
+        .filter(client => !streamClientIds.has(client.clientId))
+        .map(client => ({ kind: 'recent-invoke', ...client }));
+      return [...streams, ...invokes];
+    },
+  };
+}
+
+function readinessPanels(dependencies: CloudDaemonDependencies): ReadinessAgentPanel[] {
+  const panels: ReadinessAgentPanel[] = [];
+  for (const paneId of dependencies.listPaneIds()) {
+    for (const panel of dependencies.getPanelsForPane(paneId)) {
+      if (panel.type !== 'terminal' || !isAgentPanel(panel)) continue;
+      const running = dependencies.terminals.isTerminalInitialized(panel.id);
+      panels.push({ running, agentState: running ? dependencies.terminals.getAgentStatus(panel.id) : undefined });
+    }
+  }
+  return panels;
+}
+
+function isAgentPanel(panel: ToolPanel): boolean {
+  const state = decodeOptionalBoundary(panel.state.customState ?? {}, terminalCustomStateSchema);
+  if (!state) return false;
+  return state.isCliPanel ?? Boolean(state.agentType ?? resolveAgentTypeFromCommand(state.initialCommand));
+}
+
+/** The short commit the build was made from (scripts/inject-build-info.js), when packaged. */
+export function readBuildCommit(appPath: string): string | null {
+  const candidates = [
+    path.join(process.resourcesPath ?? '', 'app.asar', 'main', 'dist', 'buildInfo.json'),
+    path.join(process.resourcesPath ?? '', 'app', 'main', 'dist', 'buildInfo.json'),
+    path.join(appPath, 'main', 'dist', 'buildInfo.json'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const info = decodeOptionalBoundary(
+        JSON.parse(fs.readFileSync(candidate, 'utf8')),
+        boundary.object({ gitCommit: boundary.optional(boundary.string) }),
+      );
+      if (info?.gitCommit) return info.gitCommit;
+    } catch {
+      // Not packaged at this location.
+    }
+  }
+  return null;
+}
