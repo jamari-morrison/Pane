@@ -31,3 +31,9 @@ jobs:
         name: p5-ui-dist
         path: dist-cloud
         retention-days: 3
+    - name: Upload the web client build (remote.html) too
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: p5-ui-frontend-dist
+        path: frontend/dist
+        retention-days: 3
