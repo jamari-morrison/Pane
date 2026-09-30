@@ -781,6 +781,14 @@ export interface RunpanePanelSummary {
   title: string;
   active: boolean;
   initialized?: boolean;
+  /**
+   * Terminal panels: `running`, `resuming` (the daemon is restarting it),
+   * `interrupted` (an agent stopped by a daemon restart or sandbox stop; its
+   * conversation resumes on the next start or submit) or `stopped`.
+   */
+  runState?: 'running' | 'resuming' | 'interrupted' | 'stopped';
+  /** Terminal panels: a restart resumes the agent's conversation, not only its program. */
+  resumable?: boolean;
   agentType?: RunpaneAgentId;
   agentDetection?: RunpaneAgentDetection;
   launchCommand?: string;

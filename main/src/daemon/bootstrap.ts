@@ -43,6 +43,7 @@ import type { PaneCommandRegistry } from './commandRegistry';
 import { syncRemoteTransportForMode } from './remoteTransportStartup';
 import { panelManager } from '../services/panelManager';
 import { terminalPanelManager } from '../services/terminalPanelManager';
+import { createPanelResume, createScrollbackCheckpoint } from '../services/panelResumeService';
 import { WorkspaceJournal } from '../services/workspaceJournal';
 import { SessionPrMonitor } from '../services/sessionPrMonitor';
 import { NamedLockService } from '../services/namedLockService';
@@ -74,6 +75,9 @@ export interface PaneDaemonHost {
 }
 
 let powerMonitorDiagnosticsRegistered = false;
+
+/** How often the headless daemon saves live terminal scrollback (boat stops are power-offs). */
+const SCROLLBACK_CHECKPOINT_INTERVAL_MS = 10_000;
 
 function installPaneRuntime(
   eventSink: PaneEventSink,
@@ -151,6 +155,19 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
   const analyticsManager = new AnalyticsManager(configManager);
   const sessionManager = new SessionManager(databaseService, analyticsManager);
   sessionManager.initializeFromDatabase();
+
+  // Headless starts follow a crash, a restart or a sandbox power-off: no PTY
+  // survived, so clear stale runtime flags before anything can start one.
+  const logResume = (message: string, error?: Error) => {
+    if (error) logger.warn(message, error);
+    else logger.info(message);
+  };
+  const panelResume = mode === 'headless' ? createPanelResume(databaseService, sessionManager, logResume) : undefined;
+  if (panelResume) {
+    panelResume.enable();
+    const interrupted = await panelResume.recoverAfterRestart();
+    logger.info(`[PanelResume] ${interrupted.length} agent panel(s) were interrupted by the last stop`);
+  }
 
   if (process.platform === 'win32') {
     const wslDistros = databaseService.getAllProjects()
@@ -340,6 +357,7 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
     workspaceStateReader,
     workspaceCursorStore,
     namedLockService,
+    panelResume,
   };
 
   const services: AppServices = {
@@ -409,6 +427,19 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
     },
   });
 
+  const scrollbackCheckpoint = panelResume
+    ? createScrollbackCheckpoint(SCROLLBACK_CHECKPOINT_INTERVAL_MS, logResume)
+    : undefined;
+  if (panelResume && scrollbackCheckpoint) {
+    scrollbackCheckpoint.start();
+    // Not awaited: the socket is up already, and a submit to a panel that is
+    // still coming back waits for that panel on its own.
+    void panelResume.resumeInterruptedAgents().then(status => {
+      const failed = status.panels.filter(panel => panel.state === 'failed').length;
+      logger.info(`[PanelResume] Resumed ${status.panels.length - failed} of ${status.panels.length} agent panel(s)`);
+    });
+  }
+
   if (options.restoreSpotlights !== false) {
     try {
       await spotlightManager.restoreAll();
@@ -427,6 +458,13 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
     },
     permissionIpcServer,
     async shutdown(): Promise<void> {
+      // Keep the latest scrollback; start-up recovery marks the agents interrupted.
+      if (scrollbackCheckpoint) {
+        scrollbackCheckpoint.stop();
+        await scrollbackCheckpoint.checkpoint().catch(error => {
+          logResume('[ScrollbackCheckpoint] Final save failed', error instanceof Error ? error : new Error(String(error)));
+        });
+      }
       // Before terminals stop: their exits during shutdown must not release locks.
       namedLockService.dispose();
       resourceMonitorService.stop();

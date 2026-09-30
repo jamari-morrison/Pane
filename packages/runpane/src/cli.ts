@@ -9,7 +9,8 @@ import { daemonActionFor, runDaemonAction } from './daemonActions';
 import { runDocsRead, runDocsSearch } from './docs';
 import { runLinksCreate } from './links';
 import { helpText, parseRunpaneArgs, takesDaemonTarget, type ParsedArgs } from './commands';
-import { boundary, decodeBoundary } from './boundaryDecoder';
+import { boundary, decodeBoundary, type JsonObject } from './boundaryDecoder';
+import { PaneDaemonClientError } from './daemonClient';
 import { downloadArtifact } from './download';
 import { runDoctor } from './doctor';
 import {
@@ -100,7 +101,37 @@ export async function main(argv: string[]): Promise<number> {
     return dispatchParsedCommand(parsed, telemetryContext);
   }
 
-  return runTrackedCommand(telemetryContext, () => dispatchParsedCommand(parsed, telemetryContext));
+  if (!parsed.json || parsed.command === 'watch' || parsed.command === 'mcp') {
+    return runTrackedCommand(telemetryContext, () => dispatchParsedCommand(parsed, telemetryContext));
+  }
+  try {
+    return await runTrackedCommand(telemetryContext, () => dispatchParsedCommand(parsed, telemetryContext));
+  } catch (error) {
+    // Scripts read stdout: a --json failure is still one JSON object there.
+    const failure = jsonFailure(error instanceof Error ? error : new Error(String(error)));
+    process.stdout.write(`${JSON.stringify(failure)}\n`);
+    process.stderr.write(`${failure.message}\n`);
+    return 1;
+  }
+}
+
+/** What `runpane <command> --json` prints on stdout when the command fails. */
+interface RunpaneJsonFailure {
+  ok: false;
+  /** Daemon codes (ERR_PANEL_NOT_RUNNING, ERR_RUNPANE_DAEMON_CONNECT_FAILED, ...) or ERR_RUNPANE_COMMAND_FAILED. */
+  code: string;
+  message: string;
+  /** Context the daemon sent with the code, e.g. `{ panelId, runState, resumable }`. */
+  details?: JsonObject;
+}
+
+function jsonFailure(error: Error): RunpaneJsonFailure {
+  if (error instanceof PaneDaemonClientError) {
+    const failure: RunpaneJsonFailure = { ok: false, code: error.code ?? 'ERR_RUNPANE_DAEMON_REQUEST_FAILED', message: error.message };
+    if (error.details) failure.details = error.details;
+    return failure;
+  }
+  return { ok: false, code: 'ERR_RUNPANE_COMMAND_FAILED', message: error.message };
 }
 
 async function dispatchParsedCommand(parsed: ParsedArgs, telemetryContext: WrapperTelemetryContext): Promise<number> {

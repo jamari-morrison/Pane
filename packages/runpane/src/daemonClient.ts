@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { boundary, decodeBoundary } from './boundaryDecoder';
-import type { BoundarySchema, JsonValue } from './boundaryDecoder';
+import type { BoundarySchema, JsonObject, JsonValue } from './boundaryDecoder';
 import type { DaemonTarget } from './remote/hostDirectory';
 import { getDaemonTarget, invokeRemote, RemoteTargetError } from './remote/target';
 
@@ -29,6 +29,7 @@ interface PaneDaemonErrorResponseFrame {
   error: {
     message: string;
     code?: string;
+    details?: JsonObject;
   };
 }
 
@@ -88,6 +89,7 @@ const paneDaemonFrameSchema: BoundarySchema<PaneDaemonFrame> = boundary.union(
     error: boundary.object({
       message: boundary.string,
       code: boundary.optional(boundary.string),
+      details: boundary.optional(boundary.jsonObject),
     }),
   }),
   boundary.object({
@@ -101,6 +103,8 @@ export class PaneDaemonClientError extends Error {
   constructor(
     message: string,
     readonly code?: string,
+    /** Machine-readable context the daemon sent with `code`. */
+    readonly details?: JsonObject,
   ) {
     super(message);
     this.name = 'PaneDaemonClientError';
@@ -193,7 +197,7 @@ export async function invokeDaemon<T>(
             settle({ result: decodeBoundary(frame.result, resultSchema) });
             return;
           }
-          settle({ error: new PaneDaemonClientError(frame.error.message, frame.error.code) });
+          settle({ error: new PaneDaemonClientError(frame.error.message, frame.error.code, frame.error.details) });
           return;
         }
       } catch (error) {

@@ -614,6 +614,8 @@ interface PanelSummary {
   title: string;
   active: boolean;
   initialized?: boolean;
+  runState?: 'running' | 'resuming' | 'interrupted' | 'stopped';
+  resumable?: boolean;
   agentType?: string;
   agentDetection?: 'declared' | 'command' | 'process' | 'screen';
   launchCommand?: string;
@@ -1070,6 +1072,8 @@ const panelSummarySchema: BoundarySchema<PanelSummary> = boundary.object({
   title: boundary.string,
   active: boundary.boolean,
   initialized: boundary.optional(boundary.boolean),
+  runState: boundary.optional(boundary.enumeration('running', 'resuming', 'interrupted', 'stopped')),
+  resumable: boundary.optional(boundary.boolean),
   agentType: boundary.optional(boundary.string),
   agentDetection: boundary.optional(boundary.enumeration('declared', 'command', 'process', 'screen')),
   launchCommand: boundary.optional(boundary.string),
@@ -3569,7 +3573,9 @@ function printPanelListResult(result: PanelListResult): void {
 
   for (const panel of result.panels) {
     const marker = panel.active ? '*' : ' ';
-    const initialized = panel.initialized === undefined ? '' : panel.initialized ? ' initialized' : ' not-initialized';
+    const initialized = panel.runState && panel.runState !== 'running'
+      ? ` ${panel.runState}${panel.resumable ? ' (resumable)' : ''}`
+      : panel.initialized === undefined ? '' : panel.initialized ? ' initialized' : ' not-initialized';
     const agent = panel.agentType ? ` ${panel.agentType}` : '';
     const detection = panel.agentDetection && panel.agentDetection !== 'command' ? ` (${panel.agentDetection})` : '';
     console.log(`${marker} ${panel.id}\t${panel.type}\t${panel.title}${initialized}${agent}${detection}`);
