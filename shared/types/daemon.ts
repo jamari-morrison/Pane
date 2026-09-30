@@ -1,5 +1,5 @@
 import { boundary, decodeBoundary } from '../validation/boundaryDecoder';
-import type { BoundarySchema, JsonValue } from '../validation/boundaryDecoder';
+import type { BoundarySchema, JsonObject, JsonValue } from '../validation/boundaryDecoder';
 export type {
   PanePermissionInput,
   PanePermissionRequest,
@@ -25,7 +25,7 @@ export interface PaneDaemonError {
   message: string;
   code?: string;
   /** Machine-readable context for `code`, e.g. `{ panelId, resumable }`. */
-  details?: Record<string, JsonValue>;
+  details?: JsonObject;
 }
 
 export interface PaneDaemonErrorResponseFrame {
@@ -70,6 +70,7 @@ const responseFrameSchema: BoundarySchema<PaneDaemonResponseFrame> = boundary.un
     error: boundary.object({
       message: boundary.string,
       code: boundary.optional(boundary.string),
+      details: boundary.optional(boundary.jsonObject),
     }),
   }),
 );

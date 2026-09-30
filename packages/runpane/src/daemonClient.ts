@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { boundary, decodeBoundary } from './boundaryDecoder';
-import type { BoundarySchema, JsonValue } from './boundaryDecoder';
+import type { BoundarySchema, JsonObject, JsonValue } from './boundaryDecoder';
 
 interface PaneDaemonRequestFrame {
   type: 'request';
@@ -27,6 +27,7 @@ interface PaneDaemonErrorResponseFrame {
   error: {
     message: string;
     code?: string;
+    details?: JsonObject;
   };
 }
 
@@ -99,7 +100,7 @@ export class PaneDaemonClientError extends Error {
     message: string,
     readonly code?: string,
     /** Machine-readable context the daemon sent with `code`. */
-    readonly details?: Record<string, JsonValue>,
+    readonly details?: JsonObject,
   ) {
     super(message);
     this.name = 'PaneDaemonClientError';
