@@ -61,7 +61,7 @@ export interface PanelResumeStatus {
   panels: PanelResumeEntry[];
 }
 
-export const DEFAULT_LAUNCH_WAIT_MS = 30_000;
+const DEFAULT_LAUNCH_WAIT_MS = 30_000;
 
 export function terminalState(panel: ToolPanel): TerminalPanelState {
   // SAFETY: terminal panels persist TerminalPanelState in customState exclusively.
@@ -69,7 +69,7 @@ export function terminalState(panel: ToolPanel): TerminalPanelState {
 }
 
 /** The CLI agent a panel launches, or undefined for a plain shell or tool. */
-export function panelAgentType(state: TerminalPanelState): string | undefined {
+function panelAgentType(state: TerminalPanelState): string | undefined {
   if (state.customResume) return state.agentType ?? 'custom';
   return state.agentType ?? resolveAgentTypeFromCommand(state.initialCommand);
 }
