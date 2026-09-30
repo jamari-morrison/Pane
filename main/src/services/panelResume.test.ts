@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { TerminalPanelState, ToolPanel } from '../../../shared/types/panels';
 import { PaneCommandError } from '../core/commandError';
-import { hasResumableConversation, PanelResume, type PanelResumeDeps, type PanelResumeSession } from './panelResume';
+import { hasResumableConversation, PanelResume, terminalState, type PanelResumeDeps, type PanelResumeSession } from './panelResume';
 
 function terminalPanel(id: string, sessionId: string, customState: TerminalPanelState): ToolPanel {
   return {
@@ -33,15 +33,18 @@ function harness(sessions: PanelResumeSession[], panels: ToolPanel[], options: {
     },
     isRunning: id => running.has(id),
     startTerminal: vi.fn(async (panel: ToolPanel, cwd: string) => {
-      // SAFETY: test panels are terminal panels built above.
-      launches.push({ panelId: panel.id, cwd, state: panel.state.customState as TerminalPanelState });
+      launches.push({ panelId: panel.id, cwd, state: terminalState(panel) });
       running.add(panel.id);
     }),
     waitForLaunch: vi.fn(async () => true),
     claudeTranscriptExists: () => options.transcript,
     log: () => undefined,
   };
-  return { deps, running, launches, state: (id: string) => byId.get(id)?.state.customState as TerminalPanelState };
+  const state = (id: string): TerminalPanelState => {
+    const panel = byId.get(id);
+    return panel ? terminalState(panel) : {};
+  };
+  return { deps, running, launches, state };
 }
 
 const pane: PanelResumeSession = { id: 'pane-1', worktreePath: '/repo/worktrees/a', archived: false };
@@ -174,7 +177,7 @@ describe('PanelResume.ensureRunning', () => {
     const h = harness([archived], [claude]);
     const resume = new PanelResume(h.deps);
 
-    const disabled = await resume.ensureRunning(claude).catch((error: unknown) => error);
+    const disabled = await resume.ensureRunning(claude).then(() => undefined, (error: Error) => error);
     expect(disabled).toBeInstanceOf(PaneCommandError);
     expect(disabled).toMatchObject({
       code: 'ERR_PANEL_NOT_RUNNING',

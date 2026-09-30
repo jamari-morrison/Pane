@@ -158,9 +158,9 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
 
   // Headless starts follow a crash, a restart or a sandbox power-off: no PTY
   // survived, so clear stale runtime flags before anything can start one.
-  const logResume = (message: string, error?: unknown) => {
-    if (error === undefined) logger.info(message);
-    else logger.warn(message, error instanceof Error ? error : new Error(String(error)));
+  const logResume = (message: string, error?: Error) => {
+    if (error) logger.warn(message, error);
+    else logger.info(message);
   };
   const panelResume = mode === 'headless' ? createPanelResume(databaseService, sessionManager, logResume) : undefined;
   if (panelResume) {
@@ -461,7 +461,9 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
       // Keep the latest scrollback; start-up recovery marks the agents interrupted.
       if (scrollbackCheckpoint) {
         scrollbackCheckpoint.stop();
-        await scrollbackCheckpoint.checkpoint().catch(error => logResume('[ScrollbackCheckpoint] Final save failed', error));
+        await scrollbackCheckpoint.checkpoint().catch(error => {
+          logResume('[ScrollbackCheckpoint] Final save failed', error instanceof Error ? error : new Error(String(error)));
+        });
       }
       // Before terminals stop: their exits during shutdown must not release locks.
       namedLockService.dispose();

@@ -16,7 +16,7 @@ function toResumeSession(row: SessionRow): PanelResumeSession {
 export function createPanelResume(
   databaseService: DatabaseService,
   sessionManager: SessionManager,
-  log: (message: string, error?: unknown) => void,
+  log: (message: string, error?: Error) => void,
 ): PanelResume {
   // getAllSessions leaves out each repo's main-checkout Pane; add those back.
   const withMainRepoSessions = (rows: SessionRow[]): PanelResumeSession[] => {
@@ -56,7 +56,7 @@ export function createPanelResume(
 }
 
 /** Persist live terminal scrollback on a timer, so a power-off keeps recent output. */
-export function createScrollbackCheckpoint(intervalMs: number, log: (message: string, error?: unknown) => void): ScrollbackCheckpoint {
+export function createScrollbackCheckpoint(intervalMs: number, log: (message: string, error?: Error) => void): ScrollbackCheckpoint {
   return new ScrollbackCheckpoint({
     intervalMs,
     listRunningPanelIds: () => terminalPanelManager.getAllPanelIds(),

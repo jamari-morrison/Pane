@@ -42,7 +42,7 @@ export interface PanelResumeDeps {
   waitForLaunch(panelId: string, timeoutMs: number): Promise<boolean>;
   /** True or false when Pane can read Claude's transcripts; undefined when it cannot tell. */
   claudeTranscriptExists(sessionId: string): boolean | undefined;
-  log(message: string, error?: unknown): void;
+  log(message: string, error?: Error): void;
 }
 
 export interface PanelResumeEntry {
@@ -126,17 +126,13 @@ export class PanelResume {
           continue;
         }
         const isAgent = Boolean(panelAgentType(state));
-        const next: TerminalPanelState = {
-          ...state,
-          isInitialized: false,
-          isCliReady: false,
-          ...(isAgent ? { wasInterrupted: true } : {}),
-        };
+        const next: TerminalPanelState = { ...state, isInitialized: false, isCliReady: false };
+        if (isAgent) next.wasInterrupted = true;
         try {
           await this.deps.updateCustomState(panel, next);
           if (isAgent) interrupted.push(panel.id);
         } catch (error) {
-          this.deps.log(`[PanelResume] Could not clear stale state for panel ${panel.id}`, error);
+          this.deps.log(`[PanelResume] Could not clear stale state for panel ${panel.id}`, error instanceof Error ? error : new Error(String(error)));
         }
       }
     }
@@ -241,9 +237,9 @@ export class PanelResume {
       this.setEntry(panelId, { state: 'running' });
       this.deps.log(`[PanelResume] Started panel ${panelId} in ${session.worktreePath}`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.setEntry(panelId, { state: 'failed', error: message });
-      this.deps.log(`[PanelResume] Could not start panel ${panelId}`, error);
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.setEntry(panelId, { state: 'failed', error: failure.message });
+      this.deps.log(`[PanelResume] Could not start panel ${panelId}`, failure);
       throw error;
     }
   }
@@ -261,7 +257,7 @@ export class PanelResume {
     try {
       exists = this.deps.claudeTranscriptExists(state.agentSessionId);
     } catch (error) {
-      this.deps.log(`[PanelResume] Could not look up the Claude transcript for panel ${panel.id}`, error);
+      this.deps.log(`[PanelResume] Could not look up the Claude transcript for panel ${panel.id}`, error instanceof Error ? error : new Error(String(error)));
       return;
     }
     if (exists !== false) return;

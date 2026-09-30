@@ -9,7 +9,7 @@ export interface ScrollbackCheckpointDeps {
   listRunningPanelIds(): string[];
   getOutputGeneration(panelId: string): number;
   save(panelId: string): Promise<void>;
-  log(message: string, error?: unknown): void;
+  log(message: string, error?: Error): void;
 }
 
 export class ScrollbackCheckpoint {
@@ -50,7 +50,7 @@ export class ScrollbackCheckpoint {
         this.savedGeneration.set(panelId, generation);
         saved += 1;
       } catch (error) {
-        this.deps.log(`[ScrollbackCheckpoint] Could not save panel ${panelId}`, error);
+        this.deps.log(`[ScrollbackCheckpoint] Could not save panel ${panelId}`, error instanceof Error ? error : new Error(String(error)));
       }
     }
     return saved;

@@ -15,7 +15,7 @@ function harness(generations: Record<string, number>) {
 
 describe('ScrollbackCheckpoint', () => {
   it('saves only panels with output since their last save', async () => {
-    const generations: Record<string, number> = { a: 1, b: 5 };
+    const generations = { a: 1, b: 5 };
     const { checkpoint, save } = harness(generations);
 
     expect(await checkpoint.checkpoint()).toBe(2);
