@@ -171,6 +171,8 @@ import { NamedLockService } from '../services/namedLockService';
 import { NamedLockStore } from '../services/namedLockStore';
 import { usageManager } from '../services/usage/usageManager';
 import { parseWSLPath, windowsPathToWSLMount, type WSLContext } from '../utils/wslUtils';
+import { IdempotencyWindow, isValidIdempotencyKey } from './runpaneIdempotency';
+import { PEER_MANAGEMENT_CHANNELS } from '../daemon/peer/peerCommands';
 import {
   dueIdleEntries,
   nextIdleDeadline,
@@ -215,6 +217,7 @@ const RUNPANE_CHANNELS = [
   'runpane:workspace:state',
   'runpane:workspace:wait',
   'runpane:agents:doctor',
+  ...PEER_MANAGEMENT_CHANNELS,
 ] as const;
 
 const AGENT_TEMPLATES = RUNPANE_CONTRACT.agentTemplates;
@@ -1199,123 +1202,135 @@ export function registerRunpaneHandlers(
     }));
   });
 
+  const submitIdempotency = new IdempotencyWindow<RunpanePanelSubmitResult>();
   commandRegistry.register('runpane:panels:submit', async (request: PaneCommandValue): Promise<RunpanePanelSubmitResult> => {
     return withRunpaneAction(services, 'panels:submit', {}, async () => {
       const normalized = parsePanelSubmitRequest(request);
-      const panel = resolveTerminalPanel(normalized.panelId);
-      if (!terminalPanelManager.isTerminalInitialized(panel.id)) {
-        throw new Error(`Terminal panel ${panel.id} is not initialized`);
-      }
-
-      let beforeScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
-      const promptFile = normalized.asFilePointer
-        ? await writePromptFile(panel.sessionId, stripTrailingNewlines(normalizePromptNewlines(normalized.input)))
-        : undefined;
-      const submittedText = promptFile
-        ? filePointerPrompt(agentVisiblePath(promptFile, sessionWslContext(services, panel.sessionId)))
-        : normalized.input;
-      // A CR inside the text would be Enter to an agent composer.
-      const stagedInput = stripTrailingNewlines(normalizePromptNewlines(submittedText));
-      const agentType = screenAgentType(beforeScreen);
-      const warnings = agentType === 'claude' ? claudePromptWarnings(stagedInput) : undefined;
-      // Claude reads text and Enter arriving in one read as a paste and keeps
-      // the Enter as a newline. Terminal readiness can precede Claude drawing
-      // its UI or reading input, so wait while it is still drawing for its
-      // composer, then for the staged text to show, before sending Enter alone.
-      // Claude draws its UI on the alternate screen, so a quiet alternate
-      // screen without a composer is a menu or picker and gets the plain
-      // write. Startup can pause for seconds before the first frame.
-      if (stagedInput.length > 0 && agentType === 'claude' && !beforeScreen.composer.isPresent) {
-        beforeScreen = await waitForPanelScreen(
-          panel,
-          screen => screen.composer.isPresent ||
-            (screen.state.isAlternateScreen === true && !panelHasOutputWithin(panel.id, CLAUDE_UI_QUIET_MS)),
-        );
-      }
-      const stagesComposer = beforeScreen.composer.isPresent && (agentType === 'claude' ||
-        agentType === 'codex');
-      if (stagedInput.length > 0 && stagesComposer && (agentType === 'claude' || agentType === 'codex')) {
-        // Claude takes a separately written Enter while it works (it queues
-        // the message), so staging never waits for it to be idle.
-        const staged = await stageComposerText(panel, agentType, stagedInput);
-        const submission = await submitComposerForPanel(panel, 'auto', {
-          cwd: sessionManager.getSession(panel.sessionId)?.worktreePath,
-          text: stagedInput,
-        });
-        return {
-          ok: submission.ok,
-          panelId: panel.id,
-          paneId: panel.sessionId,
-          inputBytes: staged.inputBytes + submission.inputBytes,
-          enter: submission.strategy === 'tab' ? 'tab' : 'cr',
-          sequenceName: submission.sequenceName,
-          verifiedSubmitted: submission.verifiedSubmitted,
-          verification: submission.verification,
-          delivery: submission.delivery,
-          sentAt: submission.sentAt,
-          blocked: submission.blocked,
-          promptFile,
-          warnings,
-          nextCommand: submission.nextCommand,
-        };
-      }
-
-      if (stagedInput.length > 0 && isComposerUnknown(panel, beforeScreen, agentType)) {
-        const suggestedCommand = panelScreenCommand(panel.id);
-        return {
-          ok: false,
-          panelId: panel.id,
-          paneId: panel.sessionId,
-          inputBytes: 0,
-          enter: 'cr',
-          sequenceName: 'enter-cr',
-          verifiedSubmitted: false,
-          sentAt: new Date().toISOString(),
-          blocked: {
-            kind: 'composer-unknown',
-            message: `Pane could not find the ${agentType === 'codex' ? 'Codex' : 'Claude'} composer in this panel, so it sent nothing. The agent may still be starting, or showing a view without its prompt. Check the screen, then submit again or use \`panels input\`.`,
-            suggestedCommand,
-          },
-          promptFile,
-          warnings,
-          nextCommand: suggestedCommand,
-        };
-      }
-
-      // An agent's CRs inside the text would each be an Enter; a shell keeps its bytes.
-      const input = ensureSubmitEnter(agentType === 'claude' || agentType === 'codex' ? stagedInput : submittedText);
-      // A busy Codex takes text and Enter in one write and holds the message
-      // for its next turn; its transcript or queue hint says where it went.
-      const probeBase = agentType === 'codex' && beforeScreen.composer.isPresent && stagedInput.length > 0
-        ? composerDeliveryProbe(panel, sessionManager.getSession(panel.sessionId)?.worktreePath, agentType, stagedInput)
-        : undefined;
-      const probe = probeBase ? { ...probeBase, sentAtMs: Date.now() } : undefined;
-      const outputGenerationBeforeWrite = terminalPanelManager.getOutputGeneration(panel.id);
-      terminalPanelManager.writeToTerminal(panel.id, input);
-      const verification = probe
-        ? await verifyComposerSubmitted(panel, beforeScreen, outputGenerationBeforeWrite, probe)
-        : undefined;
-
-      return {
-        ok: true,
-        panelId: panel.id,
-        paneId: panel.sessionId,
-        inputBytes: Buffer.byteLength(input, 'utf8'),
-        enter: 'cr',
-        sequenceName: 'enter-cr',
-        verifiedSubmitted: verification?.verifiedSubmitted ?? false,
-        delivery: verification?.delivery,
-        sentAt: new Date().toISOString(),
-        promptFile,
-        warnings,
-        nextCommand: panelWaitCommand(panel.id),
-      };
+      if (normalized.idempotencyKey === undefined) return submitToPanel(normalized);
+      const { result, deduplicated } = await submitIdempotency.run(
+        normalized.idempotencyKey,
+        () => submitToPanel(normalized),
+        // A blocked submit wrote nothing, so the same key may try again.
+        result => result.ok || result.inputBytes > 0,
+      );
+      return deduplicated ? { ...result, deduplicated: true } : result;
     }, result => ({
       paneId: result.paneId,
       panelId: result.panelId,
       inputBytes: result.inputBytes,
     }));
   });
+
+  async function submitToPanel(normalized: RunpanePanelSubmitRequest): Promise<RunpanePanelSubmitResult> {
+    const panel = resolveTerminalPanel(normalized.panelId);
+    if (!terminalPanelManager.isTerminalInitialized(panel.id)) {
+      throw new Error(`Terminal panel ${panel.id} is not initialized`);
+    }
+
+    let beforeScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
+    const promptFile = normalized.asFilePointer
+      ? await writePromptFile(panel.sessionId, stripTrailingNewlines(normalizePromptNewlines(normalized.input)))
+      : undefined;
+    const submittedText = promptFile
+      ? filePointerPrompt(agentVisiblePath(promptFile, sessionWslContext(services, panel.sessionId)))
+      : normalized.input;
+    // A CR inside the text would be Enter to an agent composer.
+    const stagedInput = stripTrailingNewlines(normalizePromptNewlines(submittedText));
+    const agentType = screenAgentType(beforeScreen);
+    const warnings = agentType === 'claude' ? claudePromptWarnings(stagedInput) : undefined;
+    // Claude reads text and Enter arriving in one read as a paste and keeps
+    // the Enter as a newline. Terminal readiness can precede Claude drawing
+    // its UI or reading input, so wait while it is still drawing for its
+    // composer, then for the staged text to show, before sending Enter alone.
+    // Claude draws its UI on the alternate screen, so a quiet alternate
+    // screen without a composer is a menu or picker and gets the plain
+    // write. Startup can pause for seconds before the first frame.
+    if (stagedInput.length > 0 && agentType === 'claude' && !beforeScreen.composer.isPresent) {
+      beforeScreen = await waitForPanelScreen(
+        panel,
+        screen => screen.composer.isPresent ||
+          (screen.state.isAlternateScreen === true && !panelHasOutputWithin(panel.id, CLAUDE_UI_QUIET_MS)),
+      );
+    }
+    const stagesComposer = beforeScreen.composer.isPresent && (agentType === 'claude' ||
+      agentType === 'codex');
+    if (stagedInput.length > 0 && stagesComposer && (agentType === 'claude' || agentType === 'codex')) {
+      // Claude takes a separately written Enter while it works (it queues
+      // the message), so staging never waits for it to be idle.
+      const staged = await stageComposerText(panel, agentType, stagedInput);
+      const submission = await submitComposerForPanel(panel, 'auto', {
+        cwd: sessionManager.getSession(panel.sessionId)?.worktreePath,
+        text: stagedInput,
+      });
+      return {
+        ok: submission.ok,
+        panelId: panel.id,
+        paneId: panel.sessionId,
+        inputBytes: staged.inputBytes + submission.inputBytes,
+        enter: submission.strategy === 'tab' ? 'tab' : 'cr',
+        sequenceName: submission.sequenceName,
+        verifiedSubmitted: submission.verifiedSubmitted,
+        verification: submission.verification,
+        delivery: submission.delivery,
+        sentAt: submission.sentAt,
+        blocked: submission.blocked,
+        promptFile,
+        warnings,
+        nextCommand: submission.nextCommand,
+      };
+    }
+
+    if (stagedInput.length > 0 && isComposerUnknown(panel, beforeScreen, agentType)) {
+      const suggestedCommand = panelScreenCommand(panel.id);
+      return {
+        ok: false,
+        panelId: panel.id,
+        paneId: panel.sessionId,
+        inputBytes: 0,
+        enter: 'cr',
+        sequenceName: 'enter-cr',
+        verifiedSubmitted: false,
+        sentAt: new Date().toISOString(),
+        blocked: {
+          kind: 'composer-unknown',
+          message: `Pane could not find the ${agentType === 'codex' ? 'Codex' : 'Claude'} composer in this panel, so it sent nothing. The agent may still be starting, or showing a view without its prompt. Check the screen, then submit again or use \`panels input\`.`,
+          suggestedCommand,
+        },
+        promptFile,
+        warnings,
+        nextCommand: suggestedCommand,
+      };
+    }
+
+    // An agent's CRs inside the text would each be an Enter; a shell keeps its bytes.
+    const input = ensureSubmitEnter(agentType === 'claude' || agentType === 'codex' ? stagedInput : submittedText);
+    // A busy Codex takes text and Enter in one write and holds the message
+    // for its next turn; its transcript or queue hint says where it went.
+    const probeBase = agentType === 'codex' && beforeScreen.composer.isPresent && stagedInput.length > 0
+      ? composerDeliveryProbe(panel, sessionManager.getSession(panel.sessionId)?.worktreePath, agentType, stagedInput)
+      : undefined;
+    const probe = probeBase ? { ...probeBase, sentAtMs: Date.now() } : undefined;
+    const outputGenerationBeforeWrite = terminalPanelManager.getOutputGeneration(panel.id);
+    terminalPanelManager.writeToTerminal(panel.id, input);
+    const verification = probe
+      ? await verifyComposerSubmitted(panel, beforeScreen, outputGenerationBeforeWrite, probe)
+      : undefined;
+
+    return {
+      ok: true,
+      panelId: panel.id,
+      paneId: panel.sessionId,
+      inputBytes: Buffer.byteLength(input, 'utf8'),
+      enter: 'cr',
+      sequenceName: 'enter-cr',
+      verifiedSubmitted: verification?.verifiedSubmitted ?? false,
+      delivery: verification?.delivery,
+      sentAt: new Date().toISOString(),
+      promptFile,
+      warnings,
+      nextCommand: panelWaitCommand(panel.id),
+    };
+  }
 
   commandRegistry.register('runpane:panels:submit-composer', async (request: PaneCommandValue): Promise<RunpanePanelSubmitComposerResult> => {
     return withRunpaneAction(services, 'panels:submit-composer', {}, async () => {
@@ -3826,10 +3841,16 @@ function parsePanelSubmitRequest(value: PaneCommandValue): RunpanePanelSubmitReq
     throw new Error('Panel submit request must include input');
   }
 
+  const idempotencyKey = optionalString(value.idempotencyKey);
+  if (idempotencyKey !== undefined && !isValidIdempotencyKey(idempotencyKey)) {
+    throw new Error('Panel submit idempotencyKey must be 1-256 letters, numbers, dots, underscores, colons, or hyphens');
+  }
+
   return {
     panelId,
     input,
     asFilePointer: optionalBoolean(value.asFilePointer),
+    idempotencyKey,
   };
 }
 
