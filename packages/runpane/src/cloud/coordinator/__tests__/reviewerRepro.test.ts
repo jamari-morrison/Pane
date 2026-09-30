@@ -24,13 +24,13 @@ describe('reviewer repro P1-1', () => {
     // Coordinator defaults: idle check every 300 s, 2 consecutive safe answers, 600 s wake grace.
     const idle = new IdleStopper({ directory, provider, probe, activity, alerts }, { requiredConsecutiveSafe: 2, wakeGraceMs: 600_000, dryRun: false });
     const decisions: string[] = [];
-    for (let minute = 0; minute < 24 * 60; minute += 5) {
+    for (let minute = 0; minute < 24 * 60; minute += 1) {
       if (minute % 9 === 0) {
         const answer = await wake.wake('sB', { wait: false });
         assert.equal(answer.ok && answer.status, 'awake');
       }
-      decisions.push((await idle.runOnce()).results[0].decision);
-      clock.time += 300_000;
+      if (minute % 5 === 0) decisions.push((await idle.runOnce()).results[0].decision);
+      clock.time += 60_000;
     }
     console.log(`repro P1-1: ${decisions.length} idle checks over 24 h, decisions=${[...new Set(decisions)].join(',')}, mutations=${JSON.stringify(provider.mutations())}`);
     // Every safe-to-stop answer was "safe", yet the host was never stopped.
