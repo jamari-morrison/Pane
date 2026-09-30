@@ -170,6 +170,8 @@ import { WorkspaceCursorStore } from '../services/workspaceCursorStore';
 import { NamedLockService } from '../services/namedLockService';
 import { NamedLockStore } from '../services/namedLockStore';
 import { usageManager } from '../services/usage/usageManager';
+import { hasResumableConversation, panelRunState, terminalState, type PanelResume } from '../services/panelResume';
+import { PaneCommandError } from '../core/commandError';
 import { parseWSLPath, windowsPathToWSLMount, type WSLContext } from '../utils/wslUtils';
 import {
   dueIdleEntries,
@@ -1001,7 +1003,7 @@ export function registerRunpaneHandlers(
     return withRunpaneAction(services, 'panels:list', {}, () => {
       const normalized = parsePanelListRequest(request);
       const pane = resolvePane(sessionManager, normalized.paneId);
-      const panels = panelManager.getPanelsForSession(pane.id).map(panelToSummary);
+      const panels = panelManager.getPanelsForSession(pane.id).map(panel => panelToSummary(panel, services.panelResume));
 
       return {
         ok: true,
@@ -1158,16 +1160,14 @@ export function registerRunpaneHandlers(
   });
 
   commandRegistry.register('runpane:panels:input', async (request: PaneCommandValue): Promise<RunpanePanelInputResult> => {
-    return withRunpaneAction(services, 'panels:input', {}, () => {
+    return withRunpaneAction(services, 'panels:input', {}, async () => {
       const normalized = parsePanelInputRequest(request);
       const panel = resolvePanel(normalized.panelId);
 
       if (panel.type !== 'terminal') {
         throw new Error(`Panel ${panel.id} is a ${panel.type} panel, not a terminal panel`);
       }
-      if (!terminalPanelManager.isTerminalInitialized(panel.id)) {
-        throw new Error(`Terminal panel ${panel.id} is not initialized`);
-      }
+      await ensurePanelRunning(services, panel);
 
       terminalPanelManager.writeToTerminal(panel.id, normalized.input);
 
@@ -1203,9 +1203,7 @@ export function registerRunpaneHandlers(
     return withRunpaneAction(services, 'panels:submit', {}, async () => {
       const normalized = parsePanelSubmitRequest(request);
       const panel = resolveTerminalPanel(normalized.panelId);
-      if (!terminalPanelManager.isTerminalInitialized(panel.id)) {
-        throw new Error(`Terminal panel ${panel.id} is not initialized`);
-      }
+      await ensurePanelRunning(services, panel);
 
       let beforeScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
       const promptFile = normalized.asFilePointer
@@ -1321,9 +1319,7 @@ export function registerRunpaneHandlers(
     return withRunpaneAction(services, 'panels:submit-composer', {}, async () => {
       const normalized = parsePanelSubmitComposerRequest(request);
       const panel = resolveTerminalPanel(normalized.panelId);
-      if (!terminalPanelManager.isTerminalInitialized(panel.id)) {
-        throw new Error(`Terminal panel ${panel.id} is not initialized`);
-      }
+      await ensurePanelRunning(services, panel);
 
       return submitComposerForPanel(panel, normalized.strategy, {
         cwd: sessionManager.getSession(panel.sessionId)?.worktreePath,
@@ -1340,6 +1336,10 @@ export function registerRunpaneHandlers(
     return withRunpaneAction(services, 'panels:wait', {}, async () => {
       const normalized = parsePanelWaitRequest(request);
       const panel = resolveTerminalPanel(normalized.panelId);
+      // Waiting on a panel is intent to use it: restart it when it is not running.
+      if (services.panelResume && !terminalPanelManager.isTerminalInitialized(panel.id)) {
+        await services.panelResume.ensureRunning(panel, { waitMs: 0 });
+      }
       return waitForPanel(panel, normalized);
     }, result => ({
       paneId: result.paneId,
@@ -1685,7 +1685,27 @@ function optionalAgentDetection(value: PaneCommandValue): RunpaneAgentDetection 
   }
 }
 
-function panelToSummary(panel: ToolPanel) {
+/**
+ * Make sure a terminal panel has a live PTY. The headless daemon restarts it
+ * (resuming an agent's conversation); otherwise a stopped panel is an error
+ * with code ERR_PANEL_NOT_RUNNING.
+ */
+async function ensurePanelRunning(services: AppServices, panel: ToolPanel): Promise<void> {
+  if (services.panelResume) {
+    await services.panelResume.ensureRunning(panel);
+    return;
+  }
+  if (!terminalPanelManager.isTerminalInitialized(panel.id)) {
+    throw new PaneCommandError(`Terminal panel ${panel.id} is not initialized`, 'ERR_PANEL_NOT_RUNNING', {
+      panelId: panel.id,
+      paneId: panel.sessionId,
+      runState: panelRunState(panel, false),
+      resumable: hasResumableConversation(terminalState(panel)),
+    });
+  }
+}
+
+function panelToSummary(panel: ToolPanel, panelResume?: PanelResume) {
   const customState = isRecord(panel.state.customState) ? panel.state.customState : {};
   const initialCommand = optionalString(customState.initialCommand);
   const commandAgentType = resolveAgentTypeFromCommand(initialCommand);
@@ -1702,6 +1722,10 @@ function panelToSummary(panel: ToolPanel) {
     title: panel.title,
     active: Boolean(panel.state.isActive),
     initialized: panel.type === 'terminal' ? terminalPanelManager.isTerminalInitialized(panel.id) : undefined,
+    runState: panel.type === 'terminal'
+      ? panelResume?.runState(panel) ?? panelRunState(panel, terminalPanelManager.isTerminalInitialized(panel.id))
+      : undefined,
+    resumable: panel.type === 'terminal' ? hasResumableConversation(terminalState(panel)) : undefined,
     agentType,
     agentDetection,
     launchCommand: optionalString(customState.launchCommand) ?? initialCommand,

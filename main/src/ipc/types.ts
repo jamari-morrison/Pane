@@ -7,6 +7,7 @@ import type { WorkspaceJournal } from '../services/workspaceJournal';
 import type { WorkspaceStateReader } from '../services/workspaceStateReader';
 import type { WorkspaceCursorStore } from '../services/workspaceCursorStore';
 import type { NamedLockService } from '../services/namedLockService';
+import type { PanelResume } from '../services/panelResume';
 
 export interface DaemonHostServices extends CoreServices {
   taskQueue: TaskQueue | null;
@@ -17,6 +18,8 @@ export interface DaemonHostServices extends CoreServices {
   workspaceStateReader?: WorkspaceStateReader;
   workspaceCursorStore?: WorkspaceCursorStore;
   namedLockService?: NamedLockService;
+  /** Headless only: restarts terminal panels after a daemon restart or sandbox wake. */
+  panelResume?: PanelResume;
 }
 
 export interface AppServices extends DaemonHostServices {

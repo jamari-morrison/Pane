@@ -9,7 +9,8 @@ import { daemonActionFor, runDaemonAction } from './daemonActions';
 import { runDocsRead, runDocsSearch } from './docs';
 import { runLinksCreate } from './links';
 import { helpText, parseRunpaneArgs, type ParsedArgs } from './commands';
-import { boundary, decodeBoundary } from './boundaryDecoder';
+import { boundary, decodeBoundary, type JsonValue } from './boundaryDecoder';
+import { PaneDaemonClientError } from './daemonClient';
 import { downloadArtifact } from './download';
 import { runDoctor } from './doctor';
 import {
@@ -99,7 +100,27 @@ export async function main(argv: string[]): Promise<number> {
     return dispatchParsedCommand(parsed, telemetryContext);
   }
 
-  return runTrackedCommand(telemetryContext, () => dispatchParsedCommand(parsed, telemetryContext));
+  if (!parsed.json || parsed.command === 'watch' || parsed.command === 'mcp') {
+    return runTrackedCommand(telemetryContext, () => dispatchParsedCommand(parsed, telemetryContext));
+  }
+  try {
+    return await runTrackedCommand(telemetryContext, () => dispatchParsedCommand(parsed, telemetryContext));
+  } catch (error) {
+    // Scripts read stdout: a --json failure is still one JSON object there.
+    const failure = jsonFailure(error);
+    process.stdout.write(`${JSON.stringify(failure)}\n`);
+    process.stderr.write(`${failure.message}\n`);
+    return 1;
+  }
+}
+
+/** `{ ok: false, code, message, ...details }` for a command that threw under --json. */
+export function jsonFailure(error: unknown): { ok: false; code: string; message: string; [key: string]: JsonValue } {
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof PaneDaemonClientError) {
+    return { ...error.details, ok: false, code: error.code ?? 'ERR_RUNPANE_DAEMON_REQUEST_FAILED', message };
+  }
+  return { ok: false, code: 'ERR_RUNPANE_COMMAND_FAILED', message };
 }
 
 async function dispatchParsedCommand(parsed: ParsedArgs, telemetryContext: WrapperTelemetryContext): Promise<number> {

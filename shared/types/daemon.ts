@@ -24,6 +24,8 @@ export interface PaneDaemonSuccessResponseFrame {
 export interface PaneDaemonError {
   message: string;
   code?: string;
+  /** Machine-readable context for `code`, e.g. `{ panelId, resumable }`. */
+  details?: Record<string, JsonValue>;
 }
 
 export interface PaneDaemonErrorResponseFrame {

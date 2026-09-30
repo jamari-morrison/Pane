@@ -1,6 +1,7 @@
 import fs from 'fs';
 import net from 'net';
 import path from 'path';
+import { PaneCommandError } from '../core/commandError';
 import type { PaneEventSink } from '../core/eventSink';
 import type { PaneCommandRegistry } from './commandRegistry';
 import { encodePaneDaemonFrame, PaneDaemonFrameDecoder } from './socketFraming';
@@ -363,6 +364,14 @@ export class PaneDaemonServer {
         result: result === undefined ? undefined : serializeJsonTransport(result, boundary.json),
       };
     } catch (error) {
+      if (error instanceof PaneCommandError) {
+        return {
+          type: 'response',
+          id: frame.id,
+          ok: false,
+          error: { message: error.message, code: error.code, details: error.details },
+        };
+      }
       const message = error instanceof Error ? error.message : String(error);
       const code = message.includes('No Pane daemon command registered')
         ? 'ERR_UNKNOWN_CHANNEL'

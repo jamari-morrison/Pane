@@ -3,6 +3,7 @@ import { pipeline, type Duplex, type Writable } from 'stream';
 import { constants as zlibConstants, createGzip, gzip } from 'zlib';
 import type { AddressInfo } from 'net';
 import WebSocket, { type RawData, WebSocketServer } from 'ws';
+import { PaneCommandError } from '../core/commandError';
 import { createFanoutEventSink, noopPaneEventSink, type PaneEventSink } from '../core/eventSink';
 import type { ConfigManager } from '../services/configManager';
 import {
@@ -66,6 +67,7 @@ interface RemoteInvokeErrorPayload {
   error: {
     message: string;
     code: string;
+    details?: Record<string, JsonValue>;
   };
 }
 
@@ -541,6 +543,13 @@ export class PaneRemoteHttpApiServer {
         this.writeJson(response, error.statusCode, {
           ok: false,
           error: { message: error.message, code: error.code },
+        } satisfies RemoteInvokeErrorPayload);
+        return;
+      }
+      if (error instanceof PaneCommandError) {
+        this.writeJson(response, 409, {
+          ok: false,
+          error: { message: error.message, code: error.code, details: error.details },
         } satisfies RemoteInvokeErrorPayload);
         return;
       }
