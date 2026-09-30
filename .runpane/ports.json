@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "ports": [
+    { "name": "demo", "port": 8787, "path": "/" },
+    { "name": "docs", "port": 3000, "https_port": 8788, "path": "/index.html" }
+  ]
+}
