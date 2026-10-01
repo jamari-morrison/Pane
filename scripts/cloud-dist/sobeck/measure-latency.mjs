@@ -55,6 +55,9 @@ const skip = new Set((env.SKIP || '').split(',').map((s) => s.trim()).filter(Boo
 // Opt-in: start `claude --debug` in the measured terminal (needs Claude on the host; no prompt, no tokens),
 // wheel once, quit, and report the wheel profile Claude picked from its debug log (one line, no content).
 const claudeProbe = env.CLAUDE_PROBE === '1';
+// Opt-in: copy through OSC 52 from the remote shell and check this machine's clipboard got it. Overwrites
+// the clipboard with a random marker; only "matched" (true/false) is recorded, never clipboard content.
+const copyCheck = env.COPY_CHECK === '1';
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const started = Date.now();
@@ -491,6 +494,20 @@ const outputRate = async (fn) => {
   return { value, outputEventsPerSec: Math.round((after[0] - before[0]) / secs), outputKBps: Math.round((after[1] - before[1]) / 1024 / secs), t0: before[2], t1: after[2] };
 };
 
+async function checkOsc52Copy() {
+  await visibleTerminal().click();
+  await page.keyboard.press('Control+c');
+  const marker = `rcl-copy-${Math.floor(Math.random() * 1e9)}`;
+  const t0 = now();
+  await shellCommand(`printf '\\033]52;c;%s\\a' "$(printf '%s' ${marker} | base64)"`);
+  let matched = false;
+  for (let i = 0; i < 40 && !matched; i++) {
+    await page.waitForTimeout(100);
+    matched = await app.evaluate(({ clipboard }, expected) => clipboard.readText() === expected, marker);
+  }
+  return { osc52Copied: matched, ms: matched ? Math.round(now() - t0) : null };
+}
+
 async function probeClaudeWheelProfile() {
   await page.keyboard.press('Control+c');
   await page.waitForTimeout(800);
@@ -553,6 +570,7 @@ try {
   await instrumentRenderer();
   await connectHost();
   await openPane();
+  if (copyCheck) await phase('copy', () => checkOsc52Copy());
   await startTui();
   await phase('echo', () => typeAndMeasure(KEYS, 110));
   await phase('idle', () => typeAndMeasure(IDLE_KEYS, 0, { idleMs: 6000 }));

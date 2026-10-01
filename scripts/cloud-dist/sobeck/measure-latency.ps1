@@ -13,6 +13,7 @@ param(
   [string]$PaneName = 'sobeck-check',
   [string]$Skip = '',
   [switch]$ClaudeProbe,
+  [switch]$CopyCheck,
   [switch]$CloseRunning
 )
 $ErrorActionPreference = 'Stop'
@@ -38,7 +39,7 @@ if ($running.Count -gt 0) {
   Start-Sleep -Seconds 2
 }
 
-$names = 'PANE_EXE', 'PANE_DIR', 'OUT', 'HOST_LABEL', 'REPO', 'PANE_NAME', 'SKIP', 'CLAUDE_PROBE', 'ELECTRON_RUN_AS_NODE'
+$names = 'PANE_EXE', 'PANE_DIR', 'OUT', 'HOST_LABEL', 'REPO', 'PANE_NAME', 'SKIP', 'CLAUDE_PROBE', 'COPY_CHECK', 'ELECTRON_RUN_AS_NODE'
 $env:PANE_EXE = $exe
 $env:PANE_DIR = $PaneDir
 $env:OUT = $OutDir
@@ -47,6 +48,7 @@ $env:REPO = $Repo
 $env:PANE_NAME = $PaneName
 $env:SKIP = $Skip
 $env:CLAUDE_PROBE = $(if ($ClaudeProbe) { '1' } else { '0' })
+$env:COPY_CHECK = $(if ($CopyCheck) { '1' } else { '0' })
 $env:ELECTRON_RUN_AS_NODE = '1'
 $stdout = Join-Path $OutDir 'measure.out.txt'
 $stderr = Join-Path $OutDir 'measure.err.txt'
