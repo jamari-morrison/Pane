@@ -298,24 +298,31 @@ const ui = {
   hostItem: (label) => page.getByRole('menuitemradio', { name: new RegExp(escapeRegExp(label)) }),
   localItem: () => page.getByRole('menuitemradio', { name: /This computer/ }),
   manageConnections: () => page.getByRole('button', { name: /Manage connections/ }),
-  cloudSection: () => page.getByRole('region', { name: /Cloud sandboxes/i }),
-  credential: (label) => page.getByLabel(label, { exact: false }),
+  // Settings → Remote Access page → "Cloud sandboxes (experimental)" (cs-desktop-ui's selector map, iface-cs).
+  settingsButton: () => page.getByRole('button', { name: 'Settings', exact: true }),
+  settingsDialog: () => page.getByRole('dialog', { name: /Pane Settings/ }),
+  remoteAccessNav: () => ui.settingsDialog().getByRole('button', { name: 'Remote Access', exact: true }),
+  cloudSection: () => ui.settingsDialog().getByRole('heading', { name: /Cloud sandboxes/i }),
+  cloudPage: () => ui.settingsDialog(),
+  credentialStatus: () => ui.settingsDialog().getByRole('definition'),
+  credential: (label) => ui.settingsDialog().getByLabel(label, { exact: true }),
   saveCredentials: () => page.getByRole('button', { name: /Save credentials/i }),
+  changeCredentials: () => page.getByRole('button', { name: /Change credentials/i }),
+  nameInput: () => ui.settingsDialog().getByLabel('Name', { exact: true }),
   addSandbox: () => page.getByRole('button', { name: /Add cloud sandbox/i }),
-  addDialog: () => page.getByRole('dialog', { name: /cloud sandbox/i }),
-  progress: () => page.getByRole('status'),
-  row: (label) => ui.cloudSection().getByRole('listitem').filter({ hasText: label }),
+  progress: (label) => page.getByRole('status', { name: `Progress for ${label}` }),
+  row: (label) => page.getByRole('listitem', { name: `Cloud sandbox ${label}` }),
+  rowAlert: (label) => ui.row(label).getByRole('alert'),
   rowAction: (verb, label) => page.getByRole('button', { name: `${verb} ${label}`, exact: true }),
-  confirmDialog: () => page.getByRole('dialog').filter({ hasText: /Remove/ }),
+  confirmDialog: (label) => page.getByRole('dialog', { name: `Remove ${label}?` }),
   newPaneIn: (repo) => page.getByRole('button', { name: repo ? `New pane in ${repo}` : /^New pane in / }),
   // The Pane's sidebar entry; a git status badge can precede the name ("main-1cs-e2e-…"), while its
   // "Archive …"/"Pin …" buttons have a space before it.
   paneButton: (name) => page.getByRole('button', { name: new RegExp(`^\\S*${escapeRegExp(name)}$`) }).first(),
   addTool: () => page.getByRole('button', { name: 'Add tool' }),
   claudeTool: () => page.getByRole('menuitem', { name: /Claude Code/ }),
-  // The switcher's Start action for a stopped sandbox (a menu entry or a button inside the host's entry).
-  switcherStart: (label) => page.getByRole('button', { name: new RegExp(`^Start ${escapeRegExp(label)}`) })
-    .or(page.getByRole('menuitem', { name: new RegExp(`^Start ${escapeRegExp(label)}`) })).first(),
+  // A stopped sandbox's switcher entry reads "Stopped · Select to start"; selecting it starts, then connects.
+  switcherStart: (label) => ui.hostItem(label).filter({ hasText: /Select to start/ }),
   claudeTab: () => page.getByRole('button', { name: /Claude Code/ }).first(),
 };
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -331,6 +338,17 @@ async function openSwitcher() {
 async function closeMenus() {
   await page.keyboard.press('Escape');
   await page.waitForTimeout(200);
+}
+
+async function openCloud() {
+  await closeMenus();
+  if (!(await visible(ui.settingsDialog(), 300))) await ui.settingsButton().click();
+  await ui.remoteAccessNav().click();
+  await ui.cloudSection().waitFor({ timeout: 10_000 });
+}
+
+async function rowText(label) {
+  return ((await ui.row(label).textContent({ timeout: 2000 }).catch(() => '')) ?? '').replace(/\s+/g, ' ');
 }
 
 async function openConnections() {
@@ -432,16 +450,21 @@ async function askClaude(prompt, expected, timeoutMs = 240_000) {
 
 // ---------------------------------------------------------------- phases
 async function phaseCredentials() {
-  await openConnections();
-  check('cloud-section-shown', await visible(ui.cloudSection(), 10_000), 'Settings → Connections has a Cloud sandboxes section');
+  await openCloud();
+  check('cloud-section-shown', await visible(ui.cloudSection(), 10_000), 'Settings → Remote Access has the Cloud sandboxes section');
   await shot('connections-before-credentials');
   if (relay) {
     // Red entered the credentials in this build once (Run 5 step 2); the proof only reads their state.
-    const sectionText = ((await ui.cloudSection().textContent().catch(() => '')) ?? '').replace(/\s+/g, ' ');
-    check('credentials-ready', !/not configured|invalid|error/i.test(sectionText) && (await visible(ui.addSandbox(), 2000)) && !(await ui.addSandbox().isDisabled()), sectionText.slice(0, 200));
-    check('wallet-is-test', /\btest\b/i.test(sectionText), 'the saved boat wallet shown in the section is "test"');
-    if (!/\btest\b/i.test(sectionText)) throw new Error('the saved boat wallet is not "test": stop before creating anything');
+    const status = await ui.credentialStatus().allTextContents();
+    check('credentials-ready', status.length >= 4 && status[0].trim() === 'Set' && status[2].trim() === 'Set' && (await visible(ui.addSandbox(), 2000)),
+      `boat key ${status[0]}, Tailscale ${status[2]}, Claude ${status[3]}`);
+    check('wallet-is-test', status[1]?.trim() === 'test', `the saved boat wallet is "${status[1]}"`);
+    if (status[1]?.trim() !== 'test') throw new Error('the saved boat wallet is not "test": stop before creating anything');
     return;
+  }
+  if (await visible(ui.changeCredentials(), 1000)) {
+    finding('credentials were already saved in this fresh profile');
+    await ui.changeCredentials().click();
   }
   // No trace and no screenshot while values are in the inputs.
   await pauseTrace();
@@ -452,8 +475,7 @@ async function phaseCredentials() {
     ['Claude token', 'claudeToken'],
   ];
   for (const [label, name] of fields) await ui.credential(label).fill(secretValue(name));
-  if (await visible(ui.credential('boat wallet'), 500)) await ui.credential('boat wallet').fill(boatOrg);
-  else finding('no "boat wallet" field in the credentials form; relying on RUNPANE_CLOUD_BOAT_ORG');
+  await ui.credential('boat wallet').fill(boatOrg);
   const startedAt = Date.now();
   await ui.saveCredentials().click();
   // Saving verifies the keys with boat and Tailscale; wait until the button is idle again.
@@ -468,8 +490,9 @@ async function phaseCredentials() {
   if (leftInInputs.length === 0 && leftInText.length === 0) await resumeTrace();
   else throw new Error('a credential stays on screen after saving; stopping before any trace or screenshot records it');
   timing('credentials-save', startedAt);
-  const sectionText = (await ui.cloudSection().textContent().catch(() => '')) ?? '';
-  check('credentials-ready', !/not configured|invalid|error/i.test(sectionText), sectionText.replace(/\s+/g, ' ').slice(0, 200));
+  const status = await ui.credentialStatus().allTextContents();
+  check('credentials-ready', status.length >= 4 && ['Set', 'test', 'Set', 'Set'].every((want, index) => status[index]?.trim() === want),
+    `boat key ${status[0]}, wallet ${status[1]}, Tailscale ${status[2]}, Claude ${status[3]}`);
   await shot('credentials-saved');
   const credentialFiles = listCredentialFiles();
   check('credentials-file-0600', credentialFiles.length > 0 && credentialFiles.every((file) => file.mode === '600'), JSON.stringify(credentialFiles));
@@ -503,29 +526,24 @@ async function phaseAdd() {
   } else {
     state.label = env.LABEL ?? `rp-loop-cs-e2e-${crypto.randomBytes(3).toString('hex')}`;
     saveState();
-    await openConnections();
+    await openCloud();
+    await ui.nameInput().fill(state.label);
+    countStart('create');
     await ui.addSandbox().click();
-    const dialog = ui.addDialog();
-    if (await visible(dialog, 3000)) {
-      const name = dialog.getByLabel(/Name/i);
-      if (await visible(name, 1000)) await name.fill(state.label);
-      countStart('create');
-      await dialog.getByRole('button', { name: /Add|Create/ }).last().click();
-    } else {
-      countStart('create');
-    }
     const startedAt = Date.now();
     const progress = [];
     const listed = await until(async () => {
-      const status = ((await ui.progress().allTextContents().catch(() => [])).join(' | ')).replace(/\s+/g, ' ').trim();
-      if (status && progress.at(-1) !== status) progress.push(`${Math.round((Date.now() - startedAt) / 1000)} s ${status}`);
-      const rowText = (await ui.row(state.label).textContent().catch(() => '')) ?? '';
-      return /running/i.test(rowText);
+      const steps = await ui.progress(state.label).getByRole('listitem').allTextContents().catch(() => []);
+      const latest = steps.at(-1)?.replace(/\s+/g, ' ').trim();
+      if (latest && !progress.some((line) => line.endsWith(` ${latest}`))) progress.push(`${Math.round((Date.now() - startedAt) / 1000)} s ${latest}`);
+      if (await visible(ui.rowAlert(state.label), 100)) throw new Error(`row error: ${await ui.rowAlert(state.label).textContent()}`);
+      return /\bRunning\b/.test(await rowText(state.label));
     }, Number(env.ADD_TIMEOUT_MS ?? 600_000), 2000);
     fs.writeFileSync(path.join(out, 'add-progress.txt'), `${redact(progress.join('\n'))}\n`);
     timing('add-to-running', startedAt);
     check('add-listed-running', Boolean(listed), `row "${state.label}" shows running; progress steps: ${progress.length}`);
     await shot('sandbox-running');
+    await closeSettings();
     const host = savedHosts(paneDir).find((entry) => entry.cloud && entry.label === state.label) ?? savedHosts(paneDir).find((entry) => entry.cloud);
     check('saved-host-written', Boolean(host?.cloud?.sandboxId), JSON.stringify(host ?? null));
     if (host) {
@@ -618,9 +636,9 @@ async function phaseStop() {
     else finding('the switcher still said Connected 60 s after the host died');
     await shot('host-down');
   } else {
-    await openConnections();
+    await openCloud();
     await ui.rowAction('Stop', state.label).click();
-    const stopped = await until(async () => /stopped/i.test((await ui.row(state.label).textContent()) ?? ''), 300_000, 2000);
+    const stopped = await until(async () => /\bStopped\b/.test(await rowText(state.label)), 300_000, 2000);
     timing('stop', startedAt);
     check('row-stopped', Boolean(stopped), `row "${state.label}" shows stopped`);
     await shot('row-stopped');
@@ -642,21 +660,21 @@ async function phaseStart() {
     timing('start-to-health', startedAt);
   } else {
     countStart('start');
+    // Like a user who wants to work there again: pick the stopped sandbox in the switcher.
     await openSwitcher();
     const fromSwitcher = ui.switcherStart(state.label);
-    if (await visible(fromSwitcher, 2000)) await fromSwitcher.click();
+    check('started-from-switcher', await visible(fromSwitcher, 3000), 'switcher entry "Stopped · Select to start"');
+    if (await visible(fromSwitcher, 500)) await fromSwitcher.click();
     else {
-      await closeMenus();
-      await openConnections();
+      await openCloud();
       await ui.rowAction('Start', state.label).click();
     }
-    const running = await until(async () => {
-      if (await visible(ui.connectedChip(state.label), 500)) return true;
-      await openConnections().catch(() => undefined);
-      return /running/i.test((await ui.row(state.label).textContent().catch(() => '')) ?? '');
-    }, 600_000, 3000);
-    timing('start-to-running', startedAt);
-    check('row-running-again', Boolean(running), state.label);
+    const backConnected = await waitConnected(state.label, 600_000);
+    timing('start-to-connected-from-switcher', startedAt);
+    await openCloud();
+    const running = /\bRunning\b/.test(await rowText(state.label));
+    check('row-running-again', backConnected && running, `connected ${backConnected}; row: ${await rowText(state.label)}`);
+    await closeSettings();
     const host = savedHosts(paneDir).find((entry) => entry.id === state.profileId);
     check('same-tailnet-name', host?.cloud?.hostname === state.cloud.hostname && host?.baseUrl === state.baseUrl,
       `before ${state.cloud.hostname} ${state.baseUrl}; after ${host?.cloud?.hostname} ${host?.baseUrl}`);
@@ -708,10 +726,11 @@ async function phaseRemove() {
     await page.waitForTimeout(1500);
     fakeDaemonKill();
   } else {
-    await openConnections();
+    await openCloud();
     await ui.rowAction('Remove', state.label).click();
-    const confirm = ui.confirmDialog();
-    if (await visible(confirm, 3000)) await confirm.getByRole('button', { name: /^Remove/ }).last().click();
+    const confirm = ui.confirmDialog(state.label);
+    check('remove-asks-first', await visible(confirm, 3000), `dialog "Remove ${state.label}?"`);
+    await confirm.getByRole('button', { name: 'Remove', exact: true }).click();
     const gone = await until(async () => !(await visible(ui.row(state.label), 500)), 300_000, 2000);
     timing('remove', startedAt);
     check('row-gone', Boolean(gone), state.label);
