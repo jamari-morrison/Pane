@@ -51,14 +51,13 @@ jobs:
         ref="${INPUT_REF:-$(tr -d '[:space:]' < harness/.github/cs-e2e/app-ref)}"
         echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
+    # The app at the workspace root (this clean checkout removes harness/, which is no longer needed).
     - uses: actions/checkout@v7
       with:
         ref: ${{ steps.meta.outputs.ref }}
-        path: app
 
     - id: version
       name: Version = <pkg>-cs.<commit UTC time>.g<sha8>
-      working-directory: app
       run: |
         set -euo pipefail
         sha=$(git rev-parse HEAD)
@@ -72,14 +71,12 @@ jobs:
         python-version: '3.11'
 
     - name: Setup Node.js and pnpm
-      uses: ./app/.github/actions/setup-pnpm
+      uses: ./.github/actions/setup-pnpm
 
     - name: Install dependencies
-      working-directory: app
       run: pnpm install
 
     - name: Build the .deb
-      working-directory: app
       run: |
         set -euo pipefail
         pnpm run build:frontend
@@ -88,9 +85,9 @@ jobs:
         pnpm run generate-notices
         pnpm exec electron-builder --linux deb --x64 --publish never \
           -c.extraMetadata.version=${{ steps.version.outputs.version }}
-        mkdir -p ../release
-        cp dist-electron/*.deb ../release/
-        (cd ../release && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+        mkdir -p release
+        cp dist-electron/*.deb release/
+        (cd release && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
 
     - uses: actions/upload-artifact@v7
       with:
