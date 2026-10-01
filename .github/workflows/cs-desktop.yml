@@ -1,0 +1,205 @@
+name: Cloud sandbox desktop test build (fork)
+
+# Fork-only, never part of the upstream PR. Builds the Windows x64 desktop from the commit pinned in
+# .github/cs-e2e/app-ref (cs/integration) as an unsigned SIDE-BY-SIDE test build for SOBECK, and publishes
+# it with the relay kit as the fork prerelease cs-desktop-<app sha8>-k<harness sha8>.
+#
+# cs/integration has no side-by-side support (it stays in #864's fork scaffolding), so the build applies
+# .github/cs-e2e/side-by-side.patch first: rc/integration's main/src/utils/sideBySide.ts and its wiring,
+# unchanged. Without it the build would share ~/.pane with Red's installed Pane and update itself.
+#
+# Its own side-by-side name (cloudsandbox: ~/.pane_cloudsandbox) keeps it apart from the Run 4 build in
+# ~/.pane_cloudtest, which SOBECK keeps using.
+#
+# The kit is rc/integration's install.ps1 / remove.ps1 (pinned at RC_KIT_SHA, already proven on SOBECK)
+# plus this branch's scripts/cloud-sandbox-e2e/sobeck (the "Add cloud sandbox" proof) and playwright-core.
+on:
+  push:
+    branches:
+      - cs/cs-e2e
+    paths:
+      - .github/cs-e2e/app-ref
+      - .github/cs-e2e/side-by-side.patch
+      - .github/workflows/cs-desktop.yml
+      - scripts/cloud-sandbox-e2e/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cs-desktop-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  SIDE_BY_SIDE_NAME: cloudsandbox
+  # The released Pane the smoke runs beside.
+  INSTALLED_RELEASE: v2.4.146
+  # rc/integration's relay kit scripts (install.ps1, remove.ps1, the side-by-side smoke).
+  RC_KIT_SHA: 23d533649d4b11cedb1b9904c0b39c690e6fee3f
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+  CSC_DISABLE: 'true'
+
+jobs:
+  windows:
+    name: Windows x64 (side-by-side)
+    if: github.repository != 'greenfield-inc/Pane'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        path: harness
+
+    - id: ref
+      shell: bash
+      run: echo "ref=$(tr -d '[:space:]' < harness/.github/cs-e2e/app-ref)" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/checkout@v7
+      with:
+        ref: ${{ steps.ref.outputs.ref }}
+        path: app
+
+    - uses: actions/checkout@v7
+      with:
+        ref: ${{ env.RC_KIT_SHA }}
+        path: rckit
+        sparse-checkout: scripts/cloud-dist
+
+    - id: meta
+      name: Version = <pkg>-cs.<commit UTC time>.g<sha8>, side-by-side patch
+      shell: bash
+      working-directory: app
+      env:
+        KIT_SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        sha=$(git rev-parse HEAD)
+        stamp=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d%H%M%S HEAD)
+        version="$(node -p 'require("./package.json").version')-cs.${stamp}.g${sha:0:8}"
+        { echo "sha=$sha"; echo "version=$version"; echo "tag=cs-desktop-${sha:0:8}-k${KIT_SHA:0:8}"; } >> "$GITHUB_OUTPUT"
+        git apply --verbose ../harness/.github/cs-e2e/side-by-side.patch
+        echo "Building $version from $sha + side-by-side patch, kit from $KIT_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '22.18.0'
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: app
+      run: corepack enable pnpm && pnpm install
+
+    - name: Side-by-side unit tests
+      shell: bash
+      working-directory: app
+      run: CI=1 pnpm --filter main exec vitest run src/utils/sideBySide.test.ts src/utils/appDirectory.test.ts
+
+    - name: Build (unpacked, unsigned, side-by-side)
+      shell: bash
+      working-directory: app
+      run: >-
+        node scripts/build-win.js x64 --
+        -c.win.target=dir
+        -c.appId=com.dcouple.pane.${{ env.SIDE_BY_SIDE_NAME }}
+        -c.extraMetadata.version=${{ steps.meta.outputs.version }}
+        -c.extraMetadata.paneSideBySide=${{ env.SIDE_BY_SIDE_NAME }}
+
+    - name: Package zip
+      shell: pwsh
+      working-directory: app
+      run: |
+        $name = "Pane-CloudSandbox-${{ steps.meta.outputs.version }}-Windows-x64"
+        New-Item -ItemType Directory -Force -Path ..\release | Out-Null
+        Move-Item dist-electron\win-unpacked "dist-electron\$name"
+        Push-Location dist-electron
+        7z a -tzip -mx=7 "..\..\release\$name.zip" $name | Select-Object -Last 3
+        Pop-Location
+        Move-Item "dist-electron\$name" dist-electron\win-unpacked
+
+    - name: Side-by-side smoke beside the released Pane
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release download $env:INSTALLED_RELEASE --repo greenfield-inc/Pane --pattern "Pane-*-Windows-x64.exe" --dir installed
+        $setup = (Get-ChildItem installed\*.exe | Select-Object -First 1).FullName
+        rckit\scripts\cloud-dist\desktop-side-by-side-smoke.ps1 -TestExe "$PWD\app\dist-electron\win-unpacked\Pane.exe" `
+          -ExpectedVersion "${{ steps.meta.outputs.version }}" -InstalledSetup $setup `
+          -SideBySideName $env:SIDE_BY_SIDE_NAME -OutDir smoke-windows
+
+    - uses: actions/upload-artifact@v7
+      if: always()
+      with:
+        name: smoke-windows
+        path: smoke-windows
+        if-no-files-found: warn
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: desktop-windows
+        path: release/*.zip
+        if-no-files-found: error
+        retention-days: 14
+
+  release:
+    name: Publish fork prerelease cs-desktop-<sha8>
+    needs: windows
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/checkout@v7
+      with:
+        ref: ${{ env.RC_KIT_SHA }}
+        path: rckit
+        sparse-checkout: scripts/cloud-dist
+
+    - uses: actions/download-artifact@v7
+      with:
+        name: desktop-windows
+        path: release
+
+    - name: Build the relay kit
+      env:
+        VERSION: ${{ needs.windows.outputs.version }}
+      run: |
+        set -euo pipefail
+        playwright=$(grep -m1 -oE "^  '@playwright/test@[0-9.]+'" pnpm-lock.yaml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+        kit=kit/relay-kit
+        mkdir -p "$kit"
+        cp rckit/scripts/cloud-dist/sobeck/{install.ps1,remove.ps1} "$kit/"
+        cp scripts/cloud-sandbox-e2e/sobeck/* scripts/cloud-sandbox-e2e/{e2e.mjs,secrets.mjs,oracles.mjs} "$kit/"
+        (cd "$kit" && echo '{"private":true}' > package.json && npm install --no-audit --no-fund --no-package-lock "playwright-core@$playwright")
+        (cd kit && zip -qr "../release/Pane-CloudSandbox-relay-kit-$VERSION.zip" relay-kit)
+        cp rckit/scripts/cloud-dist/sobeck/install.ps1 release/sobeck-install.ps1
+
+    - name: Publish prerelease
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        TAG: ${{ needs.windows.outputs.tag }}
+        SHA: ${{ needs.windows.outputs.sha }}
+        VERSION: ${{ needs.windows.outputs.version }}
+      run: |
+        set -euo pipefail
+        case "$REPO" in greenfield-inc/*) echo "refusing to publish to $REPO" >&2; exit 1 ;; esac
+        cd release
+        sha256sum -- * > SHA256SUMS.txt
+        cat SHA256SUMS.txt
+        NOTES="Unsigned SIDE-BY-SIDE Windows desktop test build of ${SHA} (cs/integration, the \"Add cloud sandbox\" landing) plus rc/integration's side-by-side support, built by run ${GITHUB_RUN_ID}. Not an upstream release; it never updates itself.
+        Version: ${VERSION}. Relay kit: install.ps1/remove.ps1 from ${RC_KIT_SHA}, cloud sandbox proof from ${GITHUB_SHA}.
+        It keeps its data in ~/.pane_${SIDE_BY_SIDE_NAME} and runs next to an installed Pane without touching it."
+        if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+          gh release upload "$TAG" --repo "$REPO" --clobber -- *
+        else
+          gh release create "$TAG" --repo "$REPO" --prerelease --target "$SHA" \
+            --title "Pane cloud sandbox desktop test build ${TAG#cs-desktop-}" --notes "$NOTES" -- *
+        fi
+        echo "https://github.com/${REPO}/releases/tag/${TAG}" >> "$GITHUB_STEP_SUMMARY"

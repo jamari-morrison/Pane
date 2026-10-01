@@ -1,0 +1,313 @@
+diff --git a/main/src/index.ts b/main/src/index.ts
+index 7500c233..f9e3f853 100644
+--- a/main/src/index.ts
++++ b/main/src/index.ts
+@@ -5,6 +5,7 @@ import './polyfills/readablestream';
+ 
+ import { hasHeadlessDaemonLaunchArg, hasRemoteSetupLaunchArg } from './utils/runtimeMode';
+ import { getAppDirectory } from './utils/appDirectory';
++import { getSideBySideName, sideBySideUserDataDir } from './utils/sideBySide';
+ import { readFileSync } from 'fs';
+ import { join } from 'path';
+ import { boundary, decodeBoundary } from '../../shared/validation/boundaryDecoder';
+@@ -58,8 +59,15 @@ if (getStartupTerminalPowerMode() === 'batterySaver') {
+ 
+ // Set Windows AUMID to match electron-builder's appId so Windows resolves
+ // the installed Start Menu shortcut for notification icon and display name.
++const sideBySideName = getSideBySideName();
+ if (process.platform === 'win32') {
+-  app.setAppUserModelId('com.dcouple.pane');
++  app.setAppUserModelId(sideBySideName ? `com.dcouple.pane.${sideBySideName}` : 'com.dcouple.pane');
++}
++
++// A side-by-side test build keeps its Chromium profile, and with it the
++// single-instance lock, in its own data directory, away from the installed Pane.
++if (sideBySideName) {
++  app.setPath('userData', sideBySideUserDataDir(getAppDirectory()));
+ }
+ 
+ // Now import the rest of electron
+@@ -274,10 +282,12 @@ function showMainWindow(): void {
+ /**
+  * The installed Pane runs once per data directory. Chromium keeps the lock in
+  * userData, which unpackaged builds and --pane-dir/PANE_DIR instances share with
+- * the installed app, so those run beside it without taking the lock.
++ * the installed app, so those run beside it without taking the lock. A
++ * side-by-side build has its own userData per data directory, so it keeps the lock.
+  */
+ function acquireSingleInstanceLock(): boolean {
+-  if (!app.isPackaged || getAppDirectoryOverrideFromArgs() || process.env.PANE_DIR || process.env.FOOZOL_DIR) {
++  if (!app.isPackaged) return true;
++  if (!sideBySideName && (getAppDirectoryOverrideFromArgs() || process.env.PANE_DIR || process.env.FOOZOL_DIR)) {
+     return true;
+   }
+   return app.requestSingleInstanceLock();
+@@ -1297,7 +1307,7 @@ if (launchRemoteSetup) {
+       app.exit(0);
+       return;
+     }
+-    if (app.isPackaged && !app.isDefaultProtocolClient(PANE_LINK_SCHEME)) {
++    if (app.isPackaged && !sideBySideName && !app.isDefaultProtocolClient(PANE_LINK_SCHEME)) {
+       app.setAsDefaultProtocolClient(PANE_LINK_SCHEME);
+     }
+ 
+@@ -1306,7 +1316,8 @@ if (launchRemoteSetup) {
+     // after the window opens reads the cache instead of blocking on the shell.
+     void warmShellPath();
+     await initializeServices();
+-    syncAutoStartOnBoot(app, configManager.getConfig().autoStartOnBoot !== false);
++    // The login item is keyed by app id on Windows: a side-by-side build would replace the installed Pane's.
++    if (!sideBySideName) syncAutoStartOnBoot(app, configManager.getConfig().autoStartOnBoot !== false);
+     setTimeout(() => syncPaneMcpForApp({
+       isPackaged: app.isPackaged,
+       config: configManager.getConfig(),
+@@ -1436,7 +1447,8 @@ if (launchRemoteSetup) {
+   // Check for updates after window is created. The auto-updater is set up
+   // here too: loading electron-updater blocks the main thread, which would
+   // hold up the renderer's first requests if it ran as the window opens.
+-  setTimeout(async () => {
++  // A side-by-side test build never offers to replace itself with a release.
++  if (!sideBySideName) setTimeout(async () => {
+     setupAutoUpdater(() => mainWindow);
+     console.log('[Main] Performing startup version check...');
+     await versionChecker.checkOnStartup();
+diff --git a/main/src/services/paneHomeSkill.ts b/main/src/services/paneHomeSkill.ts
+index 7ba52543..1f77d34d 100644
+--- a/main/src/services/paneHomeSkill.ts
++++ b/main/src/services/paneHomeSkill.ts
+@@ -8,6 +8,7 @@ import type { AppConfig } from '../types/config';
+ import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+ import { getAppDirectory } from '../utils/appDirectory';
+ import { linuxToUNCPath } from '../utils/wslUtils';
++import { isSideBySideBuild } from '../utils/sideBySide';
+ 
+ /**
+  * A user-level skill that teaches any agent in a Pane terminal how to reach
+@@ -87,6 +88,8 @@ export function syncPaneHomeSkill(
+   dirs: string[] = paneHomeSkillDirs(),
+   wslDistros: string[] = [],
+ ): Promise<PaneHomeSkillResult[]> {
++  // The home skill belongs to the installed Pane; a side-by-side test build leaves it alone.
++  if (isSideBySideBuild()) return Promise.resolve([]);
+   const result = syncQueue.then(() => syncPaneHomeSkillNow(config, dirs, wslDistros));
+   syncQueue = result.then(() => {}, () => {});
+   return result;
+diff --git a/main/src/services/paneMcpRegistration.ts b/main/src/services/paneMcpRegistration.ts
+index 07dc1dbe..db4a3bf3 100644
+--- a/main/src/services/paneMcpRegistration.ts
++++ b/main/src/services/paneMcpRegistration.ts
+@@ -12,6 +12,7 @@ import { escapeForBash, linuxToUNCPath, windowsPathToWSLMount } from '../utils/w
+ import { parse as parseToml } from 'smol-toml';
+ import { syncPaneUserSkills, type UserSkillTarget } from './paneUserSkills';
+ import { boundary, decodeBoundary, decodeOptionalBoundary, type JsonObject, type JsonValue } from '../../../shared/validation/boundaryDecoder';
++import { isSideBySideBuild } from '../utils/sideBySide';
+ 
+ const execFileAsync = promisify(execFile);
+ 
+@@ -482,7 +483,8 @@ export function syncPaneMcpForApp(options: {
+   /** Saved repositories; their WSL distros get registrations on Windows. */
+   getProjects: () => Pick<Project, 'wsl_enabled' | 'wsl_distribution'>[];
+ }): void {
+-  if (!options.isPackaged) return;
++  // A side-by-side test build must not repoint the installed Pane's registrations at itself.
++  if (!options.isPackaged || isSideBySideBuild()) return;
+   syncQueue = syncQueue
+     .then(() => syncRegistrations(options.config.agentContext?.registerMcp !== false, options))
+     .catch((error) => console.warn('[PaneMcp] Registration sync failed:', error));
+diff --git a/main/src/services/versionChecker.ts b/main/src/services/versionChecker.ts
+index 2b0bad83..0ffeac36 100644
+--- a/main/src/services/versionChecker.ts
++++ b/main/src/services/versionChecker.ts
+@@ -2,6 +2,7 @@ import { app } from 'electron';
+ import { ConfigManager } from './configManager';
+ import { Logger } from '../utils/logger';
+ import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
++import { isSideBySideBuild } from '../utils/sideBySide';
+ 
+ export interface VersionInfo {
+   current: string;
+@@ -43,6 +44,10 @@ export class VersionChecker {
+   public async checkForUpdates(): Promise<VersionInfo> {
+     try {
+       const currentVersion = app.getVersion();
++      // A side-by-side test build is not replaced by a release.
++      if (isSideBySideBuild()) {
++        return { current: currentVersion, latest: currentVersion, hasUpdate: false };
++      }
+ 
+       // Fetch latest release from GitHub API
+       const response = await fetch('https://api.github.com/repos/greenfield-inc/Pane/releases/latest');
+diff --git a/main/src/utils/appDirectory.ts b/main/src/utils/appDirectory.ts
+index c6634c2a..caddcfbe 100644
+--- a/main/src/utils/appDirectory.ts
++++ b/main/src/utils/appDirectory.ts
+@@ -2,6 +2,7 @@ import { homedir } from 'os';
+ import { join } from 'path';
+ import { existsSync, renameSync } from 'fs';
+ import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
++import { getSideBySideName, sideBySideDataDir } from './sideBySide';
+ 
+ let customAppDir: string | undefined;
+ 
+@@ -122,13 +123,19 @@ export function getAppDirectory(): string {
+     return envDir;
+   }
+ 
+-  // 4. If running as an installed app (from DMG, /Applications, etc), always use ~/.pane
++  // 4. A side-by-side test build keeps its own default so it never opens the installed Pane's data
++  const sideBySideName = getSideBySideName();
++  if (sideBySideName) {
++    return sideBySideDataDir(sideBySideName);
++  }
++
++  // 5. If running as an installed app (from DMG, /Applications, etc), always use ~/.pane
+   if (isInstalledApp()) {
+     console.log('[Pane] Running as installed app, using ~/.pane');
+     return join(homedir(), '.pane');
+   }
+ 
+-  // 5. If running inside Pane (detected by bundle identifier) in development, use development directory
++  // 6. If running inside Pane (detected by bundle identifier) in development, use development directory
+   // This prevents development Pane from interfering with production Pane
+   const electronApp = getElectronApp();
+   if (process.env.__CFBundleIdentifier === 'com.dcouple.pane' && !electronApp?.isPackaged) {
+@@ -136,7 +143,7 @@ export function getAppDirectory(): string {
+     return join(homedir(), '.pane_dev');
+   }
+ 
+-  // 6. Default to ~/.pane
++  // 7. Default to ~/.pane
+   return join(homedir(), '.pane');
+ }
+ 
+@@ -146,8 +153,9 @@ export function getAppDirectory(): string {
+  */
+ export function migrateDataDirectory(): void {
+   // Skip migration if a custom directory is set (via --pane-dir, --foozol-dir, or env vars)
+-  // to avoid moving ~/.foozol out from under a running app that explicitly configured its path
+-  if (customAppDir || getAppDirectoryOverrideFromArgs() || process.env.PANE_DIR || process.env.FOOZOL_DIR) {
++  // to avoid moving ~/.foozol out from under a running app that explicitly configured its path.
++  // A side-by-side build never moves the installed Pane's directories.
++  if (customAppDir || getAppDirectoryOverrideFromArgs() || process.env.PANE_DIR || process.env.FOOZOL_DIR || getSideBySideName()) {
+     return;
+   }
+ 
+diff --git a/main/src/utils/sideBySide.test.ts b/main/src/utils/sideBySide.test.ts
+new file mode 100644
+index 00000000..aa3ed382
+--- /dev/null
++++ b/main/src/utils/sideBySide.test.ts
+@@ -0,0 +1,27 @@
++import { describe, expect, it } from 'vitest';
++import { join } from 'path';
++import { parseSideBySideName, sideBySideDataDir, sideBySideUserDataDir } from './sideBySide';
++
++describe('side-by-side builds', () => {
++  it('reads the name electron-builder extraMetadata writes into the packaged package.json', () => {
++    expect(parseSideBySideName(JSON.stringify({ name: 'Pane', version: '2.4.141-rc.1.gabc', paneSideBySide: 'cloudtest' }))).toBe('cloudtest');
++  });
++
++  it('treats a package.json without the field as a normal build', () => {
++    expect(parseSideBySideName(JSON.stringify({ name: 'Pane', version: '2.4.141' }))).toBeNull();
++    expect(parseSideBySideName('not json')).toBeNull();
++  });
++
++  it('rejects names that would escape the home directory or be empty', () => {
++    for (const name of ['', '../pane', 'a/b', 'Cloud Test', '.pane', 'x'.repeat(33)]) {
++      expect(parseSideBySideName(JSON.stringify({ paneSideBySide: name }))).toBeNull();
++    }
++  });
++
++  it('keeps the data directory and the Chromium profile away from the installed Pane', () => {
++    const dataDir = sideBySideDataDir('cloudtest', '/home/red');
++    expect(dataDir).toBe(join('/home/red', '.pane_cloudtest'));
++    expect(dataDir).not.toBe(join('/home/red', '.pane'));
++    expect(sideBySideUserDataDir(dataDir)).toBe(join(dataDir, 'chromium-profile'));
++  });
++});
+diff --git a/main/src/utils/sideBySide.ts b/main/src/utils/sideBySide.ts
+new file mode 100644
+index 00000000..98dc3487
+--- /dev/null
++++ b/main/src/utils/sideBySide.ts
+@@ -0,0 +1,80 @@
++import { readFileSync } from 'fs';
++import { homedir } from 'os';
++import { join } from 'path';
++import { boundary, decodeOptionalBoundary } from '../../../shared/validation/boundaryDecoder';
++
++/**
++ * A side-by-side build is a test build packaged with `paneSideBySide` in its
++ * package.json (`electron-builder -c.extraMetadata.paneSideBySide=<name>`). It
++ * runs beside an installed Pane without touching it:
++ *
++ * - its data directory defaults to `~/.pane_<name>` instead of `~/.pane`;
++ * - its Chromium profile, and so its single-instance lock, lives in that data directory;
++ * - it makes no machine-wide registrations: no login item, no `pane://` handler,
++ *   no MCP server or home skill in agent configs, and no update checks.
++ *
++ * Installed builds never carry the field, so none of this changes them.
++ */
++const SIDE_BY_SIDE_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
++
++/** Reads the side-by-side name from the text of a packaged package.json. */
++export function parseSideBySideName(packageJsonText: string): string | null {
++  let packageJson: unknown;
++  try {
++    packageJson = JSON.parse(packageJsonText);
++  } catch {
++    return null;
++  }
++  const decoded = decodeOptionalBoundary(packageJson, boundary.object({ paneSideBySide: boundary.string }));
++  if (!decoded || !SIDE_BY_SIDE_NAME.test(decoded.paneSideBySide)) return null;
++  return decoded.paneSideBySide;
++}
++
++let cachedName: string | null | undefined;
++
++interface PackagedAppLike {
++  isPackaged: boolean;
++  getAppPath(): string;
++}
++
++function getPackagedApp(): PackagedAppLike | null {
++  try {
++    // eslint-disable-next-line @typescript-eslint/no-require-imports
++    const electronModule: unknown = require('electron');
++    // Plain Node resolves `electron` to the binary path string.
++    if (decodeOptionalBoundary(electronModule, boundary.string) !== undefined) return null;
++    // SAFETY: the Electron runtime module exposes `app`; the plain-Node string case was excluded above.
++    const electronApp = (electronModule as { app?: PackagedAppLike }).app;
++    return electronApp?.isPackaged ? electronApp : null;
++  } catch {
++    return null;
++  }
++}
++
++/** The side-by-side name of this packaged build, or null for a normal build. */
++export function getSideBySideName(): string | null {
++  if (cachedName !== undefined) return cachedName;
++  const electronApp = getPackagedApp();
++  cachedName = null;
++  if (electronApp) {
++    try {
++      cachedName = parseSideBySideName(readFileSync(join(electronApp.getAppPath(), 'package.json'), 'utf8'));
++    } catch {
++      cachedName = null;
++    }
++  }
++  return cachedName;
++}
++
++export function isSideBySideBuild(): boolean {
++  return getSideBySideName() !== null;
++}
++
++export function sideBySideDataDir(name: string, home = homedir()): string {
++  return join(home, `.pane_${name}`);
++}
++
++/** Chromium profile directory for a side-by-side build: inside its data directory. */
++export function sideBySideUserDataDir(appDirectory: string): string {
++  return join(appDirectory, 'chromium-profile');
++}

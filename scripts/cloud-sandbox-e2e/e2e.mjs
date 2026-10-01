@@ -1,0 +1,779 @@
+#!/usr/bin/env node
+// Live end-to-end run of "Add cloud sandbox" (initial-landing plan, Done when 1-4), driving the REAL packaged
+// Pane desktop (no electronApiMock) under a display, from a clean profile, the way a user would:
+//   credentials  Settings → Connections → Cloud sandboxes: enter boat key + wallet, Tailscale OAuth client,
+//                Claude token; save.
+//   add          Add cloud sandbox → listed in the section and the host switcher → connected.
+//   agent        A new Pane on the sandbox, a Claude Code panel in it, a prompt it must answer.
+//   stop         Stop from the row → stopped badge; the switcher offers Start.
+//   start        Start → same tailnet name, the Pane is back, the Claude panel resumes its conversation.
+//   remove       Remove → row, saved host, sandbox and tailnet device all gone.
+//   hygiene      the pre-seeded remote is unchanged, local runtime still works, no secret in any evidence.
+//
+// MODE=fake runs the same phases with 0 boat starts: a second headless daemon of the same build on loopback
+// stands in for the sandbox ("add" saves it as a host, "stop" SIGKILLs it like a power loss, "start"
+// respawns it, "remove" deletes the saved host). It exercises the switcher, Pane, Claude and resume path.
+//
+// Run through run.sh (download, verify, extract, xvfb). State lives in $WORK/state.json, so phases can be
+// run one invocation at a time (PHASES=agent,stop).
+import { _electron as electron } from 'playwright-core';
+import { spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { addSecret, loadSecret, redact, scanForSecrets, secretNames, secretValue } from './secrets.mjs';
+import { boatSandbox, health, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
+
+const env = process.env;
+const required = (name) => {
+  if (!env[name]) throw new Error(`e2e: set ${name}`);
+  return env[name];
+};
+const realHome = os.homedir();
+// live: a fresh isolated profile on this machine; fake: the same with a loopback stand-in host;
+// relay: SOBECK's installed side-by-side test build, its own data dir and the credentials Red entered in it.
+const mode = ['fake', 'relay'].includes(env.MODE) ? env.MODE : 'live';
+const relay = mode === 'relay';
+const paneBin = path.resolve(required('PANE_BIN'));
+const work = path.resolve(required('WORK'));
+const out = path.resolve(required('OUT'));
+const home = relay ? realHome : path.join(work, 'home');
+const paneDir = relay ? path.resolve(required('PANE_DATA_DIR')) : path.join(home, '.pane');
+for (const forbidden of [path.join(realHome, '.pane'), path.join(realHome, '.pane_remote'), ...(relay ? [] : [realHome])]) {
+  if ([relay ? '' : home, paneDir].map((dir) => dir.toLowerCase()).includes(forbidden.toLowerCase())) throw new Error(`e2e: refusing to use ${forbidden}`);
+}
+if (paneBin.startsWith('/opt/') || paneBin === '/usr/bin/pane' || /[\\/]Programs[\\/]Pane[\\/]/i.test(paneBin)) {
+  throw new Error('e2e: PANE_BIN must be the test build, never the installed Pane');
+}
+const allPhases = ['credentials', 'add', 'agent', 'stop', 'start', 'remove', 'hygiene'];
+const phases = (env.PHASES ? env.PHASES.split(',') : allPhases).filter((phase) => mode !== 'fake' || phase !== 'credentials');
+const maxStarts = Number(env.MAX_STARTS ?? (relay ? 2 : 6));
+const startsLog = env.STARTS_LOG ?? (relay ? path.join(out, 'starts.txt') : path.join(realHome, 'rc-loop/evidence/cs-e2e/starts.txt'));
+const secretsDir = env.SECRETS_DIR ?? path.join(realHome, 'rc-loop/secrets');
+const boatOrg = env.BOAT_ORG ?? 'test';
+if (mode === 'live' && boatOrg !== 'test') throw new Error('e2e: live runs use the boat test org only (BOAT_ORG=test)');
+fs.mkdirSync(out, { recursive: true });
+fs.mkdirSync(paneDir, { recursive: true, mode: 0o700 });
+
+// ---------------------------------------------------------------- state, log, checks, timings
+const statePath = path.join(work, 'state.json');
+const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : {};
+const saveState = () => fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+const results = { mode, phases, checks: [], timings: {}, findings: [] };
+const log = (...parts) => {
+  const line = redact(`${new Date().toISOString()} ${parts.join(' ')}`);
+  console.log(line);
+  fs.appendFileSync(path.join(out, 'steps.log'), `${line}\n`);
+};
+const check = (name, ok, detail = '') => {
+  results.checks.push({ name, verdict: ok === null ? 'SKIP' : ok ? 'PASS' : 'FAIL', detail: redact(detail) });
+  log(ok === null ? 'SKIP' : ok ? 'PASS' : 'FAIL', name, detail);
+  return ok;
+};
+const timing = (name, startedAt) => {
+  const seconds = Math.round((Date.now() - startedAt) / 100) / 10;
+  results.timings[name] = seconds;
+  log('TIME', name, `${seconds} s`);
+  return seconds;
+};
+const finding = (text) => {
+  results.findings.push(redact(text));
+  log('FINDING', text);
+};
+const until = async (probe, timeoutMs, everyMs = 2000) => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await probe().catch(() => undefined);
+    if (value) return value;
+    if (Date.now() > deadline) return undefined;
+    await new Promise((resolve) => setTimeout(resolve, everyMs));
+  }
+};
+
+function countStart(what) {
+  fs.mkdirSync(path.dirname(startsLog), { recursive: true });
+  const used = fs.existsSync(startsLog) ? fs.readFileSync(startsLog, 'utf8').split('\n').filter(Boolean).length : 0;
+  if (used >= maxStarts) throw new Error(`e2e: start budget used (${used}/${maxStarts} in ${startsLog})`);
+  fs.appendFileSync(startsLog, `${new Date().toISOString()} ${what} ${state.label ?? ''}\n`);
+  log(`boat start ${used + 1}/${maxStarts}: ${what}`);
+}
+
+// ---------------------------------------------------------------- secrets
+if (mode === 'live') {
+  loadSecret('boatApiKey', path.join(secretsDir, 'boat.hdr'), (text) => text.trim().replace(/^Authorization: Bearer /, ''));
+  loadSecret('tailscaleClientSecret', path.join(secretsDir, 'TAILSCALE_OAUTH_SECRET'));
+  // The client id is not secret, but it is kept with the rest so it is typed from one place.
+  addSecret('tailscaleClientId', env.TAILSCALE_CLIENT_ID ?? 'krreHuCr3M11CNTRL');
+}
+if (relay) {
+  // Nothing secret comes from files here; the saved host tokens are registered so they are redacted.
+  for (const host of savedHosts(paneDir)) addSecret(`savedHostToken:${host.label}`, savedHostToken(paneDir, host.id));
+} else {
+  // claude-slot names the secrets file of the Claude token the loop's agents currently use.
+  const claudeSlot = fs.readFileSync(path.join(secretsDir, 'claude-slot'), 'utf8').trim();
+  if (!claudeSlot) throw new Error('e2e: claude-slot is empty');
+  loadSecret('claudeToken', path.join(secretsDir, claudeSlot));
+}
+log(`secrets loaded (names only): ${secretNames().join(', ')}`);
+
+// ---------------------------------------------------------------- clean environment
+// Nothing is inherited from the Pane session this harness runs in (PANE_*, RUNPANE_*, tokens): an app that
+// saw PANE_DIR or PANE_SESSION_ID could talk to the machine's own Pane daemon.
+const claudeBin = relay ? '' : (spawnSync('bash', ['-lc', 'command -v claude'], { encoding: 'utf8' }).stdout ?? '').trim();
+const basePath = [...new Set([path.dirname(process.execPath), claudeBin ? path.dirname(claudeBin) : '', '/usr/local/bin', '/usr/bin', '/bin'].filter(Boolean))].join(':');
+function cleanEnv(extra) {
+  return {
+    PATH: basePath,
+    HOME: home,
+    USER: os.userInfo().username,
+    LANG: env.LANG ?? 'C.UTF-8',
+    DISPLAY: env.DISPLAY ?? '',
+    XAUTHORITY: env.XAUTHORITY ?? '',
+    XDG_CONFIG_HOME: path.join(home, '.config'),
+    XDG_DATA_HOME: path.join(home, '.local/share'),
+    XDG_CACHE_HOME: path.join(home, '.cache'),
+    XDG_RUNTIME_DIR: path.join(work, 'run'),
+    ...extra,
+  };
+}
+fs.mkdirSync(path.join(work, 'run'), { recursive: true, mode: 0o700 });
+// On SOBECK the app gets the user's environment (a Windows app needs it), minus anything Pane-related.
+const relayEnv = () => Object.fromEntries(Object.entries(env).filter(([name]) => !/^(PANE_|RUNPANE_|ELECTRON_RUN_AS_NODE$|CLAUDE_CODE_OAUTH_TOKEN$|ANTHROPIC_)/i.test(name)));
+const appEnv = relay ? {
+  ...relayEnv(),
+  ...(env.PANE_DEB_URL ? { RUNPANE_CLOUD_PANE_DEB_URL: env.PANE_DEB_URL, RUNPANE_CLOUD_PANE_DEB_SHA256: env.PANE_DEB_SHA256 ?? '' } : {}),
+  RUNPANE_CLOUD_NAME_PREFIX: 'rp-loop-cs-',
+} : cleanEnv({
+  PANE_DIR: paneDir,
+  // What the sandbox installs: the same build as this desktop (cs-e2e iface request).
+  ...(env.PANE_DEB_URL ? { RUNPANE_CLOUD_PANE_DEB_URL: env.PANE_DEB_URL, RUNPANE_CLOUD_PANE_DEB_SHA256: env.PANE_DEB_SHA256 ?? '' } : {}),
+  ...(mode === 'live' ? { RUNPANE_CLOUD_BOAT_ORG: boatOrg, RUNPANE_CLOUD_NAME_PREFIX: 'rp-loop-cs-' } : {}),
+});
+
+// ---------------------------------------------------------------- the pre-seeded remote (hygiene)
+// A saved remote that exists before the run; it must come out byte-for-byte the same (except order).
+// On SOBECK the hosts already saved there (Scratch) play that part.
+if (relay && !state.existingHosts) {
+  state.existingHosts = savedHosts(paneDir).map((host) => ({ ...host, tokenSha256: crypto.createHash('sha256').update(savedHostToken(paneDir, host.id) ?? '').digest('hex') }));
+  saveState();
+}
+if (!relay && !state.existingRemote) {
+  const token = crypto.randomBytes(24).toString('base64url');
+  state.existingRemote = { id: crypto.randomUUID(), label: 'existing-remote', baseUrl: 'http://127.0.0.1:9', token, transport: 'http+sse' };
+  const configPath = path.join(paneDir, 'config.json');
+  const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
+  config.remoteDaemon = { ...config.remoteDaemon, client: { profiles: [state.existingRemote], activeProfileId: null, mode: 'local' } };
+  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  saveState();
+}
+if (state.existingRemote) addSecret('existingRemoteToken', state.existingRemote.token);
+
+// ---------------------------------------------------------------- fake sandbox (MODE=fake)
+const fakeHome = path.join(work, 'fake-home');
+const fakeDir = path.join(fakeHome, '.pane');
+const fakePort = Number(env.FAKE_PORT ?? 42199);
+const fakeBaseUrl = `http://127.0.0.1:${fakePort}`;
+const fakeEnv = () => cleanEnv({ HOME: fakeHome, XDG_CONFIG_HOME: path.join(fakeHome, '.config'), XDG_DATA_HOME: path.join(fakeHome, '.local/share'), XDG_CACHE_HOME: path.join(fakeHome, '.cache'), DISPLAY: '', CLAUDE_CODE_OAUTH_TOKEN: secretValue('claudeToken') });
+
+function fakeSetup() {
+  fs.mkdirSync(fakeDir, { recursive: true, mode: 0o700 });
+  // Claude Code with only an OAuth token still shows its onboarding; a provisioned sandbox is expected to
+  // have this done, so the fake does it too.
+  fs.writeFileSync(path.join(fakeHome, '.claude.json'), `${JSON.stringify({ hasCompletedOnboarding: true })}\n`, { mode: 0o600 });
+  // Without a git identity the first Pane in a new project fails ("Author identity unknown").
+  fs.writeFileSync(path.join(fakeHome, '.gitconfig'), '[user]\n\tname = cs-e2e\n\temail = cs-e2e@localhost\n');
+  const setup = spawnSync(paneBin, ['--ozone-platform=headless', '--disable-gpu', '--no-sandbox', '--remote-setup', '--label', 'rp-loop-cs-fake', '--pane-dir', fakeDir, '--listen-port', String(fakePort),
+    '--prefer-tunnel', 'manual', '--base-url', fakeBaseUrl, '--no-install-service'], { env: fakeEnv(), encoding: 'utf8', timeout: 120_000 });
+  const code = (setup.stdout ?? '').match(/pane-remote:\/\/[A-Za-z0-9_-]+/)?.[0];
+  if (setup.status !== 0 || !code) throw new Error(`fake host: --remote-setup exited ${setup.status} without a code`);
+  const payload = JSON.parse(Buffer.from(code.slice('pane-remote://'.length), 'base64url').toString('utf8'));
+  addSecret('fakeHostToken', payload.token);
+  return payload;
+}
+
+function fakeDaemonStart() {
+  const daemonLog = fs.openSync(path.join(work, 'fake-daemon.log'), 'a');
+  const child = spawn(paneBin, ['--ozone-platform=headless', '--disable-gpu', '--no-sandbox', '--daemon-headless', '--pane-dir', fakeDir],
+    { env: fakeEnv(), stdio: ['ignore', daemonLog, daemonLog], detached: true });
+  child.unref();
+  state.fakePid = child.pid;
+  saveState();
+  return child.pid;
+}
+
+function fakeDaemonKill() {
+  if (!state.fakePid) return false;
+  try {
+    process.kill(-state.fakePid, 'SIGKILL');
+  } catch {
+    return false;
+  }
+  delete state.fakePid;
+  saveState();
+  return true;
+}
+
+function fakeSaveHost(payload) {
+  const configPath = path.join(paneDir, 'config.json');
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  const profiles = config.remoteDaemon.client.profiles.filter((profile) => profile.label !== payload.label);
+  profiles.push({ id: crypto.randomUUID(), label: payload.label, baseUrl: fakeBaseUrl, token: payload.token, transport: 'http+sse' });
+  config.remoteDaemon.client.profiles = profiles;
+  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+}
+
+// ---------------------------------------------------------------- app
+let app;
+let page;
+let context;
+let shotIndex = Number(state.shotIndex ?? 0);
+const shot = async (name) => {
+  const file = path.join(out, `${String(++shotIndex).padStart(2, '0')}-${name}.png`);
+  state.shotIndex = shotIndex;
+  await page.screenshot({ path: file }).catch(() => undefined);
+  const aria = await page.locator('body').ariaSnapshot().catch(() => '');
+  fs.writeFileSync(file.replace(/\.png$/, '.aria.yml'), redact(aria));
+};
+
+async function launch() {
+  app = await electron.launch({ executablePath: paneBin, args: ['--no-sandbox'], env: appEnv, timeout: 120_000 });
+  const mainLog = path.join(out, 'app-main.log');
+  for (const stream of [app.process().stdout, app.process().stderr]) stream?.on('data', (chunk) => fs.appendFileSync(mainLog, redact(chunk.toString())));
+  context = app.context();
+  // No trace on SOBECK (Red's own data on screen); elsewhere a trace with credentials paused out of it.
+  if (!relay) {
+    await context.tracing.start({ screenshots: true, snapshots: true, title: `cloud-sandbox-e2e ${mode}` });
+    await context.tracing.startChunk();
+  }
+  page = await app.firstWindow();
+  page.on('console', (message) => fs.appendFileSync(path.join(out, 'app-console.log'), `${redact(`[${message.type()}] ${message.text()}`)}\n`));
+  await page.waitForLoadState('domcontentloaded');
+  await page.waitForTimeout(5000);
+  await dismissFirstRun();
+}
+
+let traceChunk = 0;
+async function pauseTrace() {
+  if (relay) return;
+  await context.tracing.stopChunk({ path: path.join(out, `trace-${String(++traceChunk).padStart(2, '0')}.zip`) });
+}
+async function resumeTrace() {
+  if (relay) return;
+  await context.tracing.startChunk();
+}
+
+// First-run dialogs a new user meets: the updater (an e2e build's version sorts before the release it is
+// based on), onboarding, the welcome card. Dismissed the way a user would.
+async function dismissFirstRun() {
+  for (let round = 0; round < 6; round++) {
+    await page.waitForTimeout(700);
+    const update = page.getByRole('dialog', { name: 'Software Update' });
+    if (await update.isVisible().catch(() => false)) {
+      await update.getByRole('button', { name: 'Close', exact: true }).click();
+      continue;
+    }
+    const skip = page.getByRole('button', { name: 'Skip', exact: true });
+    if (await skip.isVisible().catch(() => false)) {
+      await skip.click();
+      continue;
+    }
+    const welcome = page.getByRole('dialog', { name: 'Welcome to Pane' });
+    if (await welcome.isVisible().catch(() => false)) {
+      await welcome.getByRole('button', { name: 'Close modal' }).click();
+      continue;
+    }
+    return;
+  }
+}
+
+// ---------------------------------------------------------------- UI map
+// Every accessible name the run depends on, in one place. Cloud-sandbox names follow the cs-e2e request in
+// ~/rc-loop/ledger/iface-cs.md; adapt here when the desktop's differ.
+const ui = {
+  switcherChip: () => page.getByRole('button', { name: /Switch host$/ }).first(),
+  connectedChip: (label) => page.getByRole('button', { name: `Agents run on ${label}. Switch host` }),
+  hostItem: (label) => page.getByRole('menuitemradio', { name: new RegExp(escapeRegExp(label)) }),
+  localItem: () => page.getByRole('menuitemradio', { name: /This computer/ }),
+  manageConnections: () => page.getByRole('button', { name: /Manage connections/ }),
+  cloudSection: () => page.getByRole('region', { name: /Cloud sandboxes/i }),
+  credential: (label) => page.getByLabel(label, { exact: false }),
+  saveCredentials: () => page.getByRole('button', { name: /Save credentials/i }),
+  addSandbox: () => page.getByRole('button', { name: /Add cloud sandbox/i }),
+  addDialog: () => page.getByRole('dialog', { name: /cloud sandbox/i }),
+  progress: () => page.getByRole('status'),
+  row: (label) => ui.cloudSection().getByRole('listitem').filter({ hasText: label }),
+  rowAction: (verb, label) => page.getByRole('button', { name: `${verb} ${label}`, exact: true }),
+  confirmDialog: () => page.getByRole('dialog').filter({ hasText: /Remove/ }),
+  newPaneIn: (repo) => page.getByRole('button', { name: repo ? `New pane in ${repo}` : /^New pane in / }),
+  paneButton: (name) => page.getByRole('button', { name, exact: true }),
+  addTool: () => page.getByRole('button', { name: 'Add tool' }),
+  claudeTool: () => page.getByRole('menuitem', { name: /Claude Code/ }),
+  // The switcher's Start action for a stopped sandbox (a menu entry or a button inside the host's entry).
+  switcherStart: (label) => page.getByRole('button', { name: new RegExp(`^Start ${escapeRegExp(label)}`) })
+    .or(page.getByRole('menuitem', { name: new RegExp(`^Start ${escapeRegExp(label)}`) })).first(),
+  claudeTab: () => page.getByRole('button', { name: /Claude Code/ }).first(),
+};
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const visible = (locator, timeout = 1000) => locator.waitFor({ state: 'visible', timeout }).then(() => true, () => false);
+
+async function openSwitcher() {
+  await dismissFirstRun();
+  await ui.switcherChip().click();
+  await page.waitForTimeout(400);
+}
+
+async function closeMenus() {
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+}
+
+async function openConnections() {
+  await openSwitcher();
+  await ui.manageConnections().click();
+  await page.waitForTimeout(800);
+}
+
+// The chip's name is the same while connected and after a failed connect; the switcher entry's status text
+// ("Connected · <url>") is what tells them apart for a user.
+async function isConnected(label) {
+  if (!(await visible(ui.connectedChip(label), 500))) return false;
+  await openSwitcher();
+  const text = (await ui.hostItem(label).textContent().catch(() => '')) ?? '';
+  await closeMenus();
+  return /\bConnected\b/.test(text);
+}
+
+async function waitConnected(label, timeoutMs) {
+  return Boolean(await until(() => isConnected(label), timeoutMs, 2000));
+}
+
+async function connectTo(label, timeoutMs = 60_000) {
+  await openSwitcher();
+  await ui.hostItem(label).click();
+  return waitConnected(label, timeoutMs);
+}
+
+// ---------------------------------------------------------------- terminal (Claude panel) helpers
+// The rows of the terminal on screen (hidden panel tabs keep their own .xterm-rows).
+const terminalLines = () => page.evaluate(() => {
+  const rows = [...document.querySelectorAll('.xterm-rows')].filter((element) => element.offsetParent !== null).at(-1);
+  return rows ? [...rows.children].map((row) => (row.textContent ?? '').replace(/\u00a0/g, ' ')) : [];
+});
+const terminalText = async () => (await terminalLines()).join('\n');
+const nonEmpty = (lines) => lines.filter((line) => line.trim() !== '');
+const tail = (lines, count) => nonEmpty(lines).slice(-count).join('\n');
+const lastLine = (lines) => nonEmpty(lines).at(-1) ?? '';
+
+// Moves the cursor (❯) of the Claude Code menu on screen to the option matching `option`, then confirms.
+async function chooseOption(option) {
+  const lines = await terminalLines();
+  const cursor = lines.findLastIndex((line) => line.includes('\u276f'));
+  const target = lines.findLastIndex((line) => option.test(line));
+  if (cursor === -1 || target === -1) return false;
+  const key = target > cursor ? 'ArrowDown' : 'ArrowUp';
+  for (let step = 0; step < Math.abs(target - cursor); step++) await page.keyboard.press(key);
+  await page.waitForTimeout(300);
+  await page.keyboard.press('Enter');
+  return true;
+}
+
+// Claude Code first-run screens, answered like a user and reported (a provisioned sandbox should not show them).
+async function answerClaudePrompts(timeoutMs) {
+  const answered = [];
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const lines = await terminalLines();
+    const text = tail(lines, 30);
+    if (/Select login method|Paste code here/i.test(text)) throw new Error('Claude Code asks to log in: the Claude token did not reach the panel');
+    if (/Yes, I accept/.test(text)) {
+      answered.push('bypass-permissions');
+      await chooseOption(/Yes, I accept/);
+    } else if (/Yes, I trust this folder|Yes, proceed/.test(text)) {
+      answered.push('trust-folder');
+      await chooseOption(/Yes, I trust this folder|Yes, proceed/);
+    } else if (/Choose the text style|Press Enter to continue/i.test(text)) {
+      answered.push('first-run-screen');
+      await page.keyboard.press('Enter');
+    } else if (/\? for shortcuts|bypass permissions on/i.test(tail(lines, 6)) && !/\$\s*$/.test(lastLine(lines))) {
+      return answered;
+    } else if (/\$ $/.test(text.trimEnd() + ' ') && /claude --/.test(text) && answered.length > 0) {
+      throw new Error(`Claude Code exited after: ${answered.join(', ')}`);
+    }
+    await page.waitForTimeout(answered.length ? 2500 : 1500);
+  }
+  throw new Error(`Claude Code was not ready within ${Math.round(timeoutMs / 1000)} s (answered: ${answered.join(', ') || 'nothing'})`);
+}
+
+async function askClaude(prompt, expected, timeoutMs = 240_000) {
+  await page.locator('.xterm').last().click();
+  await page.keyboard.type(prompt, { delay: 10 });
+  await page.keyboard.press('Enter');
+  const startedAt = Date.now();
+  const answered = await until(async () => (await terminalText()).includes(expected), timeoutMs, 1500);
+  return { answered: Boolean(answered), ms: Date.now() - startedAt };
+}
+
+// ---------------------------------------------------------------- phases
+async function phaseCredentials() {
+  await openConnections();
+  check('cloud-section-shown', await visible(ui.cloudSection(), 10_000), 'Settings → Connections has a Cloud sandboxes section');
+  await shot('connections-before-credentials');
+  if (relay) {
+    // Red entered the credentials in this build once (Run 5 step 2); the proof only reads their state.
+    const sectionText = ((await ui.cloudSection().textContent().catch(() => '')) ?? '').replace(/\s+/g, ' ');
+    check('credentials-ready', !/not configured|invalid|error/i.test(sectionText) && (await visible(ui.addSandbox(), 2000)) && !(await ui.addSandbox().isDisabled()), sectionText.slice(0, 200));
+    check('wallet-is-test', /\btest\b/i.test(sectionText), 'the saved boat wallet shown in the section is "test"');
+    if (!/\btest\b/i.test(sectionText)) throw new Error('the saved boat wallet is not "test": stop before creating anything');
+    return;
+  }
+  // No trace and no screenshot while values are in the inputs.
+  await pauseTrace();
+  const fields = [
+    ['boat API key', 'boatApiKey'],
+    ['Tailscale OAuth client ID', 'tailscaleClientId'],
+    ['Tailscale OAuth client secret', 'tailscaleClientSecret'],
+    ['Claude token', 'claudeToken'],
+  ];
+  for (const [label, name] of fields) await ui.credential(label).fill(secretValue(name));
+  if (await visible(ui.credential('boat wallet'), 500)) await ui.credential('boat wallet').fill(boatOrg);
+  else finding('no "boat wallet" field in the credentials form; relying on RUNPANE_CLOUD_BOAT_ORG');
+  const startedAt = Date.now();
+  await ui.saveCredentials().click();
+  // Saving verifies the keys with boat and Tailscale; wait until the button is idle again.
+  await until(async () => !(await ui.saveCredentials().isDisabled()) && !/Saving|Verifying/i.test((await ui.saveCredentials().textContent()) ?? ''), 30_000, 1000);
+  const inputValues = await page.locator('input').evaluateAll((inputs) => inputs.map((input) => input.value));
+  const leftInInputs = fields.filter(([, name]) => inputValues.includes(secretValue(name))).map(([label]) => label);
+  const bodyText = await page.locator('body').textContent() ?? '';
+  const leftInText = fields.filter(([, name]) => bodyText.includes(secretValue(name))).map(([label]) => label);
+  check('credentials-not-shown-after-save', leftInInputs.length === 0 && leftInText.length === 0,
+    leftInInputs.length || leftInText.length ? `still visible: inputs ${JSON.stringify(leftInInputs)}, text ${JSON.stringify(leftInText)}` : 'no credential value in any input or text after saving');
+  // Only now that nothing secret is on screen again.
+  if (leftInInputs.length === 0 && leftInText.length === 0) await resumeTrace();
+  else throw new Error('a credential stays on screen after saving; stopping before any trace or screenshot records it');
+  timing('credentials-save', startedAt);
+  const sectionText = (await ui.cloudSection().textContent().catch(() => '')) ?? '';
+  check('credentials-ready', !/not configured|invalid|error/i.test(sectionText), sectionText.replace(/\s+/g, ' ').slice(0, 200));
+  await shot('credentials-saved');
+  const credentialFiles = listCredentialFiles();
+  check('credentials-file-0600', credentialFiles.length > 0 && credentialFiles.every((file) => file.mode === '600'), JSON.stringify(credentialFiles));
+}
+
+function listCredentialFiles() {
+  const roots = [path.join(home, '.config/runpane-cloud')];
+  const files = [];
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue;
+    for (const name of fs.readdirSync(root)) {
+      const stat = fs.statSync(path.join(root, name));
+      if (stat.isFile()) files.push({ file: path.join(root, name).replace(home, '~'), mode: (stat.mode & 0o777).toString(8) });
+    }
+  }
+  return files;
+}
+
+async function phaseAdd() {
+  if (mode === 'fake') {
+    const payload = fakeSetup();
+    fakeDaemonStart();
+    const up = await until(() => health(fakeBaseUrl), 90_000);
+    check('fake-host-up', Boolean(up), fakeBaseUrl);
+    state.label = payload.label;
+    saveState();
+    // Saved while the app is closed, as a provisioned host is saved by the app itself.
+    await app?.close();
+    fakeSaveHost(payload);
+    await launch();
+  } else {
+    state.label = env.LABEL ?? `rp-loop-cs-e2e-${crypto.randomBytes(3).toString('hex')}`;
+    saveState();
+    await openConnections();
+    await ui.addSandbox().click();
+    const dialog = ui.addDialog();
+    if (await visible(dialog, 3000)) {
+      const name = dialog.getByLabel(/Name/i);
+      if (await visible(name, 1000)) await name.fill(state.label);
+      countStart('create');
+      await dialog.getByRole('button', { name: /Add|Create/ }).last().click();
+    } else {
+      countStart('create');
+    }
+    const startedAt = Date.now();
+    const progress = [];
+    const listed = await until(async () => {
+      const status = ((await ui.progress().allTextContents().catch(() => [])).join(' | ')).replace(/\s+/g, ' ').trim();
+      if (status && progress.at(-1) !== status) progress.push(`${Math.round((Date.now() - startedAt) / 1000)} s ${status}`);
+      const rowText = (await ui.row(state.label).textContent().catch(() => '')) ?? '';
+      return /running/i.test(rowText);
+    }, Number(env.ADD_TIMEOUT_MS ?? 600_000), 2000);
+    fs.writeFileSync(path.join(out, 'add-progress.txt'), `${redact(progress.join('\n'))}\n`);
+    timing('add-to-running', startedAt);
+    check('add-listed-running', Boolean(listed), `row "${state.label}" shows running; progress steps: ${progress.length}`);
+    await shot('sandbox-running');
+    const host = savedHosts(paneDir).find((entry) => entry.cloud && entry.label === state.label) ?? savedHosts(paneDir).find((entry) => entry.cloud);
+    check('saved-host-written', Boolean(host?.cloud?.sandboxId), JSON.stringify(host ?? null));
+    if (host) {
+      state.label = host.label;
+      state.profileId = host.id;
+      state.cloud = host.cloud;
+      state.baseUrl = host.baseUrl;
+      saveState();
+      addSecret('sandboxHostToken', savedHostToken(paneDir, host.id));
+      results.sandbox = { label: host.label, ...host.cloud };
+    }
+    if (host && !relay) {
+      const sandbox = await boatSandbox(host.cloud.sandboxId, boatOrg);
+      // boat reports the wallet a sandbox bills as `team`; test's id (p2-boat-org).
+      const testOrgId = env.BOAT_TEST_ORG_ID ?? 'team_852d7300-6d4b-45ec-b14e-42b2f444616c';
+      check('boat-sandbox-in-test-org', sandbox.exists && sandbox.team === testOrgId && /^rp-loop-cs-/.test(sandbox.name ?? ''), `boat: ${JSON.stringify(sandbox)}`);
+      const devices = await tailnetDevices(host.cloud.hostname);
+      check('tailnet-device-joined', devices.length === 1, JSON.stringify(devices));
+      state.tailnetDevice = devices[0];
+      saveState();
+    }
+    state.addStartedAt = startedAt;
+  }
+  const startedAt = Date.now();
+  await openSwitcher();
+  check('switcher-lists-sandbox', await visible(ui.hostItem(state.label), 15_000), state.label);
+  await shot('switcher-lists-sandbox');
+  await ui.hostItem(state.label).click();
+  const connected = await waitConnected(state.label, 60_000);
+  timing('pick-to-connected', startedAt);
+  if (state.addStartedAt) timing('add-to-connected', state.addStartedAt);
+  check('connected', connected, `switcher chip names ${state.label}`);
+  await shot('connected');
+}
+
+async function ensureProject() {
+  if (await visible(ui.newPaneIn(env.REPO), 15_000)) return;
+  // A fresh sandbox may have no project yet: create one like a user (New Project, a new folder on the host).
+  const projectPath = env.REMOTE_PROJECT_PATH ?? (mode === 'fake' ? path.join(fakeHome, 'cs-e2e-project') : '/home/user/cs-e2e-project');
+  finding(`no project on the host after connecting; created one at ${projectPath} through Add New Repository`);
+  await page.keyboard.press('Control+Shift+N');
+  const dialog = page.getByRole('dialog', { name: /Add New Repository/ });
+  await dialog.waitFor({ timeout: 10_000 });
+  await dialog.getByPlaceholder('Enter project name').fill('cs-e2e-project');
+  await dialog.getByPlaceholder('/path/to/your/repository').fill(projectPath);
+  await dialog.getByRole('button', { name: /Create|Add/ }).last().click();
+  await visible(ui.newPaneIn(), 30_000);
+}
+
+async function phaseAgent() {
+  if (!(await isConnected(state.label))) check('connected-for-agent', await connectTo(state.label), state.label);
+  await ensureProject();
+  state.paneName = state.paneName ?? `cs-e2e-${crypto.randomBytes(2).toString('hex')}`;
+  saveState();
+  const startedAt = Date.now();
+  await ui.newPaneIn(env.REPO).first().click();
+  const dialog = page.getByRole('dialog', { name: /^New Pane/ });
+  await dialog.getByPlaceholder('Enter a name for your pane').fill(state.paneName);
+  await dialog.getByRole('button', { name: /^Create/ }).click();
+  const paneShown = await visible(ui.addTool(), 60_000);
+  timing('create-pane', startedAt);
+  check('pane-created', paneShown, `Pane "${state.paneName}" open`);
+  await ui.addTool().click();
+  await ui.claudeTool().click();
+  const claudeStartedAt = Date.now();
+  await page.locator('.xterm').last().waitFor({ timeout: 60_000 });
+  const prompts = await answerClaudePrompts(120_000);
+  if (prompts.length > 0) finding(`Claude Code showed first-run screens in the new panel: ${prompts.join(', ')}`);
+  timing('claude-panel-ready', claudeStartedAt);
+  const a = 100 + crypto.randomInt(800);
+  const b = 100 + crypto.randomInt(800);
+  state.codeWord = `kestrel${crypto.randomInt(1000, 9999)}`;
+  saveState();
+  const reply = await askClaude(`The code word is ${state.codeWord}. Remember it. Now compute ${a}+${b} and reply with only SUM= followed by the result.`, `SUM=${a + b}`);
+  results.timings['claude-first-answer'] = Math.round(reply.ms / 100) / 10;
+  check('claude-answers', reply.answered, reply.answered ? `SUM=${a + b} after ${Math.round(reply.ms / 1000)} s` : 'no answer within the timeout');
+  await shot('claude-answered');
+}
+
+async function phaseStop() {
+  const startedAt = Date.now();
+  if (mode === 'fake') {
+    check('fake-host-killed', fakeDaemonKill(), 'SIGKILL to the headless daemon (power loss)');
+    await until(async () => !(await health(fakeBaseUrl)), 30_000, 1000);
+    const downAt = Date.now();
+    const noticed = await until(async () => !(await isConnected(state.label)), 60_000, 2000);
+    if (noticed) timing('ui-notices-host-down', downAt);
+    else finding('the switcher still said Connected 60 s after the host died');
+    await shot('host-down');
+  } else {
+    await openConnections();
+    await ui.rowAction('Stop', state.label).click();
+    const stopped = await until(async () => /stopped/i.test((await ui.row(state.label).textContent()) ?? ''), 300_000, 2000);
+    timing('stop', startedAt);
+    check('row-stopped', Boolean(stopped), `row "${state.label}" shows stopped`);
+    await shot('row-stopped');
+    const sandbox = relay ? { exists: true, state: 'not checked on SOBECK' } : await boatSandbox(state.cloud.sandboxId, boatOrg);
+    if (!relay) check('boat-stopped', sandbox.exists && !/running|active/i.test(sandbox.state ?? ''), `boat state ${sandbox.state}`);
+    await openSwitcher();
+    const startOffered = await visible(ui.switcherStart(state.label), 5000);
+    check('switcher-offers-start', startOffered, 'a stopped sandbox has a Start action in the switcher');
+    await shot('switcher-stopped');
+    await closeMenus();
+  }
+}
+
+async function phaseStart() {
+  const startedAt = Date.now();
+  if (mode === 'fake') {
+    fakeDaemonStart();
+    check('fake-host-restarted', Boolean(await until(() => health(fakeBaseUrl), 120_000)), fakeBaseUrl);
+    timing('start-to-health', startedAt);
+  } else {
+    countStart('start');
+    await openSwitcher();
+    const fromSwitcher = ui.switcherStart(state.label);
+    if (await visible(fromSwitcher, 2000)) await fromSwitcher.click();
+    else {
+      await closeMenus();
+      await openConnections();
+      await ui.rowAction('Start', state.label).click();
+    }
+    const running = await until(async () => {
+      if (await visible(ui.connectedChip(state.label), 500)) return true;
+      await openConnections().catch(() => undefined);
+      return /running/i.test((await ui.row(state.label).textContent().catch(() => '')) ?? '');
+    }, 600_000, 3000);
+    timing('start-to-running', startedAt);
+    check('row-running-again', Boolean(running), state.label);
+    const host = savedHosts(paneDir).find((entry) => entry.id === state.profileId);
+    check('same-tailnet-name', host?.cloud?.hostname === state.cloud.hostname && host?.baseUrl === state.baseUrl,
+      `before ${state.cloud.hostname} ${state.baseUrl}; after ${host?.cloud?.hostname} ${host?.baseUrl}`);
+    const devices = relay ? [state.tailnetDevice] : await tailnetDevices(state.cloud.hostname);
+    if (!relay) check('same-tailnet-device', devices.length === 1 && devices[0].id === state.tailnetDevice?.id, JSON.stringify(devices));
+  }
+  const connectedAt = Date.now();
+  let connected = await waitConnected(state.label, 90_000);
+  if (!connected) {
+    finding('after Start the desktop did not reconnect by itself within 90 s; picked the host again in the switcher');
+    connected = await connectTo(state.label, 90_000);
+  }
+  timing('start-to-connected', startedAt);
+  check('reconnected', connected, state.label);
+  // Reload so the Pane list comes from the restarted host, not from what the window still shows.
+  await page.reload();
+  await page.waitForLoadState('domcontentloaded');
+  await page.waitForTimeout(4000);
+  await dismissFirstRun();
+  if (!(await waitConnected(state.label, 30_000))) {
+    finding('after a window reload the restarted host was not connected; picked it again in the switcher');
+    check('reconnected-after-reload', await connectTo(state.label), state.label);
+  }
+  const paneBack = await visible(ui.paneButton(state.paneName), 60_000);
+  check('pane-back', paneBack, `Pane "${state.paneName}" listed after Start`);
+  if (!paneBack) return;
+  await ui.paneButton(state.paneName).click();
+  await ui.claudeTab().click().catch(() => undefined);
+  await page.locator('.xterm').last().waitFor({ timeout: 60_000 });
+  const prompts = await answerClaudePrompts(180_000);
+  if (prompts.length > 0) finding(`resumed Claude panel showed: ${prompts.join(', ')}`);
+  timing('start-to-claude-ready', connectedAt);
+  await shot('claude-resumed');
+  const reply = await askClaude('What was the code word I gave you earlier in this conversation? Reply with only WORD= followed by it.', `WORD=${state.codeWord}`);
+  results.timings['claude-resumed-answer'] = Math.round(reply.ms / 100) / 10;
+  check('claude-resumes-conversation', reply.answered, reply.answered ? `WORD=${state.codeWord} after ${Math.round(reply.ms / 1000)} s` : 'the resumed panel did not recall the code word');
+  timing('start-to-resumed-answer', startedAt);
+  await shot('claude-recalled');
+}
+
+async function phaseRemove() {
+  const startedAt = Date.now();
+  if (mode === 'fake') {
+    await openConnections();
+    await page.getByRole('button', { name: `Delete ${state.label}` }).click();
+    await page.waitForTimeout(1500);
+    fakeDaemonKill();
+  } else {
+    await openConnections();
+    await ui.rowAction('Remove', state.label).click();
+    const confirm = ui.confirmDialog();
+    if (await visible(confirm, 3000)) await confirm.getByRole('button', { name: /^Remove/ }).last().click();
+    const gone = await until(async () => !(await visible(ui.row(state.label), 500)), 300_000, 2000);
+    timing('remove', startedAt);
+    check('row-gone', Boolean(gone), state.label);
+    if (!relay) {
+      const sandbox = await until(async () => {
+        const answer = await boatSandbox(state.cloud.sandboxId, boatOrg);
+        return answer.exists ? undefined : answer;
+      }, 120_000, 5000);
+      check('boat-sandbox-gone', Boolean(sandbox), `boat: ${JSON.stringify(sandbox ?? await boatSandbox(state.cloud.sandboxId, boatOrg))}`);
+      const devices = await tailnetDevices(state.cloud.hostname);
+      check('tailnet-device-gone', devices.length === 0, JSON.stringify(devices));
+    }
+  }
+  const left = savedHosts(paneDir).filter((entry) => entry.label === state.label);
+  check('saved-host-removed', left.length === 0, JSON.stringify(left));
+  await openSwitcher();
+  check('switcher-no-longer-lists', !(await visible(ui.hostItem(state.label), 2000)), state.label);
+  await closeMenus();
+  await shot('removed');
+  state.removed = true;
+  saveState();
+}
+
+async function phaseHygiene() {
+  if (relay) {
+    const now = savedHosts(paneDir).map((host) => ({ ...host, tokenSha256: crypto.createHash('sha256').update(savedHostToken(paneDir, host.id) ?? '').digest('hex') }));
+    const changed = state.existingHosts.filter((before) => JSON.stringify(now.find((host) => host.id === before.id)) !== JSON.stringify(before));
+    check('existing-hosts-unchanged', changed.length === 0, `${state.existingHosts.length} saved before the run (${state.existingHosts.map((host) => host.label).join(', ')}); changed: ${JSON.stringify(changed.map((host) => host.label))}`);
+  }
+  const existing = state.existingRemote && savedHosts(paneDir).find((entry) => entry.id === state.existingRemote.id);
+  const token = state.existingRemote && savedHostToken(paneDir, state.existingRemote.id);
+  if (state.existingRemote) check('existing-remote-unchanged', existing?.label === state.existingRemote.label && existing?.baseUrl === state.existingRemote.baseUrl && token === state.existingRemote.token,
+    JSON.stringify(existing ?? null));
+  await openSwitcher();
+  await ui.localItem().click();
+  const local = await visible(page.getByRole('button', { name: /This computer.*Switch host|Agents run on this computer/i }), 15_000);
+  check('local-runtime-works', local, 'switched back to This computer');
+  await shot('back-on-local');
+}
+
+// ---------------------------------------------------------------- run
+const started = Date.now();
+// An interrupted run still stops the fake host it started.
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    if (mode === 'fake') fakeDaemonKill();
+    process.exit(130);
+  });
+}
+try {
+  if (mode === 'fake' && state.fakePid === undefined && phases.includes('start') && !phases.includes('add') && !phases.includes('stop')) {
+    throw new Error('fake start needs a stopped fake host from an earlier stop phase');
+  }
+  await launch();
+  await shot('launched');
+  const run = { credentials: phaseCredentials, add: phaseAdd, agent: phaseAgent, stop: phaseStop, start: phaseStart, remove: phaseRemove, hygiene: phaseHygiene };
+  for (const phase of phases) {
+    log(`== phase ${phase}`);
+    const phaseStartedAt = Date.now();
+    await run[phase]();
+    timing(`phase-${phase}`, phaseStartedAt);
+  }
+} catch (error) {
+  check('run-completed', false, error instanceof Error ? error.message.split('\n')[0] : String(error));
+  if (page) await shot('error');
+} finally {
+  if (context && !relay) await context.tracing.stopChunk({ path: path.join(out, `trace-${String(++traceChunk).padStart(2, '0')}.zip`) }).catch(() => undefined);
+  if (context && !relay) await context.tracing.stop().catch(() => undefined);
+  await app?.close().catch(() => undefined);
+  if (mode === 'fake' && phases.at(-1) !== 'stop') fakeDaemonKill();
+  saveState();
+  // No secret value in anything the run wrote or the app logged (traces are zips: unzipped to search them).
+  const unzipped = path.join(work, 'trace-unzipped');
+  fs.rmSync(unzipped, { recursive: true, force: true });
+  for (const trace of fs.readdirSync(out).filter((name) => name.endsWith('.zip'))) {
+    spawnSync('unzip', ['-qo', path.join(out, trace), '-d', path.join(unzipped, trace)]);
+  }
+  const scanned = scanForSecrets([out, unzipped, path.join(paneDir, 'logs'), path.join(home, '.config/Pane/logs')].filter((root) => fs.existsSync(root)));
+  check('no-secret-in-evidence-or-logs', scanned.hits.length === 0,
+    `${secretNames().length} values searched in ${scanned.files} files${scanned.hits.length ? `; found in ${scanned.hits.map((hit) => `${hit.file.replace(work, '$WORK')} (${hit.names.join(',')})`).join('; ')}` : ''}`);
+  results.ok = results.checks.every((entry) => entry.verdict !== 'FAIL');
+  results.seconds = Math.round((Date.now() - started) / 1000);
+  fs.writeFileSync(path.join(out, 'results.json'), `${JSON.stringify(results, null, 2)}\n`);
+  log(results.ok ? 'RESULT PASS' : 'RESULT FAIL');
+  process.exitCode = results.ok ? 0 : 1;
+}
