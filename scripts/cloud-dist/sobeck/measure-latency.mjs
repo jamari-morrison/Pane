@@ -393,7 +393,7 @@ async function measureActivation(click) {
   }, ACTIVATION_WINDOW_MS);
   const done = Math.max(seen.firstVisible ?? Infinity, seen.lastMask ?? 0);
   const requests = summarizeRequests(await requestsSince(t0, t0 + ACTIVATION_WINDOW_MS));
-  return { ms: Number.isFinite(done) ? done - t0 : null, masked: seen.maskFrames > 0, invokes: requests.invokes, newConnections: requests.newConnections, responseBytes: requests.responseBytes, byChannel: requests.byChannel };
+  return { ms: Number.isFinite(done) ? done - t0 : null, masked: seen.maskFrames > 0, invokes: requests.invokes, newConnections: requests.newConnections, responseBytes: requests.responseBytes, gzipResponses: requests.gzipResponses, byChannel: requests.byChannel };
 }
 const summarizeSwitches = (samples) => ({
   switchMs: stats(samples.map((s) => s.ms)),
@@ -525,19 +525,24 @@ async function probeClaudeWheelProfile() {
   await page.waitForTimeout(400);
   await page.keyboard.press('Control+c');
   await page.waitForTimeout(2500);
-  await page.evaluate((m) => { window.__lat.marker = m; window.__lat.markerPanel = null; }, `${marker}END`);
+  // Claude's terminal identification (XTVERSION reply or none) decides its wheel speed; the wheel line shows it
+  // directly when Claude logged one. Echoed base64 behind a marker so the terminal cannot mangle it.
   await page.evaluate(() => { window.__lat.capture = ''; });
   await page.evaluate(() => {
     window.electronAPI.events.onTerminalOutput((event) => {
       if (event.panelId === window.__lat.panel && window.__lat.capture !== undefined) window.__lat.capture += String(event.output ?? '');
     });
   });
-  await shellCommand(`grep -ahoE 'wheel accel: [^\\r]{0,120}' ~/.rcl-claude-${marker}.txt | head -1; echo ${marker}END`);
-  await page.waitForTimeout(2500);
-  const captured = await page.evaluate(() => window.__lat.capture ?? '');
-  const plain = captured.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[ -/]*[@-~]`, 'g'), '');
-  const line = /wheel accel: [^\r\n]{0,120}/.exec(plain.slice(plain.indexOf('head -1')))?.[0] ?? null;
-  return { wheelProfile: line };
+  const pick = (pattern) => `$(grep -ahoE '${pattern}' ~/.rcl-claude-${marker}.txt | head -1 | base64 | tr -d '\\n')`;
+  await shellCommand(`echo RCLX${marker}:${pick('wheel accel: .{0,120}')}:${pick('(XTVERSION|no XTVERSION reply).{0,80}')}:END; rm -f ~/.rcl-claude-${marker}.txt`);
+  let decoded = null;
+  for (let i = 0; i < 50 && !decoded; i++) {
+    await page.waitForTimeout(100);
+    const captured = await page.evaluate(() => window.__lat.capture ?? '');
+    const match = new RegExp(`RCLX${marker}:([A-Za-z0-9+/=]*):([A-Za-z0-9+/=]*):END`).exec(captured);
+    if (match) decoded = match.slice(1).map((value) => (value ? Buffer.from(value, 'base64').toString('utf8').trim() : null));
+  }
+  return { wheelProfile: decoded?.[0] ?? null, terminalIdentified: decoded?.[1] ?? null, captured: decoded !== null };
 }
 
 const phase = async (name, fn) => {
