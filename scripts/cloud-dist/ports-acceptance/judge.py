@@ -55,6 +55,8 @@ def by_url(probes):
 
 if check == 'c1':
     host = args[0]
+    # c1 <host> http: a fresh Session with no TLS certificate (Let's Encrypt limit): ports use the http fallback.
+    scheme = args[1] if len(args) > 1 else 'https'
     lst = js('c1-port-list.json')
     ports = {p['name']: p for p in lst.get('ports', [])}
     dns = lst.get('host', '')
@@ -63,15 +65,24 @@ if check == 'c1':
         p = ports.get(name, {})
         out(p.get('source') == 'manifest' and p.get('port') == port and p.get('httpsPort') == https_port,
             f'{name}: published from .runpane/ports.json with no action (source manifest, {port}->{https_port})', json.dumps({k: p.get(k) for k in ('source', 'port', 'httpsPort', 'status')}))
-        out(p.get('scheme') == 'https' and p.get('url') == f'https://{dns}:{https_port}{path}', f'{name}: https URL on the Session name', p.get('url'))
+        out(p.get('scheme') == scheme and p.get('url') == f'{scheme}://{dns}:{https_port}{path}', f'{name}: {scheme} URL on the Session name', p.get('url'))
+        if scheme == 'http':
+            out('no TLS certificate' in (p.get('detail') or ''), f'{name}: the fallback says why (no certificate yet)', (p.get('detail') or '')[:160])
         out(p.get('reachable') is True and p.get('status') == 'serving', f'{name}: laptop list verifies it (serving, reachable)', f"status={p.get('status')} reachable={p.get('reachable')} detail={p.get('detail', '')}")
     for pr in jl('c1-probe.jsonl'):
         out(pr.get('status') == 200 and f'label={host}' in pr.get('body', ''), f"{pr['url']} answers 200 from agentbox with this Session's body", f"{pr.get('status')} {pr.get('error', '')} {pr.get('body', '')[:90]}")
-        out(cert_ok(pr, dns), f"{pr['url']} valid cert (CA-verified, SAN = host, Let's Encrypt)", json.dumps(pr.get('cert')))
+        if scheme == 'https':
+            out(cert_ok(pr, dns), f"{pr['url']} valid cert (CA-verified, SAN = host, Let's Encrypt)", json.dumps(pr.get('cert')))
     state = (ev / 'c1-session-state.txt').read_text() if (ev / 'c1-session-state.txt').exists() else ''
     m = re.search(r'### ~/.runpane-cloud/ports.json \((\d+)\)', state)
     out(bool(m) and m.group(1) == '600', 'Session ~/.runpane-cloud/ports.json is 0600', m.group(1) if m else 'missing')
     out(*no_funnel(state)[:1], 'no Funnel on the fresh Session', no_funnel(state)[1])
+    gate = (ev / 'c1-gate.txt').read_text() if (ev / 'c1-gate.txt').exists() else ''
+    if gate:
+        m1, m2 = re.search(r'daemon_start=(\d+)', gate), re.search(r'marker_mtime=(\d+)', gate)
+        restarts = re.search(r'daemon_restarts=(\d+)', gate)
+        out(bool(m1 and m2) and int(m1.group(1)) < int(m2.group(1)) and restarts is not None and restarts.group(1) == '0',
+            'the race happened on this boot (daemon started before the bootstrap wrote the marker) and the daemon was never restarted', gate.strip().replace('\n', ' ')[:200])
     blocks = re.findall(r'(\S+) ports-block=(\d+)', state)
     out(len(blocks) == 2 and all(n == '1' for _, n in blocks), 'agent notes: one runpane-cloud-ports block in ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md', str(blocks))
 

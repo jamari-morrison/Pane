@@ -80,6 +80,7 @@ PY
   ;;
 c1)
   # DEFAULT PATH: the manifest's ports were published at boot with no action; list shows https; 200 + valid cert.
+  sx "$SB" gate.sh > "$EV/c1-gate.txt"; cat "$EV/c1-gate.txt"
   log "c1: start the fixture's services (the manifest declares demo 8787 and docs 3000->8788)"
   sx "$SB" svc.sh "$HOST" 8787 3000 | tee "$EV/c1-svc.txt"
   rpv cloud port list "$HOST" --json > "$EV/c1-port-list.json" 2>&1
@@ -87,7 +88,7 @@ c1)
   cat "$EV/c1-port-list.txt"
   probe --timeout 15000 $(python3 -c "import json;print(' '.join(p['url'] for p in json.load(open('$EV/c1-port-list.json'))['ports']))") | tee "$EV/c1-probe.jsonl"
   sx "$SB" state.sh c1 > "$EV/c1-session-state.txt"
-  python3 "$HERE/judge.py" c1 "$EV" "$HOST" | tee -a "$EV/verdicts.txt"
+  python3 "$HERE/judge.py" c1 "$EV" "$HOST" ${PV_C1_SCHEME:-https} | tee -a "$EV/verdicts.txt"
   ;;
 c2)
   # CLASH: the same service port on two Sessions at once + two ports on one Session.
