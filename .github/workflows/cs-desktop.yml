@@ -51,6 +51,10 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
     steps:
+    # LF checkouts, so the side-by-side patch applies as generated.
+    - run: git config --global core.autocrlf false
+      shell: bash
+
     - uses: actions/checkout@v7
       with:
         path: harness
