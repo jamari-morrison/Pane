@@ -225,6 +225,21 @@ name, the Sessions and the agents' conversations come back.
 ### Create one
 
 In desktop Pane, open **Settings > Remote Access**, enter the keys once, then choose **Add cloud sandbox**.
+The **Cloud sandboxes (experimental)** section there:
+
+- shows each credential only as **Set** or **Not set**, plus the boat wallet's name. Saving checks the keys
+  with boat.dev and Tailscale first. Leave a field blank to keep what is saved.
+- takes a name (lowercase letters, digits and dashes) and a size, and lists each provisioning step while the
+  sandbox is created. A failed create leaves nothing behind; **Retry** runs it again.
+- lists each sandbox with its state (Running, Stopped, Creating, Error) and **Stop**, **Start** and **Remove**,
+  which asks for confirmation first. A running sandbox shows how long it has been running.
+- offers **Update Pane** when the sandbox's daemon reports a different Pane version than the desktop. It installs
+  the desktop's own release `.deb`, checked against that release's `SHA256SUMS.txt`.
+
+Stopping or removing the host the desktop is connected to switches the desktop back to **This computer**
+first. In the host switcher, a stopped sandbox reads **Stopped · Select to start**: choosing it starts the
+sandbox and then connects.
+
 From a terminal, the same library is the `runpane cloud` command:
 
 ```bash
