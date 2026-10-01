@@ -143,12 +143,12 @@ const relayEnv = () => Object.fromEntries(Object.entries(env).filter(([name]) =>
 const appEnv = relay ? {
   ...relayEnv(),
   ...(env.PANE_DEB_URL ? { RUNPANE_CLOUD_PANE_DEB_URL: env.PANE_DEB_URL, RUNPANE_CLOUD_PANE_DEB_SHA256: env.PANE_DEB_SHA256 ?? '' } : {}),
-  RUNPANE_CLOUD_NAME_PREFIX: 'rp-loop-cs-',
+  RUNPANE_CLOUD_NAME_PREFIX: 'rp-loop-cs',
 } : cleanEnv({
   PANE_DIR: paneDir,
   // What the sandbox installs: the same build as this desktop (cs-e2e iface request).
   ...(env.PANE_DEB_URL ? { RUNPANE_CLOUD_PANE_DEB_URL: env.PANE_DEB_URL, RUNPANE_CLOUD_PANE_DEB_SHA256: env.PANE_DEB_SHA256 ?? '' } : {}),
-  ...(mode === 'live' ? { RUNPANE_CLOUD_BOAT_ORG: boatOrg, RUNPANE_CLOUD_NAME_PREFIX: 'rp-loop-cs-' } : {}),
+  ...(mode === 'live' ? { RUNPANE_CLOUD_BOAT_ORG: boatOrg, RUNPANE_CLOUD_NAME_PREFIX: 'rp-loop-cs' } : {}),
 });
 
 // ---------------------------------------------------------------- the pre-seeded remote (hygiene)
@@ -174,7 +174,9 @@ const fakeHome = path.join(work, 'fake-home');
 const fakeDir = path.join(fakeHome, '.pane');
 const fakePort = Number(env.FAKE_PORT ?? 42199);
 const fakeBaseUrl = `http://127.0.0.1:${fakePort}`;
-const fakeEnv = () => cleanEnv({ HOME: fakeHome, XDG_CONFIG_HOME: path.join(fakeHome, '.config'), XDG_DATA_HOME: path.join(fakeHome, '.local/share'), XDG_CACHE_HOME: path.join(fakeHome, '.cache'), DISPLAY: '', CLAUDE_CODE_OAUTH_TOKEN: secretValue('claudeToken') });
+const fakeEnv = () => cleanEnv({ HOME: fakeHome, XDG_CONFIG_HOME: path.join(fakeHome, '.config'), XDG_DATA_HOME: path.join(fakeHome, '.local/share'), XDG_CACHE_HOME: path.join(fakeHome, '.cache'), DISPLAY: '', CLAUDE_CODE_OAUTH_TOKEN: secretValue('claudeToken'),
+  // What the sandbox's systemd drop-in sets (cs-daemon-resume): agent panels resume when the daemon starts.
+  PANE_RESUME_AGENTS_ON_START: '1' });
 
 function fakeSetup() {
   fs.mkdirSync(fakeDir, { recursive: true, mode: 0o700 });
@@ -306,7 +308,9 @@ const ui = {
   rowAction: (verb, label) => page.getByRole('button', { name: `${verb} ${label}`, exact: true }),
   confirmDialog: () => page.getByRole('dialog').filter({ hasText: /Remove/ }),
   newPaneIn: (repo) => page.getByRole('button', { name: repo ? `New pane in ${repo}` : /^New pane in / }),
-  paneButton: (name) => page.getByRole('button', { name, exact: true }),
+  // The Pane's sidebar entry; a git status badge can precede the name ("main-1cs-e2e-…"), while its
+  // "Archive …"/"Pin …" buttons have a space before it.
+  paneButton: (name) => page.getByRole('button', { name: new RegExp(`^\\S*${escapeRegExp(name)}$`) }).first(),
   addTool: () => page.getByRole('button', { name: 'Add tool' }),
   claudeTool: () => page.getByRole('menuitem', { name: /Claude Code/ }),
   // The switcher's Start action for a stopped sandbox (a menu entry or a button inside the host's entry).
@@ -319,6 +323,7 @@ const visible = (locator, timeout = 1000) => locator.waitFor({ state: 'visible',
 
 async function openSwitcher() {
   await dismissFirstRun();
+  await closeSettings();
   await ui.switcherChip().click();
   await page.waitForTimeout(400);
 }
@@ -336,16 +341,27 @@ async function openConnections() {
 
 // The chip's name is the same while connected and after a failed connect; the switcher entry's status text
 // ("Connected · <url>") is what tells them apart for a user.
+let lastHostStatus = '';
 async function isConnected(label) {
   if (!(await visible(ui.connectedChip(label), 500))) return false;
   await openSwitcher();
-  const text = (await ui.hostItem(label).textContent().catch(() => '')) ?? '';
+  const text = ((await ui.hostItem(label).textContent().catch(() => '')) ?? '').replace(/\s+/g, ' ').trim();
   await closeMenus();
-  return /\bConnected\b/.test(text);
+  if (text !== lastHostStatus) log(`switcher: ${text}`);
+  lastHostStatus = text;
+  return /(?<!Dis)Connected\s*·/.test(text);
 }
 
 async function waitConnected(label, timeoutMs) {
   return Boolean(await until(() => isConnected(label), timeoutMs, 2000));
+}
+
+async function closeSettings() {
+  const settings = page.getByRole('dialog', { name: /Pane Settings/ });
+  if (await visible(settings, 500)) {
+    await page.keyboard.press('Escape');
+    await settings.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => undefined);
+  }
 }
 
 async function connectTo(label, timeoutMs = 60_000) {
@@ -572,6 +588,8 @@ async function phaseAgent() {
   const paneShown = await visible(ui.addTool(), 60_000);
   timing('create-pane', startedAt);
   check('pane-created', paneShown, `Pane "${state.paneName}" open`);
+  // PANE_SETTLE_MS: how long a user looks at the new Pane before adding the Claude panel (default: at once).
+  if (env.PANE_SETTLE_MS) await page.waitForTimeout(Number(env.PANE_SETTLE_MS));
   await ui.addTool().click();
   await ui.claudeTool().click();
   const claudeStartedAt = Date.now();
@@ -664,7 +682,10 @@ async function phaseStart() {
   }
   const paneBack = await visible(ui.paneButton(state.paneName), 60_000);
   check('pane-back', paneBack, `Pane "${state.paneName}" listed after Start`);
-  if (!paneBack) return;
+  if (!paneBack) {
+    await shot('pane-missing');
+    return;
+  }
   await ui.paneButton(state.paneName).click();
   await ui.claudeTab().click().catch(() => undefined);
   await page.locator('.xterm').last().waitFor({ timeout: 60_000 });
