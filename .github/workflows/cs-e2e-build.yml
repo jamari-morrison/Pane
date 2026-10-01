@@ -1,0 +1,131 @@
+name: Cloud sandbox e2e build (fork)
+
+# Fork-only harness infrastructure for the "Add cloud sandbox" landing; never part of the upstream PR.
+# Builds the Linux x64 .deb from the commit pinned in .github/cs-e2e/app-ref (normally cs/integration)
+# and publishes it as the fork prerelease cs-<sha8>. The e2e harness uses the one .deb twice:
+#   - extracted (dpkg-deb -x, never installed) it is the desktop app under test on the e2e machine;
+#   - its https download URL + sha256 is the Pane the cloud sandbox installs, so the sandbox runs the
+#     same daemon (panel resume included) as the desktop.
+# It never publishes to upstream channels and uses no signing secrets.
+on:
+  push:
+    branches:
+      - cs/cs-e2e
+    paths:
+      - .github/cs-e2e/app-ref
+      - .github/workflows/cs-e2e-build.yml
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit to build (default the sha in .github/cs-e2e/app-ref)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cs-e2e-build-${{ github.sha }}-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deb:
+    name: Linux x64 .deb
+    if: github.repository != 'greenfield-inc/Pane'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      sha: ${{ steps.version.outputs.sha }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        path: harness
+
+    - id: meta
+      name: Resolve the app commit and version
+      env:
+        INPUT_REF: ${{ inputs.ref }}
+      run: |
+        set -euo pipefail
+        ref="${INPUT_REF:-$(tr -d '[:space:]' < harness/.github/cs-e2e/app-ref)}"
+        echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/checkout@v7
+      with:
+        ref: ${{ steps.meta.outputs.ref }}
+        path: app
+
+    - id: version
+      name: Version = <pkg>-cs.<commit UTC time>.g<sha8>
+      working-directory: app
+      run: |
+        set -euo pipefail
+        sha=$(git rev-parse HEAD)
+        stamp=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d%H%M%S HEAD)
+        version="$(node -p 'require("./package.json").version')-cs.${stamp}.g${sha:0:8}"
+        { echo "sha=$sha"; echo "version=$version"; echo "tag=cs-${sha:0:8}"; } >> "$GITHUB_OUTPUT"
+        echo "Building $version from $sha" >> "$GITHUB_STEP_SUMMARY"
+
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.11'
+
+    - name: Setup Node.js and pnpm
+      uses: ./app/.github/actions/setup-pnpm
+
+    - name: Install dependencies
+      working-directory: app
+      run: pnpm install
+
+    - name: Build the .deb
+      working-directory: app
+      run: |
+        set -euo pipefail
+        pnpm run build:frontend
+        pnpm run build:main
+        pnpm run inject-build-info
+        pnpm run generate-notices
+        pnpm exec electron-builder --linux deb --x64 --publish never \
+          -c.extraMetadata.version=${{ steps.version.outputs.version }}
+        mkdir -p ../release
+        cp dist-electron/*.deb ../release/
+        (cd ../release && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: deb
+        path: release/*
+        if-no-files-found: error
+        retention-days: 14
+
+  release:
+    name: Publish fork prerelease cs-<sha8>
+    needs: deb
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v7
+      with:
+        name: deb
+        path: release
+
+    - name: Publish prerelease
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        TAG: ${{ needs.deb.outputs.tag }}
+        SHA: ${{ needs.deb.outputs.sha }}
+      run: |
+        set -euo pipefail
+        case "$REPO" in greenfield-inc/*) echo "refusing to publish to $REPO" >&2; exit 1 ;; esac
+        if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+          gh release upload "$TAG" --repo "$REPO" --clobber release/*
+        else
+          gh release create "$TAG" --repo "$REPO" --prerelease --target "$SHA" \
+            --title "Pane cloud sandbox e2e build ${TAG#cs-}" \
+            --notes "Unsigned Linux x64 .deb for the cloud sandbox e2e harness (fork only, not an upstream release), built from ${SHA} by run ${GITHUB_RUN_ID}." \
+            release/*
+        fi
+        echo "https://github.com/${REPO}/releases/tag/${TAG}" >> "$GITHUB_STEP_SUMMARY"
