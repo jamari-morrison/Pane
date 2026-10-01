@@ -169,6 +169,33 @@ To start, stop, or delete the VM, use your provider's console or CLI. If
 something fails, run `npx --yes runpane@latest doctor --json` on the VM and
 check [Troubleshooting](#troubleshooting).
 
+### Restarts and stopped VMs
+
+Panes, panels, worktrees and agent transcripts survive a daemon restart, a
+reboot and a VM stop. Running processes do not:
+
+- The headless daemon saves terminal scrollback and flushes its database every
+  10 seconds, because many providers stop a VM with a power-off and no
+  shutdown. Output from the last few seconds before a power-off can be lost.
+- An agent panel that was running comes back with its conversation (`claude
+  --resume`, `codex resume`, `cursor-agent --resume`) when you open it.
+- A plain shell starts fresh in its worktree when you open it.
+
+To bring agents back as soon as the daemon starts, without opening each Pane,
+set `PANE_RESUME_AGENTS_ON_START=1` for the service:
+
+```bash
+mkdir -p ~/.config/systemd/user/pane-remote-daemon.service.d
+printf '[Service]\nEnvironment=PANE_RESUME_AGENTS_ON_START=1\n' \
+  > ~/.config/systemd/user/pane-remote-daemon.service.d/resume-agents.conf
+systemctl --user daemon-reload
+```
+
+Then every agent that was running when the VM stopped relaunches on the next
+start, including after a daemon upgrade, and uses tokens and memory right away.
+Before relaunching an agent, the daemon stops anything an earlier daemon process
+left running for that panel, so a conversation never has two agents.
+
 ## Import Locally
 
 On your local desktop machine:
