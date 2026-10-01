@@ -468,6 +468,7 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
     },
     permissionIpcServer,
     async shutdown(): Promise<void> {
+      if (mode === 'headless') logger.info('[Pane daemon] Shutting down');
       // Keep the latest scrollback; start-up recovery marks the agents interrupted.
       if (scrollbackCheckpoint) {
         scrollbackCheckpoint.stop();
@@ -478,7 +479,9 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
       if (mode === 'headless') {
         // Stop the panels' processes here: systemd's stop does not reach them
         // (see strayPanelProcesses.ts), and the next start resumes the agents.
+        const terminals = terminalPanelManager.getAllPanelIds().length;
         const survivors = await terminalPanelManager.stopAllTerminalProcesses();
+        logger.info(`[Pane daemon] Stopped ${terminals} terminal(s)`);
         if (survivors.length > 0) logger.warn(`[Pane daemon] ${survivors.length} terminal process(es) survived shutdown: ${survivors.join(', ')}`);
       }
       resourceMonitorService.stop();
