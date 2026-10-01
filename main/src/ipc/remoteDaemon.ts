@@ -18,6 +18,7 @@ import {
   type RemoteDaemonHostRuntimeState,
   type RemoteHostConnectionCodeResult,
   type RemoteDaemonImportResult,
+  type RemotePaneConnectionProfile,
   type RemoteHostSetupRequest,
   type RemoteHostSetupResult,
   type RemoteHostSetupTerminalCommandResult,
@@ -25,12 +26,18 @@ import {
   type RemoteSetupDataDirectoryMode,
   type RemoteSetupTunnelPreference,
 } from '../../../shared/types/remoteDaemon';
+import {
+  CLOUD_SANDBOX_SIZES,
+  getCloudSandboxNameError,
+  type CloudCredentialsUpdate,
+  type CloudSandboxCreateRequest,
+} from '../../../shared/types/cloudSandboxes';
 import type { PaneCommandValue } from '../daemon/commandRegistry';
 import { boundary, decodeBoundary, type JsonObject } from '../../../shared/validation/boundaryDecoder';
 import os from 'os';
 import path from 'path';
 import type { AppServices } from './types';
-import { remotePaneClientController } from '../daemon/client/remotePaneClient';
+import { RemotePaneClient, remotePaneClientController } from '../daemon/client/remotePaneClient';
 import {
   createPaneRemoteConnectionImportPayload,
   createRemoteDaemonConnectionPair,
@@ -49,6 +56,13 @@ import {
   trackRemotePaneEvent,
   type RemotePaneAnalyticsProperties,
 } from '../services/remoteAnalytics';
+import {
+  CloudSandboxManager,
+  getCloudErrorMessage,
+  resolvePaneReleaseDeb,
+  type CloudSandboxLibrary,
+} from '../services/cloudSandboxes';
+import type { SavedRemoteHosts } from '../../../packages/runpane/src/cloud/savedHosts';
 
 interface IpcMainHandleLike {
   handle(
@@ -58,7 +72,7 @@ interface IpcMainHandleLike {
 }
 
 interface RemoteDaemonHandlerServices {
-  app?: Pick<AppServices['app'], 'isPackaged'>;
+  app?: Pick<AppServices['app'], 'isPackaged' | 'getVersion'>;
   getMainWindow?: AppServices['getMainWindow'];
   analyticsManager?: AppServices['analyticsManager'];
   configManager: Pick<AppServices['configManager'], 'getConfig' | 'updateConfig'> & {
@@ -71,12 +85,22 @@ interface RemoteDaemonHandlerDependencies {
   disconnectActiveRemoteHostClients: typeof disconnectActiveRemoteHostClients;
   readConfiguredTailscaleServeAccess: typeof readConfiguredTailscaleServeAccess;
   setupRemoteHost: typeof setupRemoteHost;
+  loadCloudSandboxLibrary: (savedHosts: SavedRemoteHosts) => Promise<CloudSandboxLibrary>;
+  readCloudDaemonVersion: (profile: RemotePaneConnectionProfile) => Promise<string | undefined>;
+  resolvePaneReleaseDeb: typeof resolvePaneReleaseDeb;
 }
 
 const defaultRemoteDaemonHandlerDependencies: RemoteDaemonHandlerDependencies = {
   disconnectActiveRemoteHostClients,
   readConfiguredTailscaleServeAccess,
   setupRemoteHost,
+  // Loaded on first use so the rest of the app never pays for the cloud modules.
+  loadCloudSandboxLibrary: async (savedHosts) => {
+    const { createCloudSandboxes } = await import('../../../packages/runpane/src/cloud/api');
+    return createCloudSandboxes({ savedHosts });
+  },
+  readCloudDaemonVersion: readRemoteDaemonVersion,
+  resolvePaneReleaseDeb,
 };
 
 let remoteHostStateForwarder:
@@ -639,6 +663,206 @@ export function registerRemoteDaemonHandlers(
       return { success: false, error: getErrorMessage(error, 'Failed to update remote daemon client state') };
     }
   });
+
+  // The cloud library saves and forgets hosts through here, so its writes go through the same
+  // config transitions as every other profile change.
+  const cloudSavedHosts: SavedRemoteHosts = {
+    upsert: async (profile) => {
+      await applyRemoteClientTransition((current) => {
+        const existing = current.client.profiles.find((candidate) => (
+          candidate.cloud?.sessionId === profile.cloud.sessionId
+        ));
+        return {
+          next: {
+            ...current,
+            client: {
+              ...current.client,
+              profiles: upsertById(current.client.profiles, { ...profile, id: existing?.id ?? profile.id }),
+            },
+          },
+          resyncRenderer: false,
+        };
+      });
+    },
+    remove: async (sessionId) => {
+      await applyRemoteClientTransition(async (current) => {
+        const removedIds = new Set(current.client.profiles
+          .filter((profile) => profile.cloud?.sessionId === sessionId)
+          .map((profile) => profile.id));
+        const removesActive = current.client.activeProfileId !== null && removedIds.has(current.client.activeProfileId);
+        if (removesActive && current.client.mode === 'remote') {
+          await remotePaneClientController.switchToLocalMode();
+        }
+        return {
+          next: {
+            ...current,
+            client: {
+              profiles: current.client.profiles.filter((profile) => !removedIds.has(profile.id)),
+              activeProfileId: removesActive ? null : current.client.activeProfileId,
+              mode: removesActive ? 'local' : current.client.mode,
+            },
+          },
+          resyncRenderer: removesActive && current.client.mode === 'remote',
+        };
+      });
+    },
+  };
+
+  const cloudSandboxes = new CloudSandboxManager({
+    loadLibrary: () => dependencies.loadCloudSandboxLibrary(cloudSavedHosts),
+    appVersion: app?.getVersion(),
+    readDaemonVersion: async (profileId) => {
+      const profile = getRemoteDaemonConfig(configManager.getConfig().remoteDaemon).client.profiles
+        .find((candidate) => candidate.id === profileId);
+      return profile ? dependencies.readCloudDaemonVersion(profile) : undefined;
+    },
+    resolvePaneDeb: (version) => dependencies.resolvePaneReleaseDeb(version),
+    onChange: (snapshot) => {
+      const mainWindow = getMainWindow?.();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('remote-daemon:cloud-sandboxes-changed', snapshot);
+      }
+    },
+  });
+
+  /** A stopped or removed sandbox can't serve the runtime, so leave it for the local one first. */
+  async function leaveCloudSandboxIfActive(id: string): Promise<void> {
+    const profileId = cloudSandboxes.getSnapshot().sandboxes.find((sandbox) => sandbox.id === id)?.profileId;
+    const current = getRemoteDaemonConfig(configManager.getConfig().remoteDaemon);
+    if (!profileId || current.client.mode !== 'remote' || current.client.activeProfileId !== profileId) return;
+    await applyRemoteClientTransition(async (latest) => {
+      await remotePaneClientController.switchToLocalMode();
+      return {
+        next: { ...latest, client: { ...latest.client, mode: 'local' } },
+        resyncRenderer: true,
+      };
+    });
+  }
+
+  ipcMain.handle('remote-daemon:get-cloud-sandboxes', async () => {
+    try {
+      return { success: true, data: await cloudSandboxes.refresh() };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to load cloud sandboxes') };
+    }
+  });
+
+  ipcMain.handle('remote-daemon:update-cloud-credentials', async (_event, input: PaneCommandValue) => {
+    try {
+      return { success: true, data: await cloudSandboxes.updateCredentials(parseCloudCredentialsUpdate(input)) };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to save cloud credentials') };
+    }
+  });
+
+  ipcMain.handle('remote-daemon:create-cloud-sandbox', async (_event, input: PaneCommandValue) => {
+    try {
+      return { success: true, data: await cloudSandboxes.create(parseCloudSandboxCreateRequest(input)) };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to create cloud sandbox') };
+    }
+  });
+
+  ipcMain.handle('remote-daemon:start-cloud-sandbox', async (_event, id: PaneCommandValue) => {
+    try {
+      return { success: true, data: await cloudSandboxes.start(decodeBoundary(id, boundary.nonEmptyString)) };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to start cloud sandbox') };
+    }
+  });
+
+  ipcMain.handle('remote-daemon:stop-cloud-sandbox', async (_event, id: PaneCommandValue) => {
+    try {
+      const sandboxId = decodeBoundary(id, boundary.nonEmptyString);
+      await leaveCloudSandboxIfActive(sandboxId);
+      return { success: true, data: await cloudSandboxes.stop(sandboxId) };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to stop cloud sandbox') };
+    }
+  });
+
+  ipcMain.handle('remote-daemon:update-cloud-sandbox', async (_event, id: PaneCommandValue) => {
+    try {
+      return { success: true, data: await cloudSandboxes.update(decodeBoundary(id, boundary.nonEmptyString)) };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to update Pane on cloud sandbox') };
+    }
+  });
+
+  ipcMain.handle('remote-daemon:remove-cloud-sandbox', async (_event, id: PaneCommandValue) => {
+    try {
+      const sandboxId = decodeBoundary(id, boundary.nonEmptyString);
+      await leaveCloudSandboxIfActive(sandboxId);
+      return { success: true, data: await cloudSandboxes.remove(sandboxId) };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to remove cloud sandbox') };
+    }
+  });
+
+  ipcMain.handle('remote-daemon:retry-cloud-sandbox', async (_event, id: PaneCommandValue) => {
+    try {
+      return { success: true, data: await cloudSandboxes.retry(decodeBoundary(id, boundary.nonEmptyString)) };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to retry cloud sandbox action') };
+    }
+  });
+
+  ipcMain.handle('remote-daemon:dismiss-cloud-sandbox', async (_event, id: PaneCommandValue) => {
+    try {
+      return { success: true, data: cloudSandboxes.dismiss(decodeBoundary(id, boundary.nonEmptyString)) };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to dismiss cloud sandbox error') };
+    }
+  });
+}
+
+const DAEMON_VERSION_TIMEOUT_MS = 5000;
+
+/** The Pane version a host's daemon reports to a paired client (`runpane:doctor`), without connecting. */
+async function readRemoteDaemonVersion(profile: RemotePaneConnectionProfile): Promise<string | undefined> {
+  const client = new RemotePaneClient(profile);
+  // A one-off call: a failure must not start the client's reconnect loop.
+  client.suspend();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const result = await Promise.race([
+      client.invoke('runpane:doctor', []),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('Timed out reading the daemon version')), DAEMON_VERSION_TIMEOUT_MS);
+      }),
+    ]);
+    return decodeBoundary(result, boundary.object({ app: boundary.object({ version: boundary.nonEmptyString }) })).app.version;
+  } finally {
+    clearTimeout(timer);
+    await client.disconnect();
+  }
+}
+
+function parseCloudCredentialsUpdate(input: PaneCommandValue): CloudCredentialsUpdate {
+  const decoded = decodeBoundary(input, boundary.object({
+    boatApiKey: boundary.optional(boundary.nonEmptyString),
+    boatOrg: boundary.optional(boundary.nonEmptyString),
+    tailscale: boundary.optional(boundary.object({
+      clientId: boundary.nonEmptyString,
+      clientSecret: boundary.nonEmptyString,
+    })),
+    claudeToken: boundary.optional(boundary.nonEmptyString),
+  }));
+  if (!decoded.boatApiKey && !decoded.boatOrg && !decoded.tailscale && !decoded.claudeToken) {
+    throw new Error('Enter at least one credential to save');
+  }
+  return decoded;
+}
+
+function parseCloudSandboxCreateRequest(input: PaneCommandValue): CloudSandboxCreateRequest {
+  const decoded = decodeBoundary(input, boundary.object({
+    name: boundary.string,
+    size: boundary.enumeration(...CLOUD_SANDBOX_SIZES),
+  }));
+  const name = decoded.name.trim();
+  const nameError = getCloudSandboxNameError(name);
+  if (nameError) throw new Error(`Cloud sandbox name: ${nameError}`);
+  return { name, size: decoded.size };
 }
 
 function parseOptionalClientIds(value: PaneCommandValue): string[] | undefined {

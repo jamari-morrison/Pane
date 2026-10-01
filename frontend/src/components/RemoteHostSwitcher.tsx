@@ -1,10 +1,12 @@
 import { useState, type ReactElement } from 'react';
-import { Laptop, Plug, Radio, Server } from 'lucide-react';
+import { Cloud, Laptop, Plug, Radio, Server } from 'lucide-react';
 import { Dropdown, DropdownMenuItem, type DropdownItem, type DropdownProps } from './ui/Dropdown';
 import { API } from '../utils/api';
 import { useConfigStore } from '../stores/configStore';
 import { LOCAL_RUNTIME_ID, type RemoteHostSwitcherModel } from '../utils/remoteRuntimePresentation';
+import { getCloudHostSwitcherEntry } from '../utils/cloudSandboxPresentation';
 import type { RemotePaneConnectionProfile, RemotePaneConnectionState } from '../../../shared/types/remoteDaemon';
+import type { CloudSandboxView } from '../../../shared/types/cloudSandboxes';
 
 interface RemoteHostSwitcherProps {
   trigger: ReactElement;
@@ -12,6 +14,8 @@ interface RemoteHostSwitcherProps {
   model: RemoteHostSwitcherModel;
   profiles: RemotePaneConnectionProfile[];
   connectionState: RemotePaneConnectionState;
+  /** Cloud sandboxes behind saved hosts, so a stopped one offers Start instead of a dead connection. */
+  cloudSandboxes: CloudSandboxView[];
   onManageConnections: () => void;
   onOpenHosting: () => void;
 }
@@ -23,6 +27,7 @@ export function RemoteHostSwitcher({
   model,
   profiles,
   connectionState,
+  cloudSandboxes,
   onManageConnections,
   onOpenHosting,
 }: RemoteHostSwitcherProps) {
@@ -52,17 +57,43 @@ export function RemoteHostSwitcher({
     }
   };
 
+  // A stopped sandbox has no daemon to connect to: start it first, then switch to it.
+  const startAndSwitchTo = async (sandbox: CloudSandboxView, profileId: string) => {
+    if (switching) return;
+    setSwitching(true);
+    try {
+      const response = await API.remoteDaemon.startCloudSandbox(sandbox.id);
+      const started = response.data?.sandboxes.find((candidate) => candidate.id === sandbox.id);
+      if (!response.success || started?.state !== 'running' || started.error) {
+        // The sandbox row carries the failure; the switcher shows it next time it opens.
+        console.error('Failed to start cloud sandbox:', response.error ?? started?.error);
+        return;
+      }
+    } finally {
+      setSwitching(false);
+    }
+    await switchTo(profileId);
+  };
+
   const items: DropdownItem[] = [
-    ...profiles.map((profile) => ({
-      id: profile.id,
-      label: profile.label,
-      description: remote && profile.id === model.selectedId
+    ...profiles.map((profile) => {
+      const sandbox = cloudSandboxes.find((candidate) => candidate.profileId === profile.id);
+      const cloudEntry = getCloudHostSwitcherEntry(sandbox);
+      const description = cloudEntry?.description ?? (remote && profile.id === model.selectedId
         ? `${activeStatusText} · ${profile.baseUrl}`
-        : profile.baseUrl,
-      icon: Server,
-      disabled: switching,
-      onClick: () => void switchTo(profile.id),
-    })),
+        : profile.baseUrl);
+      return {
+        id: profile.id,
+        label: profile.label,
+        description,
+        icon: profile.cloud ? Cloud : Server,
+        disabled: switching || cloudEntry?.action === 'wait',
+        onClick: () => {
+          if (sandbox && cloudEntry?.action === 'start') void startAndSwitchTo(sandbox, profile.id);
+          else void switchTo(profile.id);
+        },
+      };
+    }),
     {
       id: LOCAL_RUNTIME_ID,
       label: 'This computer',
