@@ -7,7 +7,7 @@ import { createCloudSandboxes, type CloudBootstrap, type CloudProgress } from '.
 import type { DaemonHealthResult } from './bootstrap/health';
 import type { ProvisionResult, RepairResult } from './bootstrap/provision';
 import type { CloudProvider, CloudSandbox, CreateSandboxRequest, ListedBoatOrg } from './provider';
-import type { CloudHostProfile } from './store';
+import type { CloudHostProfile, PaneSource } from './store';
 import type { TailscaleApi, TailscaleDevice } from './tailscale';
 
 const FQDN = 'rp-test.tail1234.ts.net';
@@ -89,12 +89,14 @@ interface BootstrapScript {
 
 function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: BootstrapScript = {}) {
   const agentEnvs: Array<string | undefined> = [];
+  const paneSources: PaneSource[] = [];
   const repairs: string[] = [];
   const updates: string[] = [];
   const health = [...(script.health ?? [])];
   const bootstrap: CloudBootstrap = {
     async provision(_sandbox, options): Promise<ProvisionResult> {
       agentEnvs.push(options.agentEnv);
+      paneSources.push(options.paneSource);
       tailnet.devices.push({ nodeId: 'n1', id: '1', hostname: options.hostname, name: FQDN, addresses: [], tags: ['tag:rp-session'] });
       if (script.provisionError) throw script.provisionError;
       options.onStep?.({ step: 'install-pane', state: 'start' });
@@ -120,10 +122,10 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
       return { ok, elapsedMs: 1, version: ok ? '2.4.146' : undefined };
     },
   };
-  return { bootstrap, agentEnvs, repairs, updates };
+  return { bootstrap, agentEnvs, paneSources, repairs, updates };
 }
 
-function harness(script: BootstrapScript = {}) {
+function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-cloud-'));
   const provider = fakeProvider();
   const tailnet = fakeTailnet();
@@ -144,6 +146,7 @@ function harness(script: BootstrapScript = {}) {
       },
     },
     sleep: async () => undefined,
+    env,
   });
   const onProgress = (update: CloudProgress) => progress.push(update);
   return { dir, cloud, provider, tailnet, boot, saved, progress, onProgress };
@@ -196,7 +199,9 @@ test('create provisions in the saved wallet, signs agents in, saves the host and
   assert.equal(info.transport, 'https');
   assert.deepEqual(info.health, { ok: true, version: '2.4.146' });
   assert.ok(info.startedAt);
+  assert.equal(info.daemonVersion, '2.4.146');
   assert.equal(h.provider.creates[0].org, 'team_test');
+  assert.deepEqual(h.boot.paneSources, [{ kind: 'runpane-npm', spec: 'runpane@latest' }]);
   assert.match(h.provider.creates[0].idempotencyKey, /^runpane-cloud-new-/u);
   assert.deepEqual(h.boot.agentEnvs, [`CLAUDE_CODE_OAUTH_TOKEN=${SECRETS[2]}\n`]);
 
@@ -229,6 +234,7 @@ test('stop flushes then stops; start resumes and waits for the daemon', async ()
   assert.deepEqual(h.provider.calls.slice(-2), [`run ${sandboxId} sync; sleep 0.2; sync`, `stop ${sandboxId}`]);
   assert.equal((await h.cloud.stop(hostname)).state, 'stopped', 'stopping a stopped sandbox is a no-op');
   assert.equal((await h.cloud.list())[0].state, 'stopped');
+  assert.equal(h.provider.keys.at(-1)?.org, 'team_test', 'list is scoped to the wallet the sandbox bills');
 
   const started = await h.cloud.start(hostname, h.onProgress);
   assert.equal(started.state, 'running');
@@ -269,6 +275,7 @@ test('update installs a pinned .deb only on a running sandbox', async () => {
   const pane = { debUrl: 'https://example.com/pane_2.4.147_amd64.deb', sha256: 'c'.repeat(64) };
   const updated = await h.cloud.update(hostname, pane, h.onProgress);
   assert.deepEqual(h.boot.updates, [pane.debUrl]);
+  assert.equal(updated.daemonVersion, '2.4.146', 'the version the daemon reports wins over the package\'s');
   assert.equal(updated.health?.ok, true);
   await h.cloud.stop(hostname);
   await assert.rejects(h.cloud.update(hostname, pane), /is stopped; start it before updating Pane/u);
@@ -296,4 +303,19 @@ test('host records hold the paired token but never a provider or Tailscale secre
   // Only credentials.json holds those.
   const others = readTree(path.join(h.dir, 'hosts')) + fs.readFileSync(path.join(h.dir, 'settings.json'), 'utf8');
   for (const secret of SECRETS.slice(0, 3)) assert.ok(!others.includes(secret));
+});
+
+test('the environment can pin the Pane .deb (with its sha256) and the name prefix for new sandboxes', async () => {
+  const h = harness({}, {
+    RUNPANE_CLOUD_PANE_DEB_URL: 'https://example.com/pane_cs.deb', RUNPANE_CLOUD_PANE_DEB_SHA256: 'd'.repeat(64), RUNPANE_CLOUD_NAME_PREFIX: 'rp-loop-cs',
+  });
+  await withCredentials(h);
+  const info = await h.cloud.create();
+  assert.match(info.hostname, /^rp-loop-cs-[a-z0-9]{8}$/u);
+  assert.deepEqual(h.boot.paneSources, [{ kind: 'deb-url', url: 'https://example.com/pane_cs.deb', sha256: 'd'.repeat(64) }]);
+
+  const unpinned = harness({}, { RUNPANE_CLOUD_PANE_DEB_URL: 'https://example.com/pane_cs.deb' });
+  await withCredentials(unpinned);
+  await assert.rejects(unpinned.cloud.create(), /RUNPANE_CLOUD_PANE_DEB_URL needs RUNPANE_CLOUD_PANE_DEB_SHA256/u);
+  assert.equal(unpinned.provider.creates.length, 0, 'refused before anything is billed');
 });

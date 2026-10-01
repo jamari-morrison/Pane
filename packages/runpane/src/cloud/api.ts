@@ -33,7 +33,7 @@ export interface CloudSandboxes {
   getCredentialsStatus(): Promise<CloudCredentialsStatus>;
   /** Creates a sandbox, provisions it and saves it as a remote host. A failed create removes what it made. */
   create(options?: CloudCreateOptions, onProgress?: CloudProgressListener): Promise<CloudSandboxInfo>;
-  /** Every saved sandbox with its provider state (one provider call); no daemon health. */
+  /** Every saved sandbox with its provider state (one provider call per wallet); no daemon health. */
   list(): Promise<CloudSandboxInfo[]>;
   /** One sandbox with its provider state and, when it runs, its daemon's /health. */
   status(host: string): Promise<CloudSandboxInfo>;
@@ -78,6 +78,8 @@ export interface CloudCreateOptions {
   boatOrg?: string;
   /** Keep the sandbox (and its record) when provisioning fails, for debugging. */
   keepOnFailure?: boolean;
+  /** Prefix of the sandbox and tailnet host name (default `rp`): `<prefix>-<8 characters>`. */
+  namePrefix?: string;
 }
 
 export type CloudProgressStep =
@@ -118,6 +120,8 @@ export interface CloudSandboxInfo {
   createdAt: string;
   /** When this library last created or started the sandbox. */
   startedAt?: string;
+  /** The Pane package version this library last installed (create or update); the daemon's /health does not report one. */
+  daemonVersion?: string;
   org?: BoatOrg;
   health?: { ok: boolean; version?: string };
 }
@@ -134,6 +138,11 @@ export interface CloudSandboxesOptions {
   bootstrap?: CloudBootstrap;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /**
+   * Defaults for `create` that tests and pinned rollouts set without a UI: `RUNPANE_CLOUD_PANE_DEB_URL` with
+   * `RUNPANE_CLOUD_PANE_DEB_SHA256` (the Pane .deb to install) and `RUNPANE_CLOUD_NAME_PREFIX`. Default process.env.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface CloudBootstrap {
@@ -151,7 +160,7 @@ const CREATE_HEALTH_TIMEOUT_MS = 180_000;
 const UPDATE_HEALTH_TIMEOUT_MS = 120_000;
 const STATUS_HEALTH_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 1_500;
-const NAME_PREFIX = 'rp';
+const DEFAULT_NAME_PREFIX = 'rp';
 const SESSION_ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
 export function createCloudSandboxes(options: CloudSandboxesOptions = {}): CloudSandboxes {
@@ -167,6 +176,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
   };
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = options.now ?? Date.now;
+  const env = options.env ?? process.env;
 
   async function credentialsStatus(): Promise<CloudCredentialsStatus> {
     const credentials = await store.readCredentials();
@@ -183,8 +193,8 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
 
   async function loadCloud() {
     const credentials = await store.readCredentials();
-    if (!credentials.boat) throw new Error('No boat API key is saved. Add it in Settings > Remote Pane, or run runpane cloud setup.');
-    if (!credentials.tailscale) throw new Error('No Tailscale OAuth client is saved. Add it in Settings > Remote Pane, or run runpane cloud setup.');
+    if (!credentials.boat) throw new Error('No boat API key is saved. Add it in Settings > Remote Access, or run runpane cloud setup.');
+    if (!credentials.tailscale) throw new Error('No Tailscale OAuth client is saved. Add it in Settings > Remote Access, or run runpane cloud setup.');
     return { credentials, boatKey: credentials.boat.apiKey, tailscale: credentials.tailscale };
   }
 
@@ -271,9 +281,9 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
         : settings.boatOrg;
       const provider = createProvider(boatKey, org?.id);
       const size = createOptions.size ?? 'default';
-      const paneSource = createOptions.paneSource ?? DEFAULT_PANE_SOURCE;
+      const paneSource = createOptions.paneSource ?? paneSourceFromEnv(env) ?? DEFAULT_PANE_SOURCE;
       const sessionId = randomSessionId();
-      const hostname = cloudHostname(sessionId, NAME_PREFIX);
+      const hostname = cloudHostname(sessionId, createOptions.namePrefix ?? nonEmpty(env.RUNPANE_CLOUD_NAME_PREFIX) ?? DEFAULT_NAME_PREFIX);
       const label = createOptions.label?.trim() || hostname;
       const startedAt = new Date(now()).toISOString();
 
@@ -355,8 +365,11 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       const records = await store.listHosts();
       if (records.length === 0) return [];
       const { boatKey } = await loadCloud();
-      // boat lists the account's own sandboxes in every wallet's scope.
-      const sandboxes = new Map((await createProvider(boatKey).list()).map((sandbox) => [sandbox.id, sandbox]));
+      // One list call per wallet the records bill, each scoped to that wallet.
+      const sandboxes = new Map<string, CloudSandbox>();
+      for (const org of new Set(records.map((record) => record.meta.boatOrg?.id))) {
+        for (const sandbox of await createProvider(boatKey, org).list()) sandboxes.set(sandbox.id, sandbox);
+      }
       return records.map((record) => sandboxInfo(record, sandboxes.get(record.profile.cloud.sandboxId)));
     },
 
@@ -468,10 +481,20 @@ function sandboxInfo(record: CloudHostRecord, sandbox?: CloudSandbox, health?: D
     createdAt: record.meta.createdAt,
   };
   if (record.meta.startedAt) info.startedAt = record.meta.startedAt;
+  if (record.meta.daemonVersion) info.daemonVersion = record.meta.daemonVersion;
   const org = sandbox?.org ?? record.meta.boatOrg;
   if (org) info.org = org;
   if (health) info.health = health.version ? { ok: health.ok, version: health.version } : { ok: health.ok };
   return info;
+}
+
+function paneSourceFromEnv(env: NodeJS.ProcessEnv): PaneSource | undefined {
+  const url = nonEmpty(env.RUNPANE_CLOUD_PANE_DEB_URL);
+  if (!url) return undefined;
+  const sha256 = nonEmpty(env.RUNPANE_CLOUD_PANE_DEB_SHA256);
+  // Installed as root: the digest is what vouches for the package.
+  if (!sha256) throw new Error('RUNPANE_CLOUD_PANE_DEB_URL needs RUNPANE_CLOUD_PANE_DEB_SHA256.');
+  return { kind: 'deb-url', url, sha256 };
 }
 
 function hostTransport(record: CloudHostRecord): 'https' | 'http' {
@@ -513,7 +536,7 @@ function describeStep(step: ProvisionStepName): string {
     case 'pairing': return 'Pairing...';
     case 'health': return 'Waiting for the Pane daemon...';
     case 'cert-check': return 'Checking the HTTPS certificate...';
-    case 'serve-http': return 'No HTTPS certificate yet; serving over HTTP inside your tailnet...';
+    case 'serve-http': return 'Serving over plain HTTP inside your tailnet (no HTTPS certificate)...';
     case 'serve-guard': return 'Keeping Tailscale Serve across restarts...';
   }
 }

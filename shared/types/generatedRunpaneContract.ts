@@ -1208,7 +1208,7 @@ export const RUNPANE_CONTRACT = {
       "name": "cloud new",
       "summary": "Create a cloud sandbox running a Pane daemon, joined to your tailnet and saved as a remote host.",
       "usage": [
-        "runpane cloud new [--label <name>] [--size <small|default|large>] [--boat-org <org|personal>] [--transport <auto|https|http>] [--pane-deb-url <url> --pane-deb-sha256 <hex>|--pane-npm-spec <spec>] [--keep-on-failure] --yes [--json]"
+        "runpane cloud new [--label <name>] [--size <small|default|large>] [--boat-org <org|personal>] [--transport <auto|https|http>] [--pane-deb-url <url> --pane-deb-sha256 <hex>|--pane-npm-spec <spec>] [--name-prefix <prefix>] [--keep-on-failure] --yes [--json]"
       ],
       "mutates": true,
       "wrappers": [
@@ -2927,7 +2927,7 @@ export const RUNPANE_CONTRACT = {
       ],
       "cloud new": [
         "Usage:",
-        "  runpane cloud new [--label <name>] [--size <small|default|large>] [--boat-org <org|personal>] [--transport <auto|https|http>] [--pane-deb-url <url> --pane-deb-sha256 <hex>|--pane-npm-spec <spec>] [--keep-on-failure] --yes [--json]",
+        "  runpane cloud new [--label <name>] [--size <small|default|large>] [--boat-org <org|personal>] [--transport <auto|https|http>] [--pane-deb-url <url> --pane-deb-sha256 <hex>|--pane-npm-spec <spec>] [--name-prefix <prefix>] [--keep-on-failure] --yes [--json]",
         "",
         "Create a cloud sandbox running a Pane daemon, joined to your tailnet and saved as a remote host.",
         "",
@@ -2939,6 +2939,7 @@ export const RUNPANE_CONTRACT = {
         "  --pane-deb-url <url>            Install Pane from this https:// .deb instead of the latest release.",
         "  --pane-deb-sha256 <hex>         sha256 the sandbox checks the .deb against; required with --pane-deb-url.",
         "  --pane-npm-spec <spec>          Install Pane with this runpane npm spec (default runpane@latest).",
+        "  --name-prefix <prefix>          Prefix of the sandbox and tailnet host name (default rp).",
         "  --keep-on-failure               Keep the sandbox when setup fails, for debugging.",
         "  --yes                           Confirm this change; required because it costs money or deletes data.",
         "  --json                          Print machine-readable output."
@@ -4085,7 +4086,7 @@ export const RUNPANE_CONTRACT = {
       ],
       "cloud new": [
         "Usage:",
-        "  runpane cloud new [--label <name>] [--size <small|default|large>] [--boat-org <org|personal>] [--transport <auto|https|http>] [--pane-deb-url <url> --pane-deb-sha256 <hex>|--pane-npm-spec <spec>] [--keep-on-failure] --yes [--json]",
+        "  runpane cloud new [--label <name>] [--size <small|default|large>] [--boat-org <org|personal>] [--transport <auto|https|http>] [--pane-deb-url <url> --pane-deb-sha256 <hex>|--pane-npm-spec <spec>] [--name-prefix <prefix>] [--keep-on-failure] --yes [--json]",
         "",
         "`runpane cloud new` ships in the npm package, not in the Python package.",
         "Run it with Node instead: npx --yes runpane@latest cloud new"
@@ -13380,6 +13381,12 @@ export const RUNPANE_CONTRACT = {
             "value": "<spec>",
             "required": false,
             "description": "Install Pane with this runpane npm spec (default runpane@latest)."
+          },
+          {
+            "name": "--name-prefix",
+            "value": "<prefix>",
+            "required": false,
+            "description": "Prefix of the sandbox and tailnet host name (default rp)."
           },
           {
             "name": "--keep-on-failure",

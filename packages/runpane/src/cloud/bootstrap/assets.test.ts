@@ -112,3 +112,9 @@ test('the identity check passes nothing inherited: it fails on leftover credenti
   }
   assert.match(cloudBootstrapAssets['identity-scrub.sh'], /"\$h\/\.pane_remote" "\$h\/\.pane\/config\.json"/u);
 });
+
+test('install-pane gives the sandbox a git identity and has the daemon resume agent panels on start', () => {
+  const script = cloudBootstrapAssets['rp-bootstrap.sh'];
+  assert.match(script, /git config --global user\.name >\/dev\/null 2>&1 \|\| git config --global user\.name /u);
+  assert.match(script, /Environment=PANE_RESUME_AGENTS_ON_START=1/u);
+});

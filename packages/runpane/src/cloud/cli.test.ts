@@ -82,7 +82,7 @@ test('new passes its options through and a .deb needs its sha256', async () => {
     '--pane-deb-url', 'https://example.com/pane.deb', '--pane-deb-sha256', 'a'.repeat(64)]), 0);
   assert.deepEqual(h.creates[0], {
     label: 'Cloud', size: undefined, boatOrg: 'test', transport: 'http',
-    paneSource: { kind: 'deb-url', url: 'https://example.com/pane.deb', sha256: 'a'.repeat(64) }, keepOnFailure: false,
+    paneSource: { kind: 'deb-url', url: 'https://example.com/pane.deb', sha256: 'a'.repeat(64) }, keepOnFailure: false, namePrefix: undefined,
   });
   // --json keeps stdout one JSON document; progress goes to stderr.
   assert.equal(JSON.parse(h.out.join('\n')).sandbox.hostname, 'rp-abc12345');

@@ -128,8 +128,9 @@ pnpm remote:setup -- --no-tailscale-serve
 
 ## Run Pane on a Cloud VM
 
-Pane does not create or manage cloud machines. Create the VM yourself, then set
-it up as a Remote Pane host:
+To bring your own VM, create it yourself, then set it up as a Remote Pane host.
+For a sandbox that Pane creates and manages, see
+[Cloud sandbox (experimental)](#cloud-sandbox-experimental).
 
 1. Create an Ubuntu 24.04 VM with any provider. Size it for the agents and
    builds you plan to run. It only needs inbound SSH. The daemon listens on
@@ -168,6 +169,81 @@ it up as a Remote Pane host:
 To start, stop, or delete the VM, use your provider's console or CLI. If
 something fails, run `npx --yes runpane@latest doctor --json` on the VM and
 check [Troubleshooting](#troubleshooting).
+
+## Cloud sandbox (experimental)
+
+A cloud sandbox is a [boat.dev](https://boat.dev) sandbox that Pane creates for you, already set up as a
+Remote Pane host: Pane is installed, the sandbox has joined your tailnet, and it is paired and saved in your
+remote hosts. Stop it when you are done (a stopped sandbox costs nothing) and start it again later: the tailnet
+name, the Sessions and the agents' conversations come back.
+
+### What you need
+
+- **A boat.dev API key**, on a plan that allows sandboxes without a time limit. If your account bills more
+  than one wallet (organization), choose the wallet once; every new sandbox bills it.
+- **A Tailscale OAuth client** whose client is allowed to create auth keys tagged `tag:rp-session` and to
+  read and delete devices (scopes `auth_keys` and `devices:core`). Your tailnet policy must define the tag,
+  for example `"tagOwners": { "tag:rp-session": ["autogroup:admin"] }`. Recommended grants, so your devices
+  reach the sandboxes but sandboxes reach nothing else:
+
+  ```json
+  "grants": [
+    { "src": ["autogroup:member"], "dst": ["tag:rp-session"], "ip": ["tcp:443", "tcp:42137"] }
+  ]
+  ```
+
+- **Tailscale on every device that connects**, including the desktop.
+- Optional: **a Claude token** (`claude setup-token`). Claude Code agents in every new sandbox sign in with it.
+
+### Create one
+
+In desktop Pane, open **Settings > Remote Access**, enter the keys once, then choose **Add cloud sandbox**.
+From a terminal, the same library is the `runpane cloud` command:
+
+```bash
+runpane cloud setup --boat-key-file - --boat-org <org|personal> \
+  --tailscale-client-id <id> --tailscale-secret-file <path> --claude-token-file <path>
+runpane cloud new --label "Cloud sandbox" --yes
+runpane cloud list
+runpane cloud stop <host> --yes
+runpane cloud start <host>
+runpane cloud remove <host> --yes
+```
+
+Secrets are read from files or stdin (`-`), never from arguments. They stay on this machine, in
+`~/.config/runpane-cloud` (mode 0600; `$RUNPANE_CLOUD_DIR` overrides it), and are never printed. `new` adds the
+host to desktop Pane's saved remote hosts in `~/.pane/config.json` (`$RUNPANE_CLOUD_DESKTOP_DIR` overrides it).
+`runpane help cloud <command>` lists every option.
+
+`new` takes about 1.5 minutes. It:
+
+1. creates the sandbox in the chosen wallet;
+2. resets its identity: a fresh machine-id and SSH host keys, and no credentials or Pane state left from the image;
+3. closes inbound tailnet traffic except Tailscale Serve (an nftables table, reloaded at every boot);
+4. joins your tailnet with a single-use, pre-authorized auth key tagged `tag:rp-session`, with Tailscale SSH off;
+5. installs Pane (the latest release, or the `.deb` given with `--pane-deb-url` and its required
+   `--pane-deb-sha256`) and pairs it;
+6. waits for the daemon at `https://<host>.<tailnet>.ts.net` through Tailscale Serve.
+
+Every new tailnet name needs a Let's Encrypt certificate, and Let's Encrypt issues at most 50 a week for a
+tailnet's domain. When the certificate doesn't come, the sandbox is served over plain HTTP inside the tailnet
+instead, at `http://<host>.<tailnet>.ts.net:42137`. WireGuard still encrypts that traffic, but the phone app at
+`runpane.com/app` can't use it. `--transport https` or `--transport http` picks one explicitly.
+
+If any step fails, `new` removes the sandbox and its tailnet device before it reports the error.
+
+### Stop, start, update and remove
+
+- **Stop** syncs the disk, then boat snapshots the sandbox and powers it off. Billing stops; the disk and the
+  tailnet name are kept.
+- **Start** resumes the sandbox and waits until the daemon answers. A resume has been seen to bring the
+  Tailscale node back logged out, or without its Serve config. Start repairs either: it re-applies Serve, or
+  re-enrolls the node under the same name, so the saved host keeps working.
+- **Update** (`runpane cloud update <host> --pane-deb-url <url> --pane-deb-sha256 <hex> --yes`) installs another
+  Pane `.deb` on a running sandbox and restarts its daemon. Pairing and Sessions are kept.
+- **Remove** deletes the sandbox and its disk, its tailnet device, the saved remote host and the local record.
+  Only devices tagged `tag:rp-session` under the sandbox's name are deleted. Any other device with that name is
+  left alone and reported.
 
 ## Import Locally
 

@@ -45,6 +45,7 @@ const VALUE_FLAGS = new Set([
   '--pane-deb-url',
   '--pane-deb-sha256',
   '--pane-npm-spec',
+  '--name-prefix',
 ]);
 const BOOLEAN_FLAGS = new Set(['--json', '--yes', '--keep-on-failure']);
 const HOST_COMMANDS = new Set(['status', 'stop', 'start', 'update', 'remove']);
@@ -88,6 +89,7 @@ export async function runCloud(argv: readonly string[], io: CloudCliIo = process
         transport: parseTransport(args.values.get('--transport')),
         paneSource: parsePaneSource(args),
         keepOnFailure: args.flags.has('--keep-on-failure'),
+        namePrefix: args.values.get('--name-prefix'),
       }, progress);
       print({ ok: true, sandbox: info }, describe(info));
       return 0;
@@ -203,7 +205,9 @@ function parsePaneSource(args: CloudArgs): PaneSource | undefined {
 function describe(info: CloudSandboxInfo): string {
   const lines = [`${info.label} (${info.hostname}): ${info.state}`, `  sandbox: ${info.sandboxId} (${info.providerState})`];
   if (info.baseUrl) lines.push(`  url: ${info.baseUrl}${info.transport === 'http' ? ' (plain HTTP inside your tailnet; no TLS certificate)' : ''}`);
-  if (info.health) lines.push(`  daemon: ${info.health.ok ? 'healthy' : 'not answering'}${info.health.version ? `, Pane ${info.health.version}` : ''}`);
+  if (info.health) lines.push(`  daemon: ${info.health.ok ? 'healthy' : 'not answering'}`);
+  const version = info.health?.version ?? info.daemonVersion;
+  if (version) lines.push(`  Pane: ${version}`);
   if (info.org) lines.push(`  boat wallet: ${info.org.name}`);
   return lines.join('\n');
 }

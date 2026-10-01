@@ -472,6 +472,14 @@ step_install_pane() {
     *) fail "unknown pane source $mode" ;;
   esac
   sudo loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
+  # Pane commits a new project's first commit; a fresh sandbox has no git identity. Only set when missing.
+  if command -v git >/dev/null 2>&1; then
+    git config --global user.name >/dev/null 2>&1 || git config --global user.name "Pane cloud sandbox"
+    git config --global user.email >/dev/null 2>&1 || git config --global user.email "pane@$(hostname)"
+  fi
+  # After a stop/start, the daemon relaunches the agent panels a stop interrupted (they resume their conversations).
+  mkdir -p "$HOME/.config/systemd/user/pane-remote-daemon.service.d"
+  printf '[Service]\nEnvironment=PANE_RESUME_AGENTS_ON_START=1\n' >"$HOME/.config/systemd/user/pane-remote-daemon.service.d/resume-agents.conf"
   # Pane's setup runs `tailscale serve` as this user; make it the node's operator (no other rights).
   sudo tailscale set --operator="$(id -un)" >/dev/null 2>&1 || fail "tailscale set --operator failed"
   if [ "$mode" = runpane-npm ]; then
