@@ -51,10 +51,6 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
     steps:
-    # LF checkouts, so the side-by-side patch applies as generated.
-    - run: git config --global core.autocrlf false
-      shell: bash
-
     - uses: actions/checkout@v7
       with:
         path: harness
@@ -86,7 +82,9 @@ jobs:
         stamp=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d%H%M%S HEAD)
         version="$(node -p 'require("./package.json").version')-cs.${stamp}.g${sha:0:8}"
         { echo "sha=$sha"; echo "version=$version"; echo "tag=cs-desktop-${sha:0:8}-k${KIT_SHA:0:8}"; } >> "$GITHUB_OUTPUT"
-        git apply --verbose ../harness/.github/cs-e2e/side-by-side.patch
+        # The harness checkout gives the .patch CRLF on Windows (text=auto); the sources are eol=lf.
+        tr -d '\r' < ../harness/.github/cs-e2e/side-by-side.patch > ../side-by-side.patch
+        git apply --verbose ../side-by-side.patch
         echo "Building $version from $sha + side-by-side patch, kit from $KIT_SHA" >> "$GITHUB_STEP_SUMMARY"
 
     - uses: actions/setup-node@v6
