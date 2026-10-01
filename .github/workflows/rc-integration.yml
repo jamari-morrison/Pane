@@ -138,7 +138,7 @@ jobs:
     needs: [suite, runpane]
     if: >-
       github.repository != 'greenfield-inc/Pane' &&
-      github.ref == 'refs/heads/rc/integration' &&
+      (github.ref == 'refs/heads/rc/integration' || github.ref == 'refs/heads/rc/p5/p5-verify') &&
       !contains(github.event.head_commit.message, '[no-release]')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
