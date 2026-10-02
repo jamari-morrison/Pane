@@ -42,6 +42,7 @@ function harness(env: NodeJS.ProcessEnv = {}) {
     async remove(host) {
       calls.push(`remove ${host}`);
     },
+    syncAgentDefaults: async () => INFO,
   };
   const io = {
     stdout: (line: string) => out.push(line),

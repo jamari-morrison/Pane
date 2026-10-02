@@ -1,15 +1,18 @@
 import { randomBytes } from 'node:crypto';
 import { createBoatProvider } from './boat';
 import {
+  applyClaudeModel,
   cloudHostname,
   provisionSandbox,
   repairSandboxTailnet,
   updateSandboxPane,
+  type ClaudeModelOutcome,
   type CloudTransportMode,
   type ProvisionStepName,
 } from './bootstrap/provision';
+import { readLocalClaudeModel } from './claudeDefaults';
 import { waitForDaemonHealth, type DaemonHealthResult } from './bootstrap/health';
-import { PERSONAL_ORG, type BoatOrg, type CloudProvider, type CloudSandbox, type CloudSandboxState, type CloudSize } from './provider';
+import { PERSONAL_ORG, type BoatOrg, type CloudProvider, type CloudSandbox, type CloudSandboxState, type CloudSize, type SandboxHandle } from './provider';
 import { createDesktopConfigHosts, type SavedRemoteHosts } from './savedHosts';
 import {
   createCloudStore,
@@ -45,6 +48,11 @@ export interface CloudSandboxes {
   update(host: string, pane: { debUrl: string; sha256: string }, onProgress?: CloudProgressListener): Promise<CloudSandboxInfo>;
   /** Deletes the sandbox, its tailnet device, its saved remote host and its local record. */
   remove(host: string, onProgress?: CloudProgressListener): Promise<void>;
+  /**
+   * Gives a running sandbox the user's current Claude Code default model, so its next new Claude panel follows a
+   * change. create, start and update do this too; call it after the user's default changes, e.g. on connect.
+   */
+  syncAgentDefaults(host: string): Promise<CloudSandboxInfo>;
 }
 
 /** Fields left undefined or empty keep what is saved. */
@@ -124,6 +132,11 @@ export interface CloudSandboxInfo {
   daemonVersion?: string;
   org?: BoatOrg;
   health?: { ok: boolean; version?: string };
+  /**
+   * The model new Claude panels in the sandbox start with, after this call gave it the user's default
+   * (null: Claude Code's own default), and what happened; set by create, start, update and syncAgentDefaults.
+   */
+  claudeModel?: { model: string | null; outcome: ClaudeModelOutcome };
 }
 
 /** The outside world, swappable in tests. */
@@ -143,12 +156,15 @@ export interface CloudSandboxesOptions {
    * `RUNPANE_CLOUD_PANE_DEB_SHA256` (the Pane .deb to install) and `RUNPANE_CLOUD_NAME_PREFIX`. Default process.env.
    */
   env?: NodeJS.ProcessEnv;
+  /** The user's Claude Code default model on this machine (default: readLocalClaudeModel); null for Claude's own. */
+  localClaudeModel?: () => Promise<string | null>;
 }
 
 export interface CloudBootstrap {
   provision: typeof provisionSandbox;
   repair: typeof repairSandboxTailnet;
   update: typeof updateSandboxPane;
+  applyClaudeModel: typeof applyClaudeModel;
   waitForHealth: (baseUrl: string, options: { timeoutMs: number; intervalMs?: number }) => Promise<DaemonHealthResult>;
 }
 
@@ -172,11 +188,34 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
     provision: provisionSandbox,
     repair: repairSandboxTailnet,
     update: updateSandboxPane,
+    applyClaudeModel,
     waitForHealth: (baseUrl, healthOptions) => waitForDaemonHealth(baseUrl, healthOptions),
   };
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = options.now ?? Date.now;
   const env = options.env ?? process.env;
+  const localClaudeModel = options.localClaudeModel ?? (() => readLocalClaudeModel(env));
+
+  /**
+   * After a start or an update the sandbox is already usable, so a failure here is reported, not thrown: the
+   * sandbox keeps the model it had, and the next start, update or syncAgentDefaults tries again.
+   */
+  async function syncClaudeModelBestEffort(handle: SandboxHandle, label: string, step: CloudProgressStep, onProgress?: CloudProgressListener) {
+    const report = (message: string) => onProgress?.({ step, message });
+    try {
+      return await syncClaudeModel(handle, report);
+    } catch (error) {
+      report(`${label} kept its Claude model: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
+  }
+
+  /** The user's default Claude model into the sandbox; new panels start with it (see applyClaudeModel). */
+  async function syncClaudeModel(handle: SandboxHandle, report: (message: string) => void) {
+    const model = await localClaudeModel();
+    report(model ? `Using your Claude Code default model (${model})...` : 'Using Claude Code\'s own default model...');
+    return bootstrap.applyClaudeModel(handle, model);
+  }
 
   async function credentialsStatus(): Promise<CloudCredentialsStatus> {
     const credentials = await store.readCredentials();
@@ -307,6 +346,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       await store.writeHost(record);
 
       let health: DaemonHealthResult;
+      let claudeModel: CloudSandboxInfo['claudeModel'];
       try {
         if (sandbox.name !== hostname) await provider.rename(sandbox.id, hostname);
         const ready = await waitForSandbox(provider, sandbox.id, 'running', SANDBOX_READY_TIMEOUT_MS);
@@ -342,6 +382,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
         record.meta.magicDnsName = outcome.magicDnsName;
         if (outcome.daemonVersion) record.meta.daemonVersion = outcome.daemonVersion;
         await store.writeHost(record);
+        claudeModel = await syncClaudeModel(provider.handle(sandbox.id), (message) => progress('install', message));
         progress('saved-host', `Saving ${label} as a remote host...`);
         await savedHosts.upsert(record.profile);
       } catch (error) {
@@ -358,7 +399,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
         throw new Error(`Creating ${hostname} failed: ${reason}`);
       }
       progress('done', `${label} is ready at ${record.profile.baseUrl}.`);
-      return sandboxInfo(record, await provider.get(sandbox.id), health);
+      return sandboxInfo(record, await provider.get(sandbox.id), health, claudeModel);
     },
 
     async list() {
@@ -434,8 +475,9 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
         health = await bootstrap.waitForHealth(record.profile.baseUrl, { timeoutMs: REPAIRED_HEALTH_TIMEOUT_MS, intervalMs: 500 });
       }
       if (!health.ok) throw new Error(`${record.profile.label} is running, but its Pane daemon did not answer at ${record.profile.baseUrl}.`);
+      const claudeModel = await syncClaudeModelBestEffort(provider.handle(sandboxId), record.profile.label, 'starting', onProgress);
       onProgress?.({ step: 'done', message: `${record.profile.label} is running.` });
-      return sandboxInfo(record, sandbox, health);
+      return sandboxInfo(record, sandbox, health, claudeModel);
     },
 
     async update(host, pane, onProgress) {
@@ -451,8 +493,16 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       if (version) record.meta.daemonVersion = version;
       record.meta.paneSource = { kind: 'deb-url', url: pane.debUrl, sha256: pane.sha256 };
       await store.writeHost(record);
+      const claudeModel = await syncClaudeModelBestEffort(provider.handle(sandboxId), record.profile.label, 'update', onProgress);
       onProgress?.({ step: 'done', message: `${record.profile.label} runs Pane ${version ?? '(version unknown)'}.` });
-      return sandboxInfo(record, sandbox, health);
+      return sandboxInfo(record, sandbox, health, claudeModel);
+    },
+
+    async syncAgentDefaults(host) {
+      const { record, provider } = await loadHost(host);
+      const sandbox = await provider.get(record.profile.cloud.sandboxId);
+      if (sandbox.state !== 'running') throw new Error(`${record.profile.label} is ${sandbox.state}; it gets your default model when it starts.`);
+      return sandboxInfo(record, sandbox, undefined, await syncClaudeModel(provider.handle(sandbox.id), () => undefined));
     },
 
     async remove(host, onProgress) {
@@ -466,7 +516,12 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
   };
 }
 
-function sandboxInfo(record: CloudHostRecord, sandbox?: CloudSandbox, health?: DaemonHealthResult): CloudSandboxInfo {
+function sandboxInfo(
+  record: CloudHostRecord,
+  sandbox?: CloudSandbox,
+  health?: DaemonHealthResult,
+  claudeModel?: CloudSandboxInfo['claudeModel'],
+): CloudSandboxInfo {
   const info: CloudSandboxInfo = {
     hostname: record.profile.cloud.hostname,
     label: record.profile.label,
@@ -485,6 +540,7 @@ function sandboxInfo(record: CloudHostRecord, sandbox?: CloudSandbox, health?: D
   const org = sandbox?.org ?? record.meta.boatOrg;
   if (org) info.org = org;
   if (health) info.health = health.version ? { ok: health.ok, version: health.version } : { ok: health.ok };
+  if (claudeModel) info.claudeModel = claudeModel;
   return info;
 }
 

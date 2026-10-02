@@ -288,6 +288,10 @@ The sandbox tells Claude Code it is sandboxed (`CLAUDE_CODE_SANDBOXED=1`, set on
 so Claude Code skips its folder-trust prompt there, also for repositories you add later. This computer and remote
 hosts you set up yourself are not affected.
 
+New Claude Code panels in a sandbox start with the same default model as Claude Code on this computer
+(`ANTHROPIC_MODEL`, else `model` in `~/.claude/settings.json`); create, Start and Update apply it again, so a
+change follows. It is not a pin: a model picked inside the sandbox with `/model` is kept.
+
 ### Stop, start, update and remove
 
 - **Stop** syncs the disk, then boat snapshots the sandbox and powers it off. Billing stops; the disk and the

@@ -525,6 +525,62 @@ step_update_pane() {
   result "$(python3 -c 'import json,sys;print(json.dumps({"ok":True,"version":sys.argv[1] or None}))' "$(pane_version)")"
 }
 
+# claude-model <model>|--clear: the model new Claude Code panels start with (`model` in ~/.claude/settings.json), so the
+# sandbox follows the default of the user's own Claude Code. Not a pin: it only replaces or removes a value it wrote
+# itself (recorded in $RP_STATE/claude-model); a model chosen inside the sandbox (`/model`) is kept. Atomic, other keys kept.
+step_claude_model() {
+  # A model id or alias as `claude --model` takes it: claude-opus-5-5, opus, claude-opus-5-5[1m].
+  local wanted="$1" model_id='^[A-Za-z0-9][]A-Za-z0-9._:@/[-]{0,99}$'
+  case "$wanted" in
+    --clear) ;;
+    *) [[ "$wanted" =~ $model_id ]] || fail "claude-model: not a Claude model id" ;;
+  esac
+  local out
+  out="$(python3 - "$HOME" "$RP_STATE/claude-model" "$wanted" 2>"$RP_STATE/claude-model.log" <<'PY'
+import json, os, sys
+home, marker, wanted = sys.argv[1:4]
+os.umask(0o077)
+path = os.path.join(home, ".claude", "settings.json")
+settings = {}
+if os.path.exists(path):
+    with open(path) as f:
+        settings = json.load(f)
+    if not isinstance(settings, dict):
+        raise SystemExit(f"{path} is not a JSON object")
+applied = open(marker).read().strip() if os.path.exists(marker) else None
+current = settings.get("model")
+wanted = None if wanted == "--clear" else wanted
+if current is not None and current != applied:
+    outcome = "kept-sandbox-choice"
+elif wanted is None:
+    outcome = "removed" if current is not None else "unset"
+    settings.pop("model", None)
+else:
+    outcome = "current" if current == wanted else "set"
+    settings["model"] = wanted
+if outcome in ("set", "removed"):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    mode = os.stat(path).st_mode & 0o777 if os.path.exists(path) else 0o600
+    temp = f"{path}.rp-{os.getpid()}.tmp"
+    with open(temp, "w") as f:
+        json.dump(settings, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(temp, mode)
+    os.replace(temp, path)
+if outcome != "kept-sandbox-choice":
+    if wanted is None:
+        if os.path.exists(marker):
+            os.remove(marker)
+    else:
+        with open(marker, "w") as f:
+            f.write(wanted)
+print(json.dumps({"ok": True, "outcome": outcome, "model": settings.get("model")}))
+PY
+)" || fail "claude-model: could not update ~/.claude/settings.json: $(tail -1 "$RP_STATE/claude-model.log")"
+  result "$out"
+}
+
 # install-pane <mode> <debUrl> <debSha256> <runpaneSpec> <label>
 #   mode: deb-url (install the given .deb, e.g. a pinned release), runpane-npm (`runpane install daemon --format deb`
 #         downloads the release .deb; <runpaneSpec> picks the CLI).
@@ -649,6 +705,7 @@ case "$step" in
   serve-restore) step_serve_restore ;;
   agent-env) step_agent_env "$@" ;;
   agent-prompts) step_agent_prompts ;;
+  claude-model) step_claude_model "$@" ;;
   install-pane) step_install_pane "$@" ;;
   update-pane) step_update_pane "$@" ;;
   pairing-read) step_pairing_read ;;

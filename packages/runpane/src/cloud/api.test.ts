@@ -85,6 +85,8 @@ interface BootstrapScript {
   /** Answers for successive waitForHealth calls (default: healthy). */
   health?: boolean[];
   repair?: RepairResult;
+  /** applyClaudeModel fails, e.g. the sandbox's settings.json is not JSON. */
+  claudeModelFails?: boolean;
 }
 
 function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: BootstrapScript = {}) {
@@ -92,6 +94,7 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
   const paneSources: PaneSource[] = [];
   const repairs: string[] = [];
   const updates: string[] = [];
+  const claudeModels: Array<string | null> = [];
   const health = [...(script.health ?? [])];
   const bootstrap: CloudBootstrap = {
     async provision(_sandbox, options): Promise<ProvisionResult> {
@@ -117,12 +120,22 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
       updates.push(pane.debUrl);
       return { version: '2.4.147' };
     },
+    async applyClaudeModel(_sandbox, model) {
+      if (script.claudeModelFails) throw new Error('cloud bootstrap step "claude-model" failed: settings.json is not a JSON object');
+      claudeModels.push(model);
+      return { outcome: model === null ? 'unset' : 'set', model };
+    },
     async waitForHealth(): Promise<DaemonHealthResult> {
       const ok = health.length > 0 ? health.shift() === true : true;
       return { ok, elapsedMs: 1, version: ok ? '2.4.146' : undefined };
     },
   };
-  return { bootstrap, agentEnvs, paneSources, repairs, updates };
+  return { bootstrap, agentEnvs, paneSources, repairs, updates, claudeModels };
+}
+
+/** The user's Claude Code default model on "this machine"; tests change it. */
+class LocalClaudeDefault {
+  constructor(public model: string | null) {}
 }
 
 function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}) {
@@ -132,6 +145,7 @@ function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}) {
   const boot = fakeBootstrap(tailnet, script);
   const saved = new Map<string, CloudHostProfile>();
   const progress: CloudProgress[] = [];
+  const local = new LocalClaudeDefault('claude-opus-5-5');
   const cloud = createCloudSandboxes({
     dir,
     createProvider: provider.factory,
@@ -147,9 +161,10 @@ function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}) {
     },
     sleep: async () => undefined,
     env,
+    localClaudeModel: async () => local.model,
   });
   const onProgress = (update: CloudProgress) => progress.push(update);
-  return { dir, cloud, provider, tailnet, boot, saved, progress, onProgress };
+  return { dir, cloud, provider, tailnet, boot, saved, progress, onProgress, local };
 }
 
 async function withCredentials(h: ReturnType<typeof harness>) {
@@ -209,7 +224,9 @@ test('create provisions in the saved wallet, signs agents in, saves the host and
   assert.equal(saved?.token, 'paired-token-SECRET');
   assert.deepEqual(saved?.cloud, { provider: 'boat', sandboxId: info.sandboxId, sessionId: info.sessionId, nodeId: 'n1', hostname: info.hostname, version: 1 });
   assert.equal(fs.statSync(path.join(h.dir, 'hosts', `${info.hostname}.json`)).mode & 0o777, 0o600);
-  assert.deepEqual(h.progress.map((update) => update.step), ['sandbox', 'tailnet', 'install', 'saved-host', 'done']);
+  assert.deepEqual(h.progress.map((update) => update.step), ['sandbox', 'tailnet', 'install', 'install', 'saved-host', 'done']);
+  assert.deepEqual(info.claudeModel, { model: 'claude-opus-5-5', outcome: 'set' });
+  assert.deepEqual(h.boot.claudeModels, ['claude-opus-5-5']);
   const visible = JSON.stringify([info, h.progress]);
   for (const secret of SECRETS) assert.ok(!visible.includes(secret), 'no secret in results or progress');
 });
@@ -318,4 +335,53 @@ test('the environment can pin the Pane .deb (with its sha256) and the name prefi
   await withCredentials(unpinned);
   await assert.rejects(unpinned.cloud.create(), /RUNPANE_CLOUD_PANE_DEB_URL needs RUNPANE_CLOUD_PANE_DEB_SHA256/u);
   assert.equal(unpinned.provider.creates.length, 0, 'refused before anything is billed');
+});
+
+test('the sandbox follows the user\'s Claude Code default model: on create, start, update and syncAgentDefaults', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname } = await h.cloud.create();
+  assert.deepEqual(h.boot.claudeModels, ['claude-opus-5-5']);
+
+  // The user changes their default; a running sandbox follows on syncAgentDefaults, before any restart.
+  h.local.model = 'sonnet';
+  assert.deepEqual((await h.cloud.syncAgentDefaults(hostname)).claudeModel, { model: 'sonnet', outcome: 'set' });
+
+  // No default of their own: the sandbox goes back to Claude Code's.
+  h.local.model = null;
+  await h.cloud.update(hostname, { debUrl: 'https://example.com/pane.deb', sha256: 'e'.repeat(64) }, h.onProgress);
+  assert.ok(h.progress.some((update) => update.step === 'update' && update.message === 'Using Claude Code\'s own default model...'));
+
+  h.local.model = 'claude-opus-5-5';
+  await h.cloud.stop(hostname);
+  assert.deepEqual((await h.cloud.start(hostname)).claudeModel, { model: 'claude-opus-5-5', outcome: 'set' });
+  assert.deepEqual(h.boot.claudeModels, ['claude-opus-5-5', 'sonnet', null, 'claude-opus-5-5']);
+
+  await h.cloud.stop(hostname);
+  await assert.rejects(h.cloud.syncAgentDefaults(hostname), /is stopped; it gets your default model when it starts/u);
+});
+
+test('a start whose model update fails still succeeds and says so', async () => {
+  const h = harness({ claudeModelFails: true });
+  await assert.rejects(withCredentials(h).then(() => h.cloud.create()), /Creating rp-[a-z0-9]{8} failed: cloud bootstrap step "claude-model" failed/u);
+  // create is all or nothing; start and update keep a usable sandbox.
+  const ok = harness();
+  await withCredentials(ok);
+  const { hostname } = await ok.cloud.create();
+  await ok.cloud.stop(hostname);
+  const failing = harness({ claudeModelFails: true });
+  // Reuse the same state dir through a second library on it.
+  const info = await createCloudSandboxes({
+    dir: ok.dir,
+    createProvider: ok.provider.factory,
+    createTailscale: () => ok.tailnet.api,
+    bootstrap: failing.boot.bootstrap,
+    savedHosts: { upsert: async () => undefined, remove: async () => undefined },
+    sleep: async () => undefined,
+    env: {},
+    localClaudeModel: async () => 'claude-opus-5-5',
+  }).start(hostname, failing.onProgress);
+  assert.equal(info.state, 'running');
+  assert.equal(info.claudeModel, undefined);
+  assert.ok(failing.progress.some((update) => /kept its Claude model: cloud bootstrap step "claude-model" failed/u.test(update.message)));
 });

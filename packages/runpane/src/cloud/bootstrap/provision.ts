@@ -325,6 +325,24 @@ export async function updateSandboxPane(
   return { version: installed.version ?? undefined };
 }
 
+export type ClaudeModelOutcome = 'set' | 'current' | 'removed' | 'unset' | 'kept-sandbox-choice';
+
+/**
+ * Makes new Claude Code panels in the sandbox start with `model` (`model` in its ~/.claude/settings.json), or with
+ * Claude Code's own default for null. Only a value this wrote before is replaced or removed: a model picked inside
+ * the sandbox with `/model` is kept (`kept-sandbox-choice`).
+ */
+export async function applyClaudeModel(
+  sandbox: SandboxHandle,
+  model: string | null,
+  sandboxHome = DEFAULT_SANDBOX_HOME,
+): Promise<{ outcome: ClaudeModelOutcome; model: string | null }> {
+  await uploadScripts(sandbox, sandboxHome);
+  const result = await new StepRunner(sandbox, sandboxHome).run('claude-model', [model ?? '--clear'], claudeModelStepSchema,
+    { timeoutSeconds: 60 });
+  return { outcome: result.outcome, model: result.model ?? null };
+}
+
 async function joinTailnet(
   sandbox: SandboxHandle,
   runner: StepRunner,
@@ -394,6 +412,10 @@ const checkStepSchema = boundary.object({
 });
 const installStepSchema = boundary.object({ version: boundary.optional(boundary.nullable(boundary.string)) });
 const pairingStepSchema = boundary.object({ code: boundary.nonEmptyString });
+const claudeModelStepSchema = boundary.object({
+  outcome: boundary.enumeration('set', 'current', 'removed', 'unset', 'kept-sandbox-choice'),
+  model: boundary.optional(boundary.nullable(boundary.string)),
+});
 const agentPromptsStepSchema = boundary.object({ trustedFolders: boundary.optional(boundary.number) });
 const certStatusStepSchema = boundary.object({
   rateLimited: boundary.boolean,

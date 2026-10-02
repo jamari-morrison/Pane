@@ -11,7 +11,7 @@ const names = Object.keys(cloudBootstrapAssets) as CloudBootstrapAssetName[];
 
 /** Every step provision.ts runs. */
 const PROVISION_STEPS = [
-  'identity', 'tailscale-install', 'tailnet-identity', 'check', 'firewall', 'tailscale-up', 'ts-guard', 'agent-env', 'agent-prompts', 'install-pane',
+  'identity', 'tailscale-install', 'tailnet-identity', 'check', 'firewall', 'tailscale-up', 'ts-guard', 'agent-env', 'agent-prompts', 'claude-model', 'install-pane',
   'pairing-read', 'health-local', 'cert-status', 'serve-http', 'serve-guard', 'tailscale-reset', 'serve-restore', 'update-pane',
 ];
 
@@ -228,4 +228,33 @@ test('CLAUDE_CODE_SANDBOXED is set only by the cloud sandbox daemon drop-in', ()
   assert.equal(listed.status, 0, listed.stderr);
   const offenders = listed.stdout.split('\n').filter((file) => file && !allowed.has(file));
   assert.deepEqual(offenders, [], 'no other source (main, frontend, shared, the rest of runpane) mentions CLAUDE_CODE_SANDBOXED');
+});
+
+test('claude-model sets the default model, keeps a model chosen in the sandbox, and only removes its own', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  fs.mkdirSync(path.join(home, '.claude'));
+  const settingsFile = path.join(home, '.claude/settings.json');
+  fs.writeFileSync(settingsFile, JSON.stringify({ skipDangerousModePermissionPrompt: true }), { mode: 0o600 });
+  const run = (model: string) => {
+    const result = runStep('claude-model', [model], new Map(), home);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return JSON.parse(result.stdout.trim().split('\n').pop()?.replace(/^RP_RESULT /u, '') ?? '{}');
+  };
+  assert.equal(run('claude-opus-5-5').outcome, 'set');
+  assert.deepEqual(readJson(settingsFile), { skipDangerousModePermissionPrompt: true, model: 'claude-opus-5-5' });
+  assert.equal(run('claude-opus-5-5').outcome, 'current');
+  assert.equal(run('sonnet').outcome, 'set');
+  assert.equal(run('--clear').outcome, 'removed');
+  assert.deepEqual(readJson(settingsFile), { skipDangerousModePermissionPrompt: true });
+  assert.equal(run('--clear').outcome, 'unset');
+
+  // Someone picked a model inside the sandbox (/model writes settings.json): that choice stays.
+  run('claude-opus-5-5');
+  fs.writeFileSync(settingsFile, JSON.stringify({ skipDangerousModePermissionPrompt: true, model: 'haiku' }));
+  assert.equal(run('sonnet').outcome, 'kept-sandbox-choice');
+  assert.equal(run('--clear').outcome, 'kept-sandbox-choice');
+  assert.equal(readJson(settingsFile).model, 'haiku');
+  assert.equal(fs.statSync(settingsFile).mode & 0o777, 0o600);
+
+  assert.match(runStep('claude-model', ['opus; rm -rf ~'], new Map(), home).stdout, /"error": "claude-model: not a Claude model id"/u);
 });
