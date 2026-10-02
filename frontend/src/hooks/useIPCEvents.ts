@@ -198,6 +198,8 @@ export function useIPCEvents() {
       devLog.debug('[useIPCEvents] Session created:', session.id);
       claimCreatedPane(session.id);
       addSession({...session, output: session.output || [], jsonMessages: session.jsonMessages || []});
+      // addSession makes an activating Pane the active one; leave a repository view so it is also the one shown.
+      if (session.activateOnCreate !== false) useNavigationStore.getState().navigateToSessions();
       // Set git status as loading for new sessions
       useSessionStore.getState().setGitStatusLoading(session.id, true);
     });

@@ -469,6 +469,9 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         if (prop === 'onSessionDeleted') {
           return (callback: MockEventCallback) => subscribe('session:deleted', callback);
         }
+        if (prop === 'onSessionCreated') {
+          return (callback: MockEventCallback) => subscribe('session:created', callback);
+        }
         if (prop === 'onSessionCreationFailed') {
           return (callback: MockEventCallback) => subscribe('session:creation-failed', callback);
         }
@@ -903,6 +906,29 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
             mockSessions.find((session) => session.projectId === projectId && session.isMainRepo === true) ?? null,
           ));
         },
+        // Like main: the Pane is saved, the call answers, then session:created reaches every window.
+        create: (request: { worktreeTemplate?: string; projectId?: number }) => {
+          const name = request.worktreeTemplate ?? 'pane';
+          const project = mockProjects.find((candidate) => candidate.id === request.projectId);
+          const session = {
+            id: `created-${name}`,
+            name,
+            worktreePath: `${String(project?.path ?? '/tmp/project')}/worktrees/${name}`,
+            prompt: '',
+            status: 'stopped',
+            createdAt: new Date().toISOString(),
+            output: [],
+            jsonMessages: [],
+            projectId: request.projectId,
+            isFavorite: false,
+            toolType: 'none',
+            archived: false,
+            baseBranch: 'main',
+          };
+          mockSessions = [...mockSessions, session];
+          setTimeout(() => emit('session:created', { ...clone(session), activateOnCreate: true }), 0);
+          return success({ sessionIds: [session.id] });
+        },
         delete: (sessionId: string) => {
           sessionDeleteCalls.push(sessionId);
           return success();
@@ -1278,6 +1304,10 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         },
         emitWindowFocusChanged(focused: boolean) {
           emit('window:focus-changed', focused);
+        },
+        emitSessionCreated(session: JsonObject) {
+          mockSessions = [...mockSessions, clone(session)];
+          emit('session:created', clone(session));
         },
         emitSessionCreationFailed(name: string, error: string) {
           emit('session:creation-failed', { name, error });
