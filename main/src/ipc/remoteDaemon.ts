@@ -64,7 +64,8 @@ import {
   type CloudSandboxLibrary,
 } from '../services/cloudSandboxes';
 import type { SavedRemoteHosts } from '../../../packages/runpane/src/cloud/savedHosts';
-import { readLocalClaudeModel } from '../../../packages/runpane/src/cloud/claudeDefaults';
+import { createDefaultClaudeModelSource } from '../../../packages/runpane/src/cloud/claudeDefaults';
+import { getShellPath } from '../utils/shellPath';
 
 interface IpcMainHandleLike {
   handle(
@@ -106,10 +107,29 @@ const defaultRemoteDaemonHandlerDependencies: RemoteDaemonHandlerDependencies = 
     const { createCloudSandboxes } = await import('../../../packages/runpane/src/cloud/api');
     return createCloudSandboxes(options);
   },
-  readDefaultClaudeModel: () => readLocalClaudeModel(),
+  readDefaultClaudeModel: lazyDefaultClaudeModel(),
   readCloudDaemonVersion: readRemoteDaemonVersion,
   resolvePaneReleaseDeb,
 };
+
+/**
+ * The user's default Claude model (explicit, else detected from their own claude), created on first use with the
+ * shell PATH Pane's terminals see, so a desktop started from the dock still finds `claude`. Cached by the library.
+ */
+function lazyDefaultClaudeModel(): () => Promise<string | null> {
+  let source: (() => Promise<string | null>) | undefined;
+  return () => {
+    if (!source) {
+      // One PATH entry: Windows spells it Path, and a copy may carry both spellings.
+      const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== 'PATH'));
+      source = createDefaultClaudeModelSource({
+        env: { ...env, PATH: getShellPath() },
+        onNotice: (message) => console.warn(`[CloudSandboxes] ${message}`),
+      });
+    }
+    return source();
+  };
+}
 
 let cloudConnectionListener: ((state: RemotePaneConnectionState) => void) | null = null;
 
