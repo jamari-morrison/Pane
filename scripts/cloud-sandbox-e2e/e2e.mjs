@@ -652,7 +652,7 @@ async function waitClaudeReady(timeoutMs) {
 }
 
 async function askClaude(prompt, expected, timeoutMs = 240_000) {
-  await page.locator('.xterm').last().click();
+  await page.locator('.xterm:visible').last().click();
   await page.keyboard.type(prompt, { delay: 10 });
   await page.keyboard.press('Enter');
   const startedAt = Date.now();
@@ -860,7 +860,7 @@ async function phaseAgent() {
   await ui.addTool().click();
   await ui.claudeTool().click();
   const claudeStartedAt = Date.now();
-  await page.locator('.xterm').last().waitFor({ timeout: 60_000 });
+  await page.locator('.xterm:visible').last().waitFor({ timeout: 60_000 });
   // The panel's id first: its screen is read from the host by id.
   const created = await until(async () => (await hostPanes()).find((pane) => pane.id === state.paneId)?.claudePanels?.[0], 30_000, 1000);
   state.claudePanelId = created?.id;
@@ -1036,7 +1036,7 @@ async function phaseStart() {
     return;
   }
   await ui.claudeTab().click();
-  await page.locator('.xterm').last().waitFor({ timeout: 60_000 });
+  await page.locator('.xterm:visible').last().waitFor({ timeout: 60_000 });
   const reopened = (await hostPanes()).find((pane) => pane.id === state.paneId)?.claudePanels ?? [];
   check('reopened-same-panel', reopened.length === 1 && reopened[0].id === state.claudePanelId && reopened[0].isActive,
     `active Claude panel of ${state.paneId}: ${JSON.stringify(reopened)}`);
