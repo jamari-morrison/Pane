@@ -277,9 +277,10 @@ plain HTTP (below). It:
 7. waits for the daemon at `https://<host>.<tailnet>.ts.net` through Tailscale Serve.
 
 Every new tailnet name needs a Let's Encrypt certificate, and Let's Encrypt issues at most 50 a week for a
-tailnet's domain. When the certificate doesn't come, the sandbox is served over plain HTTP inside the tailnet
-instead, at `http://<host>.<tailnet>.ts.net:42137`, after about 50 seconds of waiting for it. WireGuard still encrypts that traffic, but the phone app at
-`runpane.com/app` can't use it. `--transport https` or `--transport http` picks one explicitly.
+tailnet's domain. When the certificate doesn't come within about 50 seconds, the sandbox is served over plain
+HTTP inside the tailnet instead, at `http://<host>.<tailnet>.ts.net:42137`. WireGuard still encrypts that
+traffic, but the phone app at `runpane.com/app` can't use it. `--transport https` or `--transport http` picks
+one explicitly.
 
 If any step fails, `new` removes the sandbox and its tailnet device before it reports the error.
 
