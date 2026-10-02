@@ -1,5 +1,5 @@
 #!/bin/bash
-# rp-bootstrap.sh: sandbox-side provisioning steps for a Runpane Cloud session.
+# rp-bootstrap.sh: sandbox-side provisioning steps for a Pane cloud sandbox.
 # Uploaded and run by packages/runpane/src/cloud/bootstrap/provision.ts
 # as the sandbox login user, one step per call:  bash rp-bootstrap.sh <step> [args...]
 #
@@ -36,7 +36,7 @@ wait_for_tailscaled() {
   return 1
 }
 
-# The state tailscaled settles into. Right after a boot or wake it passes NoState and Starting within its
+# The state tailscaled settles into. Right after a boot or a Start it passes NoState and Starting within its
 # first second (seen live: NoState -> Starting -> Running in 1 s); deciding on those re-enrolled a healthy
 # node. A state still NoState after 30 s is reported as it is (a node that really came back logged out).
 wait_for_settled_tailscaled() {
@@ -173,7 +173,7 @@ GUARD
   sudo chmod 755 /usr/local/sbin/rp-tailscale-state
   sudo tee /etc/systemd/system/rp-tailscale-state-restore.service >/dev/null <<'UNIT'
 [Unit]
-Description=Runpane Cloud: restore tailscaled.state from its backup when a resume lost it
+Description=Pane cloud sandbox: restore tailscaled.state from its backup when a resume lost it
 DefaultDependencies=no
 After=local-fs.target rp-firstboot-identity.service
 Before=tailscaled.service
@@ -187,7 +187,7 @@ WantedBy=tailscaled.service multi-user.target
 UNIT
   sudo tee /etc/systemd/system/rp-tailscale-state-backup.service >/dev/null <<'UNIT'
 [Unit]
-Description=Runpane Cloud: copy tailscaled.state in place to /var/lib/rp-ts-backup
+Description=Pane cloud sandbox: copy tailscaled.state in place to /var/lib/rp-ts-backup
 
 [Service]
 Type=oneshot
@@ -195,7 +195,7 @@ ExecStart=/usr/local/sbin/rp-tailscale-state backup
 UNIT
   sudo tee /etc/systemd/system/rp-tailscale-state-backup.timer >/dev/null <<'UNIT'
 [Unit]
-Description=Runpane Cloud: back up tailscaled.state every minute
+Description=Pane cloud sandbox: back up tailscaled.state every minute
 
 [Timer]
 OnBootSec=30s
@@ -207,7 +207,7 @@ WantedBy=timers.target
 UNIT
   sudo tee /etc/systemd/system/rp-tailscale-state-backup.path >/dev/null <<'UNIT'
 [Unit]
-Description=Runpane Cloud: back up tailscaled.state when it changes
+Description=Pane cloud sandbox: back up tailscaled.state when it changes
 
 [Path]
 PathChanged=/var/lib/tailscale/tailscaled.state
@@ -235,7 +235,7 @@ install_serve_guard() {
   printf '{"transport":"%s","port":%s}\n' "$transport" "$port" | sudo tee /etc/rp-cloud/serve.json >/dev/null
   sudo tee /usr/local/sbin/rp-serve-restore >/dev/null <<'GUARD'
 #!/bin/sh
-# rp-serve-restore: re-apply this cloud Session's Tailscale Serve config when it is missing.
+# rp-serve-restore: re-apply this cloud sandbox's Tailscale Serve config when it is missing.
 CONF="${RP_SERVE_CONF:-/etc/rp-cloud/serve.json}"
 LOG="${RP_SERVE_LOG:-/var/lib/rp-cloud/serve-events.log}"
 say() { echo "rp-serve-restore: $*"; mkdir -p "$(dirname "$LOG")" && echo "$(date -u +%FT%TZ) boot=$(cut -c1-8 /proc/sys/kernel/random/boot_id) $*" >> "$LOG"; }
@@ -261,7 +261,7 @@ GUARD
   sudo chmod 755 /usr/local/sbin/rp-serve-restore
   sudo tee /etc/systemd/system/rp-serve-restore.service >/dev/null <<'UNIT'
 [Unit]
-Description=Runpane Cloud: re-apply the Session's Tailscale Serve config if a resume lost it
+Description=Pane cloud sandbox: re-apply the sandbox's Tailscale Serve config if a resume lost it
 Wants=network-online.target tailscaled.service
 After=network-online.target tailscaled.service
 
@@ -278,7 +278,7 @@ UNIT
 }
 
 # serve-guard <https|http>: record the desired Serve config, install the boot-time restore, and apply it now if
-# it is missing. Idempotent; safe on a live Session (it never stops anything).
+# it is missing. Idempotent; safe on a running sandbox (it never stops anything).
 step_serve_guard() {
   local out applied=false
   install_serve_guard "$1"
@@ -309,7 +309,7 @@ step_tailscale_up() {
   result "$(tailnet_identity_json)"
 }
 
-# tailnet-identity: current tailnet identity (read-only). A wake's repair runs it while the box may still
+# tailnet-identity: current tailnet identity (read-only). A Start's repair runs it while the box may still
 # be booting, so it waits for tailscaled to answer and settle (the caller re-enrols anything not Running).
 step_tailnet_identity() {
   wait_for_settled_tailscaled >/dev/null || fail "tailscaled is not answering"
@@ -366,7 +366,7 @@ step_cert_status() {
 
 # serve-http: plain HTTP inside the tailnet (WireGuard encrypts it) when no TLS certificate can be had.
 # Tailscale Serve forwards tcp :<port> on the node to the daemon on loopback; the daemon's advertised
-# access URL becomes http://<fqdn>:<port> so peer codes it mints point there too.
+# access URL becomes http://<fqdn>:<port> so pairing codes it mints point there too.
 step_serve_http() {
   local port fqdn base
   port="$(pane_listen_port)"
@@ -402,31 +402,99 @@ PY
 
 # agent-env <envFile>: agents sign in from this 0600 environment file (e.g. CLAUDE_CODE_OAUTH_TOKEN). A drop-in hands
 # it to the Pane daemon's user unit, so agent panels inherit it; the value is never on a command line or in output.
-# Claude Code's first-run prompts are pre-answered. Runs before install-pane, so the daemon starts with it.
+# Runs before install-pane, so the daemon starts with it.
 step_agent_env() {
   local envfile="$1" dropin="$HOME/.config/systemd/user/pane-remote-daemon.service.d"
   [ -s "$envfile" ] || fail "agent-env: no environment file"
   chmod 600 "$envfile"
-  python3 - "$HOME" <<'PY' || fail "agent-env: could not pre-answer Claude Code's first-run prompts"
-import json, os, sys
-home = sys.argv[1]
-os.umask(0o077)
-path = os.path.join(home, ".claude.json")
-data = json.load(open(path)) if os.path.exists(path) else {}
-data["hasCompletedOnboarding"] = True
-data["bypassPermissionsModeAccepted"] = True
-data.setdefault("projects", {}).setdefault(home, {})["hasTrustDialogAccepted"] = True
-json.dump(data, open(path, "w"))
-settings_path = os.path.join(home, ".claude", "settings.json")
-os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-settings = json.load(open(settings_path)) if os.path.exists(settings_path) else {}
-settings["skipDangerousModePermissionPrompt"] = True
-json.dump(settings, open(settings_path, "w"))
-PY
   mkdir -p "$dropin"
   printf '[Service]\nEnvironmentFile=%s\n' "$envfile" >"$dropin/runpane-cloud-agent.conf"
   systemctl --user daemon-reload >/dev/null 2>&1 || true
   result '{"ok":true}'
+}
+
+# Claude Code asks, in an agent panel nobody is watching yet, whether to trust the folder (the default answer exits)
+# and whether to accept bypass-permissions mode. Answer both for this user's home, every git repository under it and
+# their worktrees (Pane puts them in <repo>/worktrees; a trusted repository covers worktrees made later). Merged into
+# the existing ~/.claude.json and ~/.claude/settings.json and written atomically (same mode); a file that is not JSON
+# is left alone and the step fails. A repository added after this ran is covered by CLAUDE_CODE_SANDBOXED (install_agent_dropins).
+seed_claude_prompts() {
+  python3 - "$HOME" <<'PY'
+import json, os, sys
+home = sys.argv[1]
+os.umask(0o077)
+
+def load(path):
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise SystemExit(f"{path} is not a JSON object")
+    return data
+
+def save(path, data):
+    # Atomic: a temp file beside it, same mode, fsynced, then renamed over it. A crash never leaves half a file.
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    mode = os.stat(path).st_mode & 0o777 if os.path.exists(path) else 0o600
+    temp = f"{path}.rp-{os.getpid()}.tmp"
+    with open(temp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(temp, mode)
+    os.replace(temp, path)
+
+trusted = [home]
+for root, dirs, _ in os.walk(home):
+    depth = root[len(home):].count(os.sep)
+    dirs[:] = [d for d in dirs if not d.startswith(".") and d != "node_modules"]
+    if ".git" in os.listdir(root) and root != home:
+        trusted.append(root)
+        worktrees = os.path.join(root, "worktrees")
+        if os.path.isdir(worktrees):
+            trusted += [os.path.join(worktrees, d) for d in sorted(os.listdir(worktrees)) if os.path.isdir(os.path.join(worktrees, d))]
+    if depth >= 3:
+        dirs[:] = []
+
+path = os.path.join(home, ".claude.json")
+data = load(path)
+data["hasCompletedOnboarding"] = True
+data["bypassPermissionsModeAccepted"] = True
+projects = data.get("projects") if isinstance(data.get("projects"), dict) else {}
+for folder in trusted:
+    entry = projects.get(folder) if isinstance(projects.get(folder), dict) else {}
+    entry["hasTrustDialogAccepted"] = True
+    projects[folder] = entry
+data["projects"] = projects
+save(path, data)
+
+settings_path = os.path.join(home, ".claude", "settings.json")
+settings = load(settings_path)
+settings["skipDangerousModePermissionPrompt"] = True
+save(settings_path, settings)
+print(len(trusted))
+PY
+}
+
+# Environment for the Pane daemon, so its agent panels inherit it:
+# - PANE_RESUME_AGENTS_ON_START: after a stop/start, the daemon relaunches the agent panels a stop interrupted.
+# - CLAUDE_CODE_SANDBOXED: Claude Code treats every folder of this disposable sandbox as trusted. Its trust dialog
+#   does not follow ~/.claude.json's home entry into a repository added later (seen live with Claude Code 2.1.287),
+#   and its default answer exits the agent.
+install_agent_dropins() {
+  local dir="$HOME/.config/systemd/user/pane-remote-daemon.service.d"
+  mkdir -p "$dir"
+  printf '[Service]\nEnvironment=PANE_RESUME_AGENTS_ON_START=1\n' >"$dir/resume-agents.conf"
+  printf '[Service]\nEnvironment=CLAUDE_CODE_SANDBOXED=1\n' >"$dir/claude-sandboxed.conf"
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+}
+
+# agent-prompts: pre-answer Claude Code's folder-trust and bypass-permissions prompts (see seed_claude_prompts).
+step_agent_prompts() {
+  local trusted
+  trusted="$(seed_claude_prompts 2>"$RP_STATE/agent-prompts.log")" || fail "agent-prompts: $(tail -1 "$RP_STATE/agent-prompts.log")"
+  result "$(python3 -c 'import json,sys;print(json.dumps({"ok":True,"trustedFolders":int(sys.argv[1])}))' "$trusted")"
 }
 
 # install_pane_deb <https url> [sha256]: download (https only, also on redirects), verify and apt-install a Pane .deb.
@@ -450,6 +518,9 @@ step_update_pane() {
   [[ "$deb_sha" =~ ^[0-9a-f]{64}$ ]] || fail "update-pane: sha256 must be 64 lowercase hex characters"
   [ -s "$RP_STATE/pairing.code" ] || fail "update-pane: this sandbox was never provisioned"
   install_pane_deb "$deb_url" "$deb_sha"
+  # A reinstall re-lays what create set up for agents, in case an older bootstrap or a user removed it.
+  seed_claude_prompts >/dev/null 2>"$RP_STATE/agent-prompts.log" || fail "update-pane: $(tail -1 "$RP_STATE/agent-prompts.log")"
+  install_agent_dropins
   systemctl --user restart pane-remote-daemon.service || fail "could not restart pane-remote-daemon.service"
   result "$(python3 -c 'import json,sys;print(json.dumps({"ok":True,"version":sys.argv[1] or None}))' "$(pane_version)")"
 }
@@ -462,6 +533,8 @@ step_update_pane() {
 # and redacted from the log.
 step_install_pane() {
   local mode="$1" deb_url="$2" deb_sha="$3" spec="$4" label="$5" rc=0 code
+  # First, so a re-run on a provisioned sandbox (the skip below) lays the daemon's agent environment down again.
+  install_agent_dropins
   if [ -s "$RP_STATE/pairing.code" ] && systemctl --user is-active -q pane-remote-daemon.service; then
     result "$(python3 -c 'import json,sys;print(json.dumps({"ok":True,"skipped":True,"version":sys.argv[1] or None,"listenPort":int(sys.argv[2])}))' "$(pane_version)" "$(pane_listen_port)")"
     return 0
@@ -477,9 +550,6 @@ step_install_pane() {
     git config --global user.name >/dev/null 2>&1 || git config --global user.name "Pane cloud sandbox"
     git config --global user.email >/dev/null 2>&1 || git config --global user.email "pane@$(hostname)"
   fi
-  # After a stop/start, the daemon relaunches the agent panels a stop interrupted (they resume their conversations).
-  mkdir -p "$HOME/.config/systemd/user/pane-remote-daemon.service.d"
-  printf '[Service]\nEnvironment=PANE_RESUME_AGENTS_ON_START=1\n' >"$HOME/.config/systemd/user/pane-remote-daemon.service.d/resume-agents.conf"
   # Pane's setup runs `tailscale serve` as this user; make it the node's operator (no other rights).
   sudo tailscale set --operator="$(id -un)" >/dev/null 2>&1 || fail "tailscale set --operator failed"
   if [ "$mode" = runpane-npm ]; then
@@ -516,8 +586,8 @@ step_health_local() {
 }
 
 # firewall <tcp ports csv>: only these TCP ports (default Tailscale Serve's 443) are reachable over the tailnet.
-# The tailnet policy lets rp-session nodes reach each other on every port, which exposes the provider's own
-# in-sandbox services (desktop stream, agent service, sshd) to a compromised peer. Idempotent; the rules live
+# A tailnet policy may let other nodes reach this one on every port, which would expose the provider's own
+# in-sandbox services (desktop stream, agent service, sshd) to any of them. Idempotent; the rules live
 # in /etc and a oneshot unit reloads them at boot, so they survive stop/resume (a resume is a fresh boot).
 step_firewall() {
   local ports="${1:-443}" port elements="" nft
@@ -533,7 +603,7 @@ step_firewall() {
   nft="$(command -v nft)"
   sudo tee /etc/rp-tailnet-firewall.nft >/dev/null <<NFT
 #!$nft -f
-# Runpane Cloud: over the tailnet, only tcp {$elements} (Tailscale Serve) and replies reach this sandbox.
+# Pane cloud sandbox: over the tailnet, only tcp {$elements} (Tailscale Serve) and replies reach this sandbox.
 table inet rp_tailnet
 delete table inet rp_tailnet
 table inet rp_tailnet {
@@ -547,7 +617,7 @@ table inet rp_tailnet {
 NFT
   sudo tee /etc/systemd/system/rp-tailnet-firewall.service >/dev/null <<UNIT
 [Unit]
-Description=Runpane Cloud tailnet firewall (tcp $elements only over tailscale0)
+Description=Pane cloud sandbox tailnet firewall (tcp $elements only over tailscale0)
 DefaultDependencies=no
 Wants=network-pre.target
 Before=network-pre.target tailscaled.service
@@ -578,6 +648,7 @@ case "$step" in
   tailscale-reset) step_tailscale_reset ;;
   serve-restore) step_serve_restore ;;
   agent-env) step_agent_env "$@" ;;
+  agent-prompts) step_agent_prompts ;;
   install-pane) step_install_pane "$@" ;;
   update-pane) step_update_pane "$@" ;;
   pairing-read) step_pairing_read ;;

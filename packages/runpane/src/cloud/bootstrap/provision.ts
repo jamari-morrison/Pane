@@ -35,6 +35,7 @@ export type ProvisionStepName =
   | 'firewall'
   | 'tailscale-join'
   | 'agent-env'
+  | 'agent-prompts'
   | 'install-pane'
   | 'pairing'
   | 'health'
@@ -183,6 +184,10 @@ export async function provisionSandbox(sandbox: SandboxHandle, options: Provisio
       return runner.run('agent-env', [envFile], envelopeSchema, { timeoutSeconds: 60 });
     });
   }
+
+  // Claude Code's folder-trust prompt defaults to exit and nobody watches a new panel: answer it up front.
+  await step('agent-prompts', () => runner.run('agent-prompts', [], agentPromptsStepSchema, { timeoutSeconds: 60 }),
+    (value) => `${value.trustedFolders ?? 0} trusted folder(s)`);
 
   const install = await step('install-pane', () => runner.run('install-pane', [
     options.paneSource.kind,
@@ -389,6 +394,7 @@ const checkStepSchema = boundary.object({
 });
 const installStepSchema = boundary.object({ version: boundary.optional(boundary.nullable(boundary.string)) });
 const pairingStepSchema = boundary.object({ code: boundary.nonEmptyString });
+const agentPromptsStepSchema = boundary.object({ trustedFolders: boundary.optional(boundary.number) });
 const certStatusStepSchema = boundary.object({
   rateLimited: boundary.boolean,
   detail: boundary.optional(boundary.nullable(boundary.string)),

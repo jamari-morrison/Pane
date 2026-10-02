@@ -76,6 +76,7 @@ const freshSandboxAnswers = () => {
       return RUNNING;
     }],
     ['agent-env', answer({ ok: true })],
+    ['agent-prompts', answer({ ok: true, trustedFolders: 1 })],
     ['install-pane', answer({ ok: true, version: '2.4.146' })],
     ['pairing-read', answer({ ok: true, code: PAIRING })],
     ['cert-status', answer({ ok: true, rateLimited: true, detail: 'too many certificates' })],
@@ -101,7 +102,8 @@ test('provisions over HTTPS: identity, check, firewall, tagged join, agent env, 
   });
 
   assert.deepEqual(sandbox.names(), [
-    'identity', 'tailscale-install', 'tailnet-identity', 'check', 'firewall', 'tailscale-up', 'agent-env', 'install-pane', 'pairing-read', 'serve-guard',
+    'identity', 'tailscale-install', 'tailnet-identity', 'check', 'firewall', 'tailscale-up', 'agent-env', 'agent-prompts', 'install-pane',
+    'pairing-read', 'serve-guard',
   ]);
   assert.deepEqual(sandbox.steps.find((step) => step.name === 'firewall')?.args, ['443']);
   assert.deepEqual(sandbox.steps.find((step) => step.name === 'install-pane')?.args,
@@ -130,6 +132,7 @@ test('auto switches to plain HTTP inside the tailnet when the HTTPS certificate 
   assert.equal(result.pairing.baseUrl, `http://${FQDN}:42137`);
   assert.equal(result.pairing.token, 'paired-token');
   assert.ok(!sandbox.names().includes('agent-env'), 'no agent env without a saved sign-in');
+  assert.ok(sandbox.names().includes('agent-prompts'), 'Claude Code\'s prompts are answered with or without a saved sign-in');
   assert.deepEqual(sandbox.steps.find((step) => step.name === 'serve-guard')?.args, ['http']);
 });
 

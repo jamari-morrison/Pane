@@ -19,7 +19,7 @@ for h in "$H" /root; do
   absent "ssh user keys ($h)"        $(ls "$h"/.ssh/id_* 2>/dev/null)
   absent "pane remote state/pairing/client records ($h)" "$h/.pane_remote"
   absent "pane analytics id ($h)"    "$h/.pane/config.json"
-  absent "runpane cloud pairing ($h)" "$h/.runpane-cloud/pairing.code" $(ls "$h"/.runpane-cloud/client-*.code 2>/dev/null)
+  absent "runpane cloud pairing and agent env ($h)" "$h/.runpane-cloud/pairing.code" "$h/.runpane-cloud/agent.env"
   absent "other agent auth ($h)"     "$h/.codex/auth.json" "$h/.config/opencode/auth.json" "$h/.local/share/opencode/auth.json"
 done
 absent "tailscaled state backup (bootstrap guard)" /var/lib/rp-ts-backup/tailscaled.state

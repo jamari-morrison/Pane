@@ -204,6 +204,10 @@ Remote Pane host: Pane is installed, the sandbox has joined your tailnet, and it
 remote hosts. Stop it when you are done (a stopped sandbox costs nothing) and start it again later: the tailnet
 name, the Sessions and the agents' conversations come back.
 
+> **A running sandbox bills until you stop it.** Nothing stops an idle sandbox automatically, even when no
+> agent is working and no app is connected. **Settings > Remote Access** shows how long each sandbox has been
+> running ("running for 5h"); stop the ones you are not using.
+
 ### What you need
 
 - **A boat.dev API key**, on a plan that allows sandboxes without a time limit. If your account bills more
@@ -263,9 +267,13 @@ host to desktop Pane's saved remote hosts in `~/.pane/config.json` (`$RUNPANE_CL
 2. resets its identity: a fresh machine-id and SSH host keys, and no credentials or Pane state left from the image;
 3. closes inbound tailnet traffic except Tailscale Serve (an nftables table, reloaded at every boot);
 4. joins your tailnet with a single-use, pre-authorized auth key tagged `tag:rp-session`, with Tailscale SSH off;
-5. installs Pane (the latest release, or the `.deb` given with `--pane-deb-url` and its required
+5. prepares agents: Claude Code signs in with the saved token, its first-run, folder-trust and
+   bypass-permissions prompts are answered ahead of time (`~/.claude.json`, plus `CLAUDE_CODE_SANDBOXED=1`
+   in the daemon's environment so a repository added later is trusted too), and the daemon relaunches
+   interrupted agent panels when the sandbox starts again (`PANE_RESUME_AGENTS_ON_START=1`);
+6. installs Pane (the latest release, or the `.deb` given with `--pane-deb-url` and its required
    `--pane-deb-sha256`) and pairs it;
-6. waits for the daemon at `https://<host>.<tailnet>.ts.net` through Tailscale Serve.
+7. waits for the daemon at `https://<host>.<tailnet>.ts.net` through Tailscale Serve.
 
 Every new tailnet name needs a Let's Encrypt certificate, and Let's Encrypt issues at most 50 a week for a
 tailnet's domain. When the certificate doesn't come, the sandbox is served over plain HTTP inside the tailnet
@@ -282,7 +290,8 @@ If any step fails, `new` removes the sandbox and its tailnet device before it re
   Tailscale node back logged out, or without its Serve config. Start repairs either: it re-applies Serve, or
   re-enrolls the node under the same name, so the saved host keeps working.
 - **Update** (`runpane cloud update <host> --pane-deb-url <url> --pane-deb-sha256 <hex> --yes`) installs another
-  Pane `.deb` on a running sandbox and restarts its daemon. Pairing and Sessions are kept.
+  Pane `.deb` on a running sandbox and restarts its daemon. Pairing and Sessions are kept, and the agent
+  preparation from step 5 is applied again.
 - **Remove** deletes the sandbox and its disk, its tailnet device, the saved remote host and the local record.
   Only devices tagged `tag:rp-session` under the sandbox's name are deleted. Any other device with that name is
   left alone and reported.

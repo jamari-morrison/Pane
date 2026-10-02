@@ -509,6 +509,7 @@ function agentEnvironment(credentials: CloudCredentials): string | undefined {
 function progressStepFor(step: ProvisionStepName): CloudProgressStep {
   switch (step) {
     case 'agent-env':
+    case 'agent-prompts':
     case 'install-pane':
       return 'install';
     case 'pairing':
@@ -532,6 +533,7 @@ function describeStep(step: ProvisionStepName): string {
     case 'firewall': return 'Closing inbound tailnet ports...';
     case 'tailscale-join': return 'Joining your tailnet...';
     case 'agent-env': return 'Signing agents in...';
+    case 'agent-prompts': return 'Answering Claude Code\'s first-run prompts...';
     case 'install-pane': return 'Installing Pane...';
     case 'pairing': return 'Pairing...';
     case 'health': return 'Waiting for the Pane daemon...';

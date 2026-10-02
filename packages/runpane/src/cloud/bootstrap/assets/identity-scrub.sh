@@ -26,7 +26,7 @@ for h in "$H" /root; do
       "$h/.local/share/fish/fish_history" \
       "$h/.ssh/id_"* "$h/.ssh/known_hosts" "$h/.ssh/known_hosts.old" \
       "$h/.pane_remote" "$h/.pane/config.json" \
-      "$h/.runpane-cloud/pairing.code" "$h/.runpane-cloud/client-"*.code "$h/.runpane-cloud/session-id" \
+      "$h/.runpane-cloud/pairing.code" "$h/.runpane-cloud/agent.env" "$h/.runpane-cloud/session-id" \
       "$h/.codex/auth.json" "$h/.config/opencode/auth.json" "$h/.local/share/opencode/auth.json"
   # credential helpers configured in gitconfig carry no secret, but store= paths do; drop the helper line
   [ -f "$h/.gitconfig" ] && git config --file "$h/.gitconfig" --unset-all credential.helper 2>/dev/null
