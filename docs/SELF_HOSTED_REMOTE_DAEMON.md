@@ -295,7 +295,7 @@ blocked (every proxy variable points at a closed local port), reads the model fr
 stops it. No message reaches Anthropic, nothing is saved, and Pane reads only that line. The result is cached until
 `claude` or your settings file changes. Create, Start and Update apply the model again, and so does connecting to a
 sandbox, so a change follows. If detection fails (no `claude` on `PATH`, no answer within 15 s), Pane sends no model:
-the sandbox uses Claude Code's own default, and a notice saying why is logged. It is not a pin: a model picked inside
+the sandbox keeps the model it has (a new one uses Claude Code's own default), and a notice saying why is logged. It is not a pin: a model picked inside
 the sandbox with `/model` is kept.
 
 ### Stop, start, update and remove

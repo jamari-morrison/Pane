@@ -94,7 +94,7 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
   const paneSources: PaneSource[] = [];
   const repairs: string[] = [];
   const updates: string[] = [];
-  const claudeModels: Array<string | null> = [];
+  const claudeModels: string[] = [];
   const health = [...(script.health ?? [])];
   const bootstrap: CloudBootstrap = {
     async provision(_sandbox, options): Promise<ProvisionResult> {
@@ -123,7 +123,7 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
     async applyClaudeModel(_sandbox, model) {
       if (script.claudeModelFails) throw new Error('cloud bootstrap step "claude-model" failed: settings.json is not a JSON object');
       claudeModels.push(model);
-      return { outcome: model === null ? 'unset' : 'set', model };
+      return { outcome: 'set', model };
     },
     async waitForHealth(): Promise<DaemonHealthResult> {
       const ok = health.length > 0 ? health.shift() === true : true;
@@ -347,15 +347,18 @@ test('the sandbox follows the user\'s Claude Code default model: on create, star
   h.local.model = 'sonnet';
   assert.deepEqual((await h.cloud.syncAgentDefaults(hostname)).claudeModel, { model: 'sonnet', outcome: 'set' });
 
-  // No default of their own: the sandbox goes back to Claude Code's.
+  // Detection failed (unknown): nothing is sent, so the sandbox keeps 'sonnet' instead of being cleared.
   h.local.model = null;
-  await h.cloud.update(hostname, { debUrl: 'https://example.com/pane.deb', sha256: 'e'.repeat(64) }, h.onProgress);
-  assert.ok(h.progress.some((update) => update.step === 'update' && update.message === 'Using Claude Code\'s own default model...'));
+  const updated = await h.cloud.update(hostname, { debUrl: 'https://example.com/pane.deb', sha256: 'e'.repeat(64) }, h.onProgress);
+  assert.equal(updated.claudeModel, undefined);
+  assert.ok(h.progress.some((update) => update.step === 'update'
+    && update.message === 'Your Claude Code default model is unknown right now, so the sandbox keeps the model it has.'));
+  assert.equal((await h.cloud.syncAgentDefaults(hostname)).claudeModel, undefined);
 
   h.local.model = 'claude-opus-5-5';
   await h.cloud.stop(hostname);
   assert.deepEqual((await h.cloud.start(hostname)).claudeModel, { model: 'claude-opus-5-5', outcome: 'set' });
-  assert.deepEqual(h.boot.claudeModels, ['claude-opus-5-5', 'sonnet', null, 'claude-opus-5-5']);
+  assert.deepEqual(h.boot.claudeModels, ['claude-opus-5-5', 'sonnet', 'claude-opus-5-5'], 'an unknown default is never sent');
 
   await h.cloud.stop(hostname);
   await assert.rejects(h.cloud.syncAgentDefaults(hostname), /is stopped; it gets your default model when it starts/u);

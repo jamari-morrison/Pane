@@ -133,8 +133,9 @@ export interface CloudSandboxInfo {
   org?: BoatOrg;
   health?: { ok: boolean; version?: string };
   /**
-   * The model new Claude panels in the sandbox start with, after this call gave it the user's default
-   * (null: Claude Code's own default), and what happened; set by create, start, update and syncAgentDefaults.
+   * The model new Claude panels in the sandbox start with, after this call gave it the user's default, and what
+   * happened; set by create, start, update and syncAgentDefaults. Absent when the user's default is unknown (a failed
+   * detection): then nothing is sent and the sandbox keeps the model it had.
    */
   claudeModel?: { model: string | null; outcome: ClaudeModelOutcome };
 }
@@ -158,7 +159,7 @@ export interface CloudSandboxesOptions {
   env?: NodeJS.ProcessEnv;
   /**
    * The user's default Claude model on this machine (default: createDefaultClaudeModelSource, explicit setting else
-   * detected); null for Claude Code's own default.
+   * detected); null when it is unknown (detection failed), and then nothing is sent to the sandbox.
    */
   localClaudeModel?: () => Promise<string | null>;
 }
@@ -216,7 +217,12 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
   /** The user's default Claude model into the sandbox; new panels start with it (see applyClaudeModel). */
   async function syncClaudeModel(handle: SandboxHandle, report: (message: string) => void) {
     const model = await localClaudeModel();
-    report(model ? `Using your Claude Code default model (${model})...` : 'Using Claude Code\'s own default model...');
+    if (model === null) {
+      // Unknown is not "Claude's own default": a failed detection must not undo a model given earlier.
+      report('Your Claude Code default model is unknown right now, so the sandbox keeps the model it has.');
+      return undefined;
+    }
+    report(`Using your Claude Code default model (${model})...`);
     return bootstrap.applyClaudeModel(handle, model);
   }
 

@@ -230,7 +230,7 @@ test('CLAUDE_CODE_SANDBOXED is set only by the cloud sandbox daemon drop-in', ()
   assert.deepEqual(offenders, [], 'no other source (main, frontend, shared, the rest of runpane) mentions CLAUDE_CODE_SANDBOXED');
 });
 
-test('claude-model sets the default model, keeps a model chosen in the sandbox, and only removes its own', () => {
+test('claude-model sets the default model and keeps a model chosen in the sandbox', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
   fs.mkdirSync(path.join(home, '.claude'));
   const settingsFile = path.join(home, '.claude/settings.json');
@@ -244,17 +244,16 @@ test('claude-model sets the default model, keeps a model chosen in the sandbox, 
   assert.deepEqual(readJson(settingsFile), { skipDangerousModePermissionPrompt: true, model: 'claude-opus-5-5' });
   assert.equal(run('claude-opus-5-5').outcome, 'current');
   assert.equal(run('sonnet').outcome, 'set');
-  assert.equal(run('--clear').outcome, 'removed');
-  assert.deepEqual(readJson(settingsFile), { skipDangerousModePermissionPrompt: true });
-  assert.equal(run('--clear').outcome, 'unset');
+  assert.deepEqual(readJson(settingsFile), { skipDangerousModePermissionPrompt: true, model: 'sonnet' });
 
   // Someone picked a model inside the sandbox (/model writes settings.json): that choice stays.
   run('claude-opus-5-5');
   fs.writeFileSync(settingsFile, JSON.stringify({ skipDangerousModePermissionPrompt: true, model: 'haiku' }));
   assert.equal(run('sonnet').outcome, 'kept-sandbox-choice');
-  assert.equal(run('--clear').outcome, 'kept-sandbox-choice');
   assert.equal(readJson(settingsFile).model, 'haiku');
   assert.equal(fs.statSync(settingsFile).mode & 0o777, 0o600);
 
   assert.match(runStep('claude-model', ['opus; rm -rf ~'], new Map(), home).stdout, /"error": "claude-model: not a Claude model id"/u);
+  // There is no clear: an unknown default sends nothing at all.
+  assert.match(runStep('claude-model', ['--clear'], new Map(), home).stdout, /"error": "claude-model: not a Claude model id"/u);
 });
