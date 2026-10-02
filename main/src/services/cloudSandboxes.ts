@@ -24,7 +24,7 @@ import type {
 /** The parts of the cloud library this app calls. */
 export type CloudSandboxLibrary = Pick<
   CloudSandboxes,
-  'setup' | 'getCredentialsStatus' | 'create' | 'list' | 'stop' | 'start' | 'update' | 'remove'
+  'setup' | 'getCredentialsStatus' | 'create' | 'list' | 'stop' | 'start' | 'update' | 'remove' | 'syncAgentDefaults'
 >;
 
 /** A Pane .deb the cloud library installs on a running sandbox: https only, checked against sha256. */
@@ -58,6 +58,11 @@ interface CloudSandboxManagerOptions {
   readDaemonVersion: (profileId: string) => Promise<string | undefined>;
   /** The Pane .deb for a version, from that release's published checksums. */
   resolvePaneDeb: (version: string) => Promise<CloudPaneDeb>;
+  /**
+   * The Claude Code default model new panels in a sandbox should start with (null: Claude's own default). The
+   * library reads the same source when it applies the model, so this only decides when a sandbox needs it again.
+   */
+  readDefaultClaudeModel: () => Promise<string | null>;
 }
 
 type HostAction = Exclude<CloudSandboxAction, 'create'>;
@@ -74,6 +79,9 @@ export class CloudSandboxManager {
   private readonly operations = new Map<string, CloudSandboxOperation>();
   /** Daemon versions by hostname, read while each sandbox runs. */
   private readonly daemonVersions = new Map<string, string>();
+  /** The default Claude model each sandbox was last given, by hostname; absent means unknown. */
+  private readonly syncedClaudeModels = new Map<string, string | null>();
+  private readonly syncingClaudeModels = new Set<string>();
 
   constructor(private readonly options: CloudSandboxManagerOptions) {}
 
@@ -135,6 +143,7 @@ export class CloudSandboxManager {
     const snapshot = this.emit();
     // Versions arrive in a later snapshot so a slow or asleep daemon never holds up the list.
     for (const summary of this.listed) void this.readDaemonVersion(summary);
+    void this.syncDefaultClaudeModel();
     return snapshot;
   }
 
@@ -162,12 +171,14 @@ export class CloudSandboxManager {
     this.operations.set(id, operation);
     this.emit();
     try {
+      const claudeModel = await this.readDefaultClaudeModel();
       const summary = await library.create({ label: request.name, size: request.size }, (progress) => {
         operation.steps = applyProgress(operation.steps, progress);
         this.emit();
       });
       this.operations.delete(id);
       this.replaceListed(summary.hostname, summary);
+      this.syncedClaudeModels.set(summary.hostname, claudeModel);
       void this.readDaemonVersion(summary);
     } catch (error) {
       operation.running = false;
@@ -238,9 +249,13 @@ export class CloudSandboxManager {
     this.operations.set(id, operation);
     this.emit();
     try {
+      // start and update give the sandbox the user's default model; remember which one it got.
+      const claudeModel = action === 'start' || action === 'update' ? await this.readDefaultClaudeModel() : undefined;
       const summary = await run(library, listed.hostname);
       this.operations.delete(id);
       this.daemonVersions.delete(id);
+      if (!summary) this.syncedClaudeModels.delete(id);
+      else if (claudeModel !== undefined) this.syncedClaudeModels.set(id, claudeModel);
       this.replaceListed(id, summary);
       if (summary) void this.readDaemonVersion(summary);
     } catch (error) {
@@ -248,6 +263,43 @@ export class CloudSandboxManager {
       operation.error = getCloudErrorMessage(error, `Failed to ${action} ${listed.label}`);
     }
     return this.emit();
+  }
+
+  /**
+   * Gives running sandboxes the user's default Claude model when it differs from the one they last got. With a
+   * profile id (the desktop just connected to that host) it syncs that sandbox whatever it last got. Best effort:
+   * a failure leaves the sandbox's record unchanged, so the next refresh tries again.
+   */
+  async syncDefaultClaudeModel(target?: { profileId: string }): Promise<void> {
+    const library = await this.getLibrary();
+    if (!library) return;
+    if (target && !this.listed.some((summary) => summary.profileId === target.profileId)) await this.refresh();
+    const model = await this.readDefaultClaudeModel();
+    const due = this.listed.filter((summary) => summary.state === 'running'
+      && !this.operations.get(summary.hostname)?.running
+      && !this.syncingClaudeModels.has(summary.hostname)
+      && (target
+        ? summary.profileId === target.profileId
+        : !this.syncedClaudeModels.has(summary.hostname) || this.syncedClaudeModels.get(summary.hostname) !== model));
+    await Promise.all(due.map(async (summary) => {
+      this.syncingClaudeModels.add(summary.hostname);
+      try {
+        await library.syncAgentDefaults(summary.hostname);
+        this.syncedClaudeModels.set(summary.hostname, model);
+      } catch (error) {
+        console.warn(`[CloudSandboxes] ${summary.label} kept its Claude model:`, getCloudErrorMessage(error, 'sync failed'));
+      } finally {
+        this.syncingClaudeModels.delete(summary.hostname);
+      }
+    }));
+  }
+
+  private async readDefaultClaudeModel(): Promise<string | null> {
+    try {
+      return await this.options.readDefaultClaudeModel();
+    } catch {
+      return null;
+    }
   }
 
   private replaceListed(hostname: string, summary: CloudSandboxInfo | null): void {

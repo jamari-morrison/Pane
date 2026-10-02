@@ -40,6 +40,7 @@ function createLibrary(overrides: Partial<CloudSandboxLibrary> = {}): CloudSandb
     start: vi.fn(async () => summary()),
     update: vi.fn(async () => summary()),
     remove: vi.fn(async () => undefined),
+    syncAgentDefaults: vi.fn(async (host: string) => summary({ hostname: host })),
     ...overrides,
   };
 }
@@ -47,6 +48,7 @@ function createLibrary(overrides: Partial<CloudSandboxLibrary> = {}): CloudSandb
 function createManager(library: CloudSandboxLibrary | Error, options: {
   appVersion?: string;
   readDaemonVersion?: (profileId: string) => Promise<string | undefined>;
+  readDefaultClaudeModel?: () => Promise<string | null>;
 } = {}) {
   const snapshots: CloudSandboxesSnapshot[] = [];
   const resolvePaneDeb = vi.fn(async (version: string) => ({
@@ -59,6 +61,7 @@ function createManager(library: CloudSandboxLibrary | Error, options: {
     appVersion: options.appVersion ?? '2.4.146',
     readDaemonVersion: options.readDaemonVersion ?? (async () => '2.4.146'),
     resolvePaneDeb,
+    readDefaultClaudeModel: options.readDefaultClaudeModel ?? (async () => null),
   });
   return { manager, snapshots, resolvePaneDeb };
 }
@@ -296,6 +299,7 @@ describe('CloudSandboxManager library mapping', () => {
       appVersion,
       readDaemonVersion: async () => undefined,
       resolvePaneDeb: vi.fn(),
+      readDefaultClaudeModel: async () => null,
     });
 
     const snapshot = await manager.refresh();
@@ -312,6 +316,70 @@ describe('CloudSandboxManager library mapping', () => {
     const snapshot = await manager.refresh();
 
     expect(snapshot.sandboxes[0]).toMatchObject({ daemonVersion: '2.4.140', updateAvailable: true });
+  });
+});
+
+describe('CloudSandboxManager default Claude model', () => {
+  const beta = () => summary({ hostname: 'rp-beta', label: 'beta', profileId: 'profile-beta' });
+
+  it('gives each running sandbox the default once, and again only after the default changes', async () => {
+    let model: string | null = 'claude-opus-5-5';
+    const library = createLibrary({
+      list: vi.fn(async () => [summary(), beta(), summary({ hostname: 'rp-stopped', label: 'stopped', profileId: 'profile-stopped', state: 'stopped' })]),
+    });
+    const { manager } = createManager(library, { readDefaultClaudeModel: async () => model });
+
+    await manager.refresh();
+    await vi.waitFor(() => expect(library.syncAgentDefaults).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(library.syncAgentDefaults).mock.calls.map(([host]) => host).sort()).toEqual(['rp-alpha', 'rp-beta']);
+
+    await manager.syncDefaultClaudeModel();
+    expect(library.syncAgentDefaults).toHaveBeenCalledTimes(2);
+
+    model = 'claude-sonnet-5-5';
+    await manager.syncDefaultClaudeModel();
+    expect(library.syncAgentDefaults).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not sync again after create or start, which give the sandbox the default themselves', async () => {
+    const library = createLibrary({ list: vi.fn(async () => [summary({ state: 'stopped' })]) });
+    const { manager } = createManager(library, { readDefaultClaudeModel: async () => 'opus' });
+    await manager.refresh();
+
+    await manager.start('rp-alpha');
+    await manager.create({ name: 'beta', size: 'default' });
+    await manager.syncDefaultClaudeModel();
+
+    expect(library.syncAgentDefaults).not.toHaveBeenCalled();
+  });
+
+  it('tries a failed sync again on the next check', async () => {
+    const syncAgentDefaults = vi.fn<CloudSandboxLibrary['syncAgentDefaults']>()
+      .mockRejectedValueOnce(new Error('exec failed'))
+      .mockResolvedValue(summary());
+    const library = createLibrary({ list: vi.fn(async () => [summary()]), syncAgentDefaults });
+    const { manager } = createManager(library, { readDefaultClaudeModel: async () => 'opus' });
+    await manager.refresh();
+    await vi.waitFor(() => expect(syncAgentDefaults).toHaveBeenCalledTimes(1));
+
+    await manager.syncDefaultClaudeModel();
+    await manager.syncDefaultClaudeModel();
+
+    expect(syncAgentDefaults).toHaveBeenCalledTimes(2);
+  });
+
+  it('syncs the host the desktop connected to even when it already has the default, loading the list first', async () => {
+    const library = createLibrary({ list: vi.fn(async () => [summary(), beta()]) });
+    const { manager } = createManager(library, { readDefaultClaudeModel: async () => 'opus' });
+
+    await manager.syncDefaultClaudeModel({ profileId: 'profile-beta' });
+    await vi.waitFor(() => expect(library.syncAgentDefaults).toHaveBeenCalledTimes(2));
+    vi.mocked(library.syncAgentDefaults).mockClear();
+
+    await manager.syncDefaultClaudeModel({ profileId: 'profile-beta' });
+
+    expect(library.syncAgentDefaults).toHaveBeenCalledTimes(1);
+    expect(library.syncAgentDefaults).toHaveBeenCalledWith('rp-beta');
   });
 });
 

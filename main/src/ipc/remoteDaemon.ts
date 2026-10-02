@@ -19,6 +19,7 @@ import {
   type RemoteHostConnectionCodeResult,
   type RemoteDaemonImportResult,
   type RemotePaneConnectionProfile,
+  type RemotePaneConnectionState,
   type RemoteHostSetupRequest,
   type RemoteHostSetupResult,
   type RemoteHostSetupTerminalCommandResult,
@@ -63,6 +64,7 @@ import {
   type CloudSandboxLibrary,
 } from '../services/cloudSandboxes';
 import type { SavedRemoteHosts } from '../../../packages/runpane/src/cloud/savedHosts';
+import { readLocalClaudeModel } from '../../../packages/runpane/src/cloud/claudeDefaults';
 
 interface IpcMainHandleLike {
   handle(
@@ -85,7 +87,12 @@ interface RemoteDaemonHandlerDependencies {
   disconnectActiveRemoteHostClients: typeof disconnectActiveRemoteHostClients;
   readConfiguredTailscaleServeAccess: typeof readConfiguredTailscaleServeAccess;
   setupRemoteHost: typeof setupRemoteHost;
-  loadCloudSandboxLibrary: (savedHosts: SavedRemoteHosts) => Promise<CloudSandboxLibrary>;
+  loadCloudSandboxLibrary: (options: {
+    savedHosts: SavedRemoteHosts;
+    localClaudeModel: () => Promise<string | null>;
+  }) => Promise<CloudSandboxLibrary>;
+  /** The one source of the user's default Claude model for cloud sandboxes; swap it here to change where it comes from. */
+  readDefaultClaudeModel: () => Promise<string | null>;
   readCloudDaemonVersion: (profile: RemotePaneConnectionProfile) => Promise<string | undefined>;
   resolvePaneReleaseDeb: typeof resolvePaneReleaseDeb;
 }
@@ -95,13 +102,16 @@ const defaultRemoteDaemonHandlerDependencies: RemoteDaemonHandlerDependencies = 
   readConfiguredTailscaleServeAccess,
   setupRemoteHost,
   // Loaded on first use so the rest of the app never pays for the cloud modules.
-  loadCloudSandboxLibrary: async (savedHosts) => {
+  loadCloudSandboxLibrary: async (options) => {
     const { createCloudSandboxes } = await import('../../../packages/runpane/src/cloud/api');
-    return createCloudSandboxes({ savedHosts });
+    return createCloudSandboxes(options);
   },
+  readDefaultClaudeModel: () => readLocalClaudeModel(),
   readCloudDaemonVersion: readRemoteDaemonVersion,
   resolvePaneReleaseDeb,
 };
+
+let cloudConnectionListener: ((state: RemotePaneConnectionState) => void) | null = null;
 
 let remoteHostStateForwarder:
   | ((state: RemoteDaemonHostRuntimeState) => void)
@@ -709,7 +719,11 @@ export function registerRemoteDaemonHandlers(
   };
 
   const cloudSandboxes = new CloudSandboxManager({
-    loadLibrary: () => dependencies.loadCloudSandboxLibrary(cloudSavedHosts),
+    loadLibrary: () => dependencies.loadCloudSandboxLibrary({
+      savedHosts: cloudSavedHosts,
+      localClaudeModel: dependencies.readDefaultClaudeModel,
+    }),
+    readDefaultClaudeModel: dependencies.readDefaultClaudeModel,
     appVersion: app?.getVersion(),
     readDaemonVersion: async (profileId) => {
       const profile = getRemoteDaemonConfig(configManager.getConfig().remoteDaemon).client.profiles
@@ -724,6 +738,20 @@ export function registerRemoteDaemonHandlers(
       }
     },
   });
+
+  // Connecting to a cloud sandbox (switcher, settings, or a reconnect) gives it the user's current default model.
+  let connectedProfileId: string | null = null;
+  if (cloudConnectionListener) remotePaneClientController.off('state-changed', cloudConnectionListener);
+  cloudConnectionListener = (state) => {
+    const profileId = state.mode === 'remote' && state.status === 'connected' ? state.activeProfileId : null;
+    if (profileId === connectedProfileId) return;
+    connectedProfileId = profileId;
+    if (!profileId) return;
+    const profile = getRemoteDaemonConfig(configManager.getConfig().remoteDaemon).client.profiles
+      .find((candidate) => candidate.id === profileId);
+    if (profile?.cloud) void cloudSandboxes.syncDefaultClaudeModel({ profileId });
+  };
+  remotePaneClientController.on('state-changed', cloudConnectionListener);
 
   /** A stopped or removed sandbox can't serve the runtime, so leave it for the local one first. */
   async function leaveCloudSandboxIfActive(id: string): Promise<void> {

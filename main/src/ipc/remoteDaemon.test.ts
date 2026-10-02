@@ -43,6 +43,7 @@ function registerTestRemoteDaemonHandlers(
       setupRemoteHost,
       loadCloudSandboxLibrary: () => Promise.reject(new CloudSandboxesUnavailableError()),
       readCloudDaemonVersion: async () => undefined,
+      readDefaultClaudeModel: async () => null,
       resolvePaneReleaseDeb: async () => { throw new Error('no releases in tests'); },
       ...cloudDependencies,
     },
@@ -1278,12 +1279,13 @@ describe('cloud sandbox IPC', () => {
       remove: vi.fn(async () => {
         await hostsRef.current?.remove('session-alpha');
       }),
+      syncAgentDefaults: vi.fn(async () => alpha),
       ...overrides,
     };
     return {
       library,
-      loadCloudSandboxLibrary: async (hosts: SavedRemoteHosts) => {
-        hostsRef.current = hosts;
+      loadCloudSandboxLibrary: async ({ savedHosts }: { savedHosts: SavedRemoteHosts }) => {
+        hostsRef.current = savedHosts;
         return library;
       },
     };
@@ -1445,5 +1447,52 @@ describe('cloud sandbox IPC', () => {
     await ipcMain.handlers.get('remote-daemon:update-cloud-sandbox')?.({}, 'rp-alpha');
 
     expect(cloud.library.update).toHaveBeenCalledWith('rp-alpha', { debUrl: 'https://example.test/2.4.146.deb', sha256: 'f'.repeat(64) });
+  });
+
+  it('gives a cloud sandbox the default model when the desktop connects to it, once per connect', async () => {
+    const ipcMain = createIpcMainStub();
+    const initialConfig = createDefaultRemoteDaemonConfig();
+    initialConfig.client.profiles = [cloudProfile, { ...cloudProfile, id: 'plain', cloud: undefined }];
+    const cloud = createCloudLibrary({});
+    const readDefaultClaudeModel = vi.fn(async () => 'claude-opus-5-5');
+    let libraryModelSource: (() => Promise<string | null>) | undefined;
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager: createConfigManagerStub(initialConfig) }, {
+      loadCloudSandboxLibrary: async (options) => {
+        libraryModelSource = options.localClaudeModel;
+        return cloud.library;
+      },
+      readDefaultClaudeModel,
+    });
+    const connected = { mode: 'remote' as const, status: 'connected' as const, activeProfileLabel: 'alpha', activeBaseUrl: cloudProfile.baseUrl, lastError: null };
+    // Loading the list gives the unsynced sandbox the default once; the connects below are what is measured.
+    await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
+    await vi.waitFor(() => expect(cloud.library.syncAgentDefaults).toHaveBeenCalledTimes(1));
+    vi.mocked(cloud.library.syncAgentDefaults).mockClear();
+
+    const listCalls = vi.mocked(cloud.library.list).mock.calls.length;
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+    // A host that is not a cloud sandbox never reaches the cloud library.
+    remotePaneClientController.emit('state-changed', { ...connected, activeProfileId: 'plain' });
+    await settle();
+    expect(cloud.library.list).toHaveBeenCalledTimes(listCalls);
+    expect(cloud.library.syncAgentDefaults).not.toHaveBeenCalled();
+
+    remotePaneClientController.emit('state-changed', { ...connected, activeProfileId: 'profile-alpha' });
+    await vi.waitFor(() => expect(cloud.library.syncAgentDefaults).toHaveBeenCalledTimes(1));
+    expect(cloud.library.syncAgentDefaults).toHaveBeenCalledWith('rp-alpha');
+    await settle();
+
+    // Later state pushes for the same connection (heartbeats) are not a new connect.
+    remotePaneClientController.emit('state-changed', { ...connected, activeProfileId: 'profile-alpha', lastSeenAt: 'later' });
+    await settle();
+    expect(cloud.library.syncAgentDefaults).toHaveBeenCalledTimes(1);
+
+    // Leaving and connecting again counts as a new connect.
+    remotePaneClientController.emit('state-changed', { ...connected, status: 'reconnecting' as const, activeProfileId: 'profile-alpha' });
+    remotePaneClientController.emit('state-changed', { ...connected, activeProfileId: 'profile-alpha' });
+    await vi.waitFor(() => expect(cloud.library.syncAgentDefaults).toHaveBeenCalledTimes(2));
+    // The library reads the same source the desktop checks, so a second source plugs in in one place.
+    expect(libraryModelSource).toBe(readDefaultClaudeModel);
   });
 });
