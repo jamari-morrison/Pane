@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { addSecret, loadSecret, redact, scanForSecrets, secretNames, secretValue } from './secrets.mjs';
-import { boatSandbox, health, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
+import { boatSandbox, health, sandboxAgentState, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
 
 const env = process.env;
 const required = (name) => {
@@ -646,6 +646,11 @@ async function phaseStop() {
     else finding('the switcher still said Connected 60 s after the host died');
     await shot('host-down');
   } else {
+    // The desktop leaves the sandbox first, so nothing it does can be what brings the agent back after Start.
+    if (!relay) state.agentBefore = await sandboxAgentState(state.cloud.sandboxId, boatOrg);
+    await openSwitcher();
+    await ui.localItem().click();
+    await page.waitForTimeout(1500);
     await openCloud();
     await ui.rowAction('Stop', state.label).click();
     const stopped = await until(async () => rowBadge(await rowText(state.label), 'Stopped'), 300_000, 2000);
@@ -670,21 +675,27 @@ async function phaseStart() {
     timing('start-to-health', startedAt);
   } else {
     countStart('start');
-    // Like a user who wants to work there again: pick the stopped sandbox in the switcher.
-    await openSwitcher();
-    const fromSwitcher = ui.switcherStart(state.label);
-    check('started-from-switcher', await visible(fromSwitcher, 3000), 'switcher entry "Stopped · Select to start"');
-    if (await visible(fromSwitcher, 500)) await fromSwitcher.click();
-    else {
-      await openCloud();
-      await ui.rowAction('Start', state.label).click();
-    }
-    const backConnected = await waitConnected(state.label, 600_000);
-    timing('start-to-connected-from-switcher', startedAt);
+    // Start from the row while the desktop is on This computer: the agent must come back on its own (ruling 3,
+    // G2a), before the desktop attaches to the sandbox or opens the panel's tab.
     await openCloud();
-    const running = rowBadge(await rowText(state.label), 'Running');
-    check('row-running-again', backConnected && running, `connected ${backConnected}; row: ${await rowText(state.label)}`);
+    await ui.rowAction('Start', state.label).click();
+    const running = await until(async () => rowBadge(await rowText(state.label), 'Running'), 600_000, 2000);
+    timing('start-to-running', startedAt);
+    check('row-running-again', Boolean(running), `row: ${await rowText(state.label)}`);
+    await shot('row-running-again');
     await closeSettings();
+    const attachedEarly = await visible(ui.connectedChip(state.label), 500);
+    if (!relay) {
+      const after = await until(async () => {
+        const agents = await sandboxAgentState(state.cloud.sandboxId, boatOrg);
+        return agents.claudeResume > 0 && /Resumed [1-9]/.test(agents.resumedLog) ? agents : undefined;
+      }, 180_000, 5000) ?? await sandboxAgentState(state.cloud.sandboxId, boatOrg);
+      timing('start-to-agent-resumed-on-sandbox', startedAt);
+      const grown = Object.entries(after.transcripts).filter(([name, size]) => size > (state.agentBefore?.transcripts?.[name] ?? Infinity)).map(([name]) => name);
+      check('agent-resumed-before-attach', !attachedEarly && after.claudeResume > 0 && /Resumed [1-9]/.test(after.resumedLog),
+        `desktop attached: ${attachedEarly}; on the sandbox: ${after.claudeResume} claude --resume of ${after.claude} claude processes, log "${after.resumedLog}"; transcripts before ${JSON.stringify(state.agentBefore?.transcripts)}, after ${JSON.stringify(after.transcripts)}; grown: ${JSON.stringify(grown)}`);
+      results.agentResume = { before: state.agentBefore, after, grown };
+    }
     const host = savedHosts(paneDir).find((entry) => entry.id === state.profileId);
     check('same-tailnet-name', host?.cloud?.hostname === state.cloud.hostname && host?.baseUrl === state.baseUrl,
       `before ${state.cloud.hostname} ${state.baseUrl}; after ${host?.cloud?.hostname} ${host?.baseUrl}`);
@@ -692,8 +703,9 @@ async function phaseStart() {
     if (!relay) check('same-tailnet-device', devices.length === 1 && devices[0].id === state.tailnetDevice?.id, JSON.stringify(devices));
   }
   const connectedAt = Date.now();
-  let connected = await waitConnected(state.label, 90_000);
-  if (!connected) {
+  // Live: the desktop sat on This computer through Stop/Start, so the user now picks the sandbox again.
+  let connected = mode === 'fake' ? await waitConnected(state.label, 90_000) : await connectTo(state.label, 90_000);
+  if (!connected && mode === 'fake') {
     finding('after Start the desktop did not reconnect by itself within 90 s; picked the host again in the switcher');
     connected = await connectTo(state.label, 90_000);
   }

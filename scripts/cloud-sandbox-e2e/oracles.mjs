@@ -69,3 +69,35 @@ export async function health(baseUrl) {
     return false;
   }
 }
+
+/** Runs a shell command on the sandbox through boat (as the library does); { exitCode, stdout }. Callers print
+ *  only what they extract from stdout. */
+export async function boatExec(sandboxId, org, command, timeoutSeconds = 60) {
+  const response = await fetch(`${BOAT_API}/sandboxes/${encodeURIComponent(sandboxId)}/commands`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${secretValue('boatApiKey')}`, 'X-Boat-Org': org, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command, timeoutSeconds }),
+    signal: AbortSignal.timeout((timeoutSeconds + 30) * 1000),
+  });
+  if (!response.ok) throw new Error(`boat command: HTTP ${response.status}`);
+  const body = await response.json();
+  const result = body.result ?? body;
+  return { exitCode: result.exitCode ?? null, stdout: result.stdout ?? '' };
+}
+
+// What the sandbox's agents are doing, counted on the machine itself (no desktop involved): running Claude
+// processes and how many were started with --resume, the daemon's [PanelResume] lines, and each Claude
+// transcript's size. Prints no command lines or environment.
+const AGENT_STATE_SCRIPT = [
+  'echo "claude=$(pgrep -fc "(^|/)claude( |$)" || true)"',
+  'echo "claude_resume=$(pgrep -fa "(^|/)claude( |$)" | grep -c -- "--resume" || true)"',
+  'echo "resumed_log=$( (journalctl --no-pager -q -o cat 2>/dev/null; cat /home/user/.pane/logs/*.log 2>/dev/null) | grep -o "\\[PanelResume\\] Resumed [0-9]* of [0-9]*" | tail -1)"',
+  'find /home/user/.claude/projects -name "*.jsonl" -printf "transcript %f %s\\n" 2>/dev/null',
+].join('; ');
+
+export async function sandboxAgentState(sandboxId, org) {
+  const { stdout } = await boatExec(sandboxId, org, AGENT_STATE_SCRIPT);
+  const field = (name) => stdout.match(new RegExp(`^${name}=(.*)$`, 'm'))?.[1]?.trim() ?? '';
+  const transcripts = Object.fromEntries([...stdout.matchAll(/^transcript (\S+) (\d+)$/gm)].map((match) => [match[1], Number(match[2])]));
+  return { claude: Number(field('claude') || 0), claudeResume: Number(field('claude_resume') || 0), resumedLog: field('resumed_log'), transcripts };
+}
