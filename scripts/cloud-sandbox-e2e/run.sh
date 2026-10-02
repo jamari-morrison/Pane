@@ -18,6 +18,10 @@ cache="${CACHE_DIR:-$HOME/.cache/cs-e2e}"
 work="${2:-$cache/runs/$tag-${MODE:-fake}-$(date -u +%Y%m%dT%H%M%SZ)}"
 build="$cache/builds/$tag"
 
+# The release's current sums decide; a cached build whose .deb no longer matches them is fetched again.
+mkdir -p "$build/download"
+gh release download "$tag" --repo "$repo" --dir "$build" --pattern SHA256SUMS.txt --clobber
+if ! cmp -s "$build/SHA256SUMS.txt" "$build/download/SHA256SUMS.txt"; then rm -rf "$build/opt" "$build/usr" "$build/download"/*; fi
 if [ ! -x "$build/opt/Pane/pane" ]; then
   mkdir -p "$build/download"
   gh release download "$tag" --repo "$repo" --dir "$build/download" --pattern '*.deb' --pattern SHA256SUMS.txt --clobber

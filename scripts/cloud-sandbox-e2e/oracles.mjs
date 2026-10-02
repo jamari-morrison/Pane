@@ -148,3 +148,15 @@ export async function hostPaneSet(baseUrl, token) {
   ];
   return rows.filter((pane, index) => rows.findIndex((other) => other.id === pane.id) === index).sort((a, b) => a.id.localeCompare(b.id));
 }
+
+/** The wallet's sandboxes: [{ id, name, state }]. */
+export async function boatSandboxes(org) {
+  const response = await fetch(`${BOAT_API}/sandboxes`, {
+    headers: { Authorization: `Bearer ${secretValue('boatApiKey')}`, 'X-Boat-Org': org },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!response.ok) throw new Error(`boat list: HTTP ${response.status}`);
+  const body = await response.json();
+  const items = Array.isArray(body) ? body : body.sandboxes ?? body.data ?? [];
+  return items.map((sandbox) => ({ id: sandbox.id, name: sandbox.name, state: sandbox.state }));
+}
