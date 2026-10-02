@@ -109,6 +109,18 @@ if (mode === 'live') {
 if (relay) {
   // Nothing secret comes from files here; the saved host tokens are registered so they are redacted.
   for (const host of savedHosts(paneDir)) addSecret(`savedHostToken:${host.label}`, savedHostToken(paneDir, host.id));
+  // The credentials Red saved in the app: every long string in the library's credentials file, kept in memory
+  // only so logs are redacted and the evidence is searched for them.
+  const credentialsFile = path.join(env.RUNPANE_CLOUD_DIR ?? path.join(env.XDG_CONFIG_HOME ?? path.join(realHome, '.config'), 'runpane-cloud'), 'credentials.json');
+  const register = (value, keyPath) => {
+    if (typeof value === 'string' && value.length >= 16) addSecret(`cloudCredential:${keyPath}`, value);
+    else if (value && typeof value === 'object') for (const [key, child] of Object.entries(value)) register(child, `${keyPath}.${key}`);
+  };
+  try {
+    register(JSON.parse(fs.readFileSync(credentialsFile, 'utf8')), 'credentials');
+  } catch {
+    // No saved credentials yet: the credentials phase reports it.
+  }
 } else {
   // claude-slot names the secrets file of the Claude token the loop's agents currently use.
   const claudeSlot = fs.readFileSync(path.join(secretsDir, 'claude-slot'), 'utf8').trim();
