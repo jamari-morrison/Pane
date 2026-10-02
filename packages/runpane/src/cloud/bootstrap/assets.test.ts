@@ -197,3 +197,35 @@ test('install-pane on an already provisioned sandbox still lays the daemon drop-
   const dropIns = path.join(home, '.config/systemd/user/pane-remote-daemon.service.d');
   assert.deepEqual(fs.readdirSync(dropIns).sort(), ['claude-sandboxed.conf', 'resume-agents.conf']);
 });
+
+/** The repository root: the nearest folder above this file with pnpm-workspace.yaml. */
+function repoRoot(): string {
+  let dir = __dirname;
+  while (!fs.existsSync(path.join(dir, 'pnpm-workspace.yaml'))) {
+    const parent = path.dirname(dir);
+    assert.notEqual(parent, dir, 'pnpm-workspace.yaml not found above the test');
+    dir = parent;
+  }
+  return dir;
+}
+
+// CLAUDE_CODE_SANDBOXED turns off Claude Code's folder-trust check. Only a disposable cloud sandbox may set it, and
+// only for its own daemon: never Local Pane, a manually set up remote host, or any other code path.
+test('CLAUDE_CODE_SANDBOXED is set only by the cloud sandbox daemon drop-in', () => {
+  const script = cloudBootstrapAssets['rp-bootstrap.sh'];
+  const setters = script.split('\n').filter((line) => line.includes('CLAUDE_CODE_SANDBOXED') && !line.trimStart().startsWith('#'));
+  assert.deepEqual(setters, [`  printf '[Service]\\nEnvironment=CLAUDE_CODE_SANDBOXED=1\\n' >"$dir/claude-sandboxed.conf"`]);
+  assert.match(script, /install_agent_dropins\(\) \{\n {2}local dir="\$HOME\/\.config\/systemd\/user\/pane-remote-daemon\.service\.d"/u);
+
+  const root = repoRoot();
+  const allowed = new Set([
+    'packages/runpane/src/cloud/bootstrap/assets/rp-bootstrap.sh',
+    'packages/runpane/src/cloud/bootstrap/generated/assets.ts',
+    'packages/runpane/src/cloud/bootstrap/assets.test.ts',
+    'docs/SELF_HOSTED_REMOTE_DAEMON.md',
+  ]);
+  const listed = childProcess.spawnSync('git', ['grep', '-l', 'CLAUDE_CODE_SANDBOXED'], { cwd: root, encoding: 'utf8' });
+  assert.equal(listed.status, 0, listed.stderr);
+  const offenders = listed.stdout.split('\n').filter((file) => file && !allowed.has(file));
+  assert.deepEqual(offenders, [], 'no other source (main, frontend, shared, the rest of runpane) mentions CLAUDE_CODE_SANDBOXED');
+});

@@ -282,6 +282,10 @@ instead, at `http://<host>.<tailnet>.ts.net:42137`. WireGuard still encrypts tha
 
 If any step fails, `new` removes the sandbox and its tailnet device before it reports the error.
 
+The sandbox tells Claude Code it is sandboxed (`CLAUDE_CODE_SANDBOXED=1`, set only for the sandbox's Pane daemon),
+so Claude Code skips its folder-trust prompt there, also for repositories you add later. This computer and remote
+hosts you set up yourself are not affected.
+
 ### Stop, start, update and remove
 
 - **Stop** syncs the disk, then boat snapshots the sandbox and powers it off. Billing stops; the disk and the
