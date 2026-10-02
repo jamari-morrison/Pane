@@ -188,8 +188,9 @@ const fakeDir = path.join(fakeHome, '.pane');
 const fakePort = Number(env.FAKE_PORT ?? 42199);
 const fakeBaseUrl = `http://127.0.0.1:${fakePort}`;
 const fakeEnv = () => cleanEnv({ HOME: fakeHome, XDG_CONFIG_HOME: path.join(fakeHome, '.config'), XDG_DATA_HOME: path.join(fakeHome, '.local/share'), XDG_CACHE_HOME: path.join(fakeHome, '.cache'), DISPLAY: '', CLAUDE_CODE_OAUTH_TOKEN: secretValue('claudeToken'),
-  // What the sandbox's systemd drop-in sets (cs-daemon-resume): agent panels resume when the daemon starts.
-  PANE_RESUME_AGENTS_ON_START: '1' });
+  // What the sandbox daemon's systemd drop-ins set (rp-bootstrap.sh install_agent_dropins): agent panels resume
+  // when the daemon starts, and Claude Code treats every folder of the disposable host as trusted.
+  PANE_RESUME_AGENTS_ON_START: '1', CLAUDE_CODE_SANDBOXED: '1' });
 
 function fakeSetup() {
   fs.mkdirSync(fakeDir, { recursive: true, mode: 0o700 });
