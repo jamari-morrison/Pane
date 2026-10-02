@@ -4,6 +4,7 @@ import type { CloudProgressListener, CloudSandboxInfo } from '../../../packages/
 import {
   CloudSandboxManager,
   CloudSandboxesUnavailableError,
+  comparePaneVersions,
   getCloudErrorMessage,
   resolvePaneReleaseDeb,
   type CloudSandboxLibrary,
@@ -280,6 +281,28 @@ describe('CloudSandboxManager library mapping', () => {
     expect(snapshot.sandboxes[0]).toMatchObject({ state: 'error', error: 'boat.dev no longer has this sandbox.' });
   });
 
+  it.each([
+    ['a prerelease .deb matching the prerelease app', '2.4.147~rc.1', '2.4.147-rc.1', false],
+    ['the same release', '2.4.147', '2.4.147', false],
+    ['an older daemon', '2.4.140', '2.4.147', true],
+    ['a newer daemon', '2.4.150', '2.4.147', true],
+    ['an older prerelease of the app\'s release', '2.4.147~rc.1', '2.4.147', true],
+  ])('offers Update Pane by version, not by text: %s', async (_case, daemonVersion, appVersion, expected) => {
+    const library = createLibrary({ list: vi.fn(async () => [summary({ daemonVersion })]) });
+    const snapshots: CloudSandboxesSnapshot[] = [];
+    const manager = new CloudSandboxManager({
+      loadLibrary: async () => library,
+      onChange: (snapshot) => snapshots.push(snapshot),
+      appVersion,
+      readDaemonVersion: async () => undefined,
+      resolvePaneDeb: vi.fn(),
+    });
+
+    const snapshot = await manager.refresh();
+
+    expect(snapshot.sandboxes[0]).toMatchObject({ daemonVersion, updateAvailable: expected });
+  });
+
   it('falls back to the version the library installed when the daemon cannot be asked', async () => {
     const { manager } = createManager(
       createLibrary({ list: vi.fn(async () => [summary({ daemonVersion: '2.4.140' })]) }),
@@ -289,6 +312,37 @@ describe('CloudSandboxManager library mapping', () => {
     const snapshot = await manager.refresh();
 
     expect(snapshot.sandboxes[0]).toMatchObject({ daemonVersion: '2.4.140', updateAvailable: true });
+  });
+});
+
+describe('comparePaneVersions', () => {
+  it('orders releases by number', () => {
+    expect(comparePaneVersions('2.4.147', '2.4.147')).toBe(0);
+    expect(comparePaneVersions('2.4.146', '2.4.147')).toBe(-1);
+    expect(comparePaneVersions('2.10.0', '2.9.9')).toBe(1);
+  });
+
+  it('treats the .deb\'s ~ prerelease and the app\'s - prerelease as the same version', () => {
+    expect(comparePaneVersions('2.4.147~rc.1', '2.4.147-rc.1')).toBe(0);
+    expect(comparePaneVersions('2.4.147~nightly.20261001', '2.4.147-nightly.20261001')).toBe(0);
+  });
+
+  it('ignores a leading v, a Debian epoch and build metadata', () => {
+    expect(comparePaneVersions('v2.4.147', '2.4.147')).toBe(0);
+    expect(comparePaneVersions('1:2.4.147~rc.1', '2.4.147-rc.1+g9fd43ee6')).toBe(0);
+  });
+
+  it('ranks a prerelease below its release and orders prereleases by semver', () => {
+    expect(comparePaneVersions('2.4.147~rc.1', '2.4.147')).toBe(-1);
+    expect(comparePaneVersions('2.4.147', '2.4.147-rc.1')).toBe(1);
+    expect(comparePaneVersions('2.4.147-rc.2', '2.4.147~rc.10')).toBe(-1);
+    expect(comparePaneVersions('2.4.147-rc', '2.4.147-rc.1')).toBe(-1);
+    expect(comparePaneVersions('2.4.147-1', '2.4.147-alpha')).toBe(-1);
+  });
+
+  it('compares unparseable versions as text', () => {
+    expect(comparePaneVersions('dev', 'dev')).toBe(0);
+    expect(comparePaneVersions('dev', '2.4.147')).not.toBe(0);
   });
 });
 

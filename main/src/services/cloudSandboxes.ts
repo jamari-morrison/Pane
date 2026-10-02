@@ -106,7 +106,7 @@ export class CloudSandboxManager {
         startedAt: summary.state === 'running' ? summary.startedAt : undefined,
         daemonVersion,
         updateAvailable: Boolean(this.options.appVersion) && daemonVersion !== undefined
-          && daemonVersion !== this.options.appVersion,
+          && comparePaneVersions(daemonVersion, this.options.appVersion ?? '') !== 0,
         pending: operation?.running ? getPendingAction(operation.action) : undefined,
         error: operation?.error ?? (summary.state === 'gone' ? 'boat.dev no longer has this sandbox.' : undefined),
         failedAction: operation?.error ? operation.action : undefined,
@@ -341,6 +341,55 @@ const TOKEN_PATTERN = /\b(?:tskey-[\w-]+|sk-ant-[\w-]+|[A-Za-z0-9_]{32,})\b/g;
 export function getCloudErrorMessage(cause: unknown, fallback: string): string {
   const message = cause instanceof Error && cause.message ? cause.message : fallback;
   return message.replace(TOKEN_PATTERN, '[redacted]');
+}
+
+interface PaneVersion {
+  core: number[];
+  prerelease: string[];
+}
+
+/**
+ * A Pane version as semver. The .deb's version (dpkg) writes a prerelease with Debian's `~`, the app with `-`;
+ * a leading `v`, a Debian epoch (`1:`) and build metadata (`+…`) are not part of the version.
+ */
+function parsePaneVersion(version: string): PaneVersion | null {
+  const normalized = version.trim().replace(/^v/i, '').replace(/^\d+:/, '').split('+')[0].replace('~', '-');
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(normalized);
+  if (!match) return null;
+  return {
+    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4] ? match[4].split('.') : [],
+  };
+}
+
+function compareIdentifiers(left: string, right: string): number {
+  const leftNumeric = /^\d+$/.test(left);
+  const rightNumeric = /^\d+$/.test(right);
+  if (leftNumeric && rightNumeric) return Math.sign(Number(left) - Number(right));
+  if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * Semver precedence of two Pane versions (-1, 0 or 1), whichever separator each uses. Versions that don't
+ * parse compare as their trimmed text, so they only match themselves.
+ */
+export function comparePaneVersions(left: string, right: string): number {
+  const a = parsePaneVersion(left);
+  const b = parsePaneVersion(right);
+  if (!a || !b) return left.trim() === right.trim() ? 0 : left.trim() < right.trim() ? -1 : 1;
+  for (let index = 0; index < 3; index += 1) {
+    if (a.core[index] !== b.core[index]) return Math.sign(a.core[index] - b.core[index]);
+  }
+  // A release ranks above its prereleases.
+  if (a.prerelease.length === 0 || b.prerelease.length === 0) {
+    return Math.sign(b.prerelease.length - a.prerelease.length);
+  }
+  for (let index = 0; index < Math.min(a.prerelease.length, b.prerelease.length); index += 1) {
+    const order = compareIdentifiers(a.prerelease[index], b.prerelease[index]);
+    if (order !== 0) return order;
+  }
+  return Math.sign(a.prerelease.length - b.prerelease.length);
 }
 
 const RELEASE_BASE_URL = 'https://github.com/greenfield-inc/Pane/releases/download';
