@@ -293,24 +293,23 @@ async function resumeTrace() {
 // First-run dialogs a new user meets: the updater (an e2e build's version sorts before the release it is
 // based on), onboarding, the welcome card. Dismissed the way a user would.
 async function dismissFirstRun() {
-  for (let round = 0; round < 6; round++) {
+  // Topmost first: onboarding ("Get Started") can open over the updater dialog.
+  const steps = [
+    ['Get Started → Skip', () => page.getByRole('button', { name: 'Skip', exact: true })],
+    ['Welcome → Close modal', () => page.getByRole('dialog', { name: 'Welcome to Pane' }).getByRole('button', { name: 'Close modal' })],
+    ['Software Update → Close', () => page.getByRole('dialog', { name: 'Software Update' }).getByRole('button', { name: 'Close', exact: true })],
+  ];
+  for (let round = 0; round < 8; round++) {
     await page.waitForTimeout(700);
-    const update = page.getByRole('dialog', { name: 'Software Update' });
-    if (await update.isVisible().catch(() => false)) {
-      await update.getByRole('button', { name: 'Close', exact: true }).click();
-      continue;
+    let dismissed = false;
+    for (const [, target] of steps) {
+      const button = target();
+      if (await button.isVisible().catch(() => false) && await button.click({ timeout: 3000 }).then(() => true, () => false)) {
+        dismissed = true;
+        break;
+      }
     }
-    const skip = page.getByRole('button', { name: 'Skip', exact: true });
-    if (await skip.isVisible().catch(() => false)) {
-      await skip.click();
-      continue;
-    }
-    const welcome = page.getByRole('dialog', { name: 'Welcome to Pane' });
-    if (await welcome.isVisible().catch(() => false)) {
-      await welcome.getByRole('button', { name: 'Close modal' }).click();
-      continue;
-    }
-    return;
+    if (!dismissed) return;
   }
 }
 
