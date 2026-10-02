@@ -40,6 +40,7 @@ export interface PanelResumeDeps {
   updateCustomState(panel: ToolPanel, customState: TerminalPanelState): Promise<void>;
   isRunning(panelId: string): boolean;
   startTerminal(panel: ToolPanel, cwd: string): Promise<void>;
+  isDirectory(directoryPath: string): boolean;
   /** True or false when Pane can read Claude's transcripts; undefined when it cannot tell. */
   claudeTranscriptExists(sessionId: string): boolean | undefined;
   /**
@@ -138,15 +139,28 @@ export class PanelResume {
       if (!panel) throw new Error(`Panel ${panelId} not found`);
       await this.stopStrayAgent(panel);
       await this.forgetMissingClaudeConversation(panel);
-      await this.deps.startTerminal(this.deps.getPanel(panelId) ?? panel, session.worktreePath);
+      const current = this.deps.getPanel(panelId) ?? panel;
+      const cwd = this.launchDirectory(current, session);
+      await this.deps.startTerminal(current, cwd);
       if (!this.deps.isRunning(panelId)) throw new Error('the terminal did not start');
-      this.deps.log(`[PanelResume] Started panel ${panelId} in ${session.worktreePath}`);
+      this.deps.log(`[PanelResume] Started panel ${panelId} in ${cwd}`);
       return { panelId, paneId: session.id, state: 'running' };
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
       this.deps.log(`[PanelResume] Could not start panel ${panelId}`, failure);
       return { panelId, paneId: session.id, state: 'failed', error: failure.message };
     }
+  }
+
+  /**
+   * The folder the panel's terminal ran in (recorded when it started). An agent
+   * finds its conversation by that folder (Claude keeps transcripts per folder),
+   * so resuming elsewhere starts an empty one. Falls back to the Pane's worktree
+   * when nothing was recorded or the folder is gone.
+   */
+  private launchDirectory(panel: ToolPanel, session: PanelResumeSession): string {
+    const recorded = terminalState(panel).cwd;
+    return recorded && this.deps.isDirectory(recorded) ? recorded : session.worktreePath;
   }
 
   /**
