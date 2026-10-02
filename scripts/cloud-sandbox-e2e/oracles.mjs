@@ -131,3 +131,20 @@ export async function panesWithClaude(baseUrl, token) {
     };
   }));
 }
+
+/** Every Pane the host knows: the project listing (sessions:get-all-with-projects), the archived ones and each
+ *  project's main-repo Pane: [{ id, name, isMainRepo, archived }], sorted by id. */
+export async function hostPaneSet(baseUrl, token) {
+  const active = await daemonInvoke(baseUrl, token, 'sessions:get-all-with-projects');
+  const archived = await daemonInvoke(baseUrl, token, 'sessions:get-archived-with-projects').catch(() => []);
+  const row = (session, isArchived) => ({ id: session.id, name: session.name, isMainRepo: Boolean(session.isMainRepo), archived: Boolean(session.archived ?? isArchived) });
+  // The project listing leaves main-repo Panes out; the app gets each project's through
+  // sessions:get-or-create-main-repo, which returns the persisted one (a new id would mean it was lost).
+  const mainRepo = await Promise.all((active ?? []).map((project) => daemonInvoke(baseUrl, token, 'sessions:get-or-create-main-repo', project.id).catch(() => undefined)));
+  const rows = [
+    ...(active ?? []).flatMap((project) => (project.sessions ?? []).map((session) => row(session, false))),
+    ...(archived ?? []).flatMap((project) => (project.sessions ?? []).map((session) => row(session, true))),
+    ...mainRepo.filter(Boolean).map((session) => row({ ...session, isMainRepo: true }, false)),
+  ];
+  return rows.filter((pane, index) => rows.findIndex((other) => other.id === pane.id) === index).sort((a, b) => a.id.localeCompare(b.id));
+}

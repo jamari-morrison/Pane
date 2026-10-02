@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { addSecret, loadSecret, redact, scanForSecrets, secretNames, secretValue } from './secrets.mjs';
-import { boatSandbox, health, panesWithClaude, sandboxAgentState, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
+import { boatSandbox, health, hostPaneSet, panesWithClaude, sandboxAgentState, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
 
 const env = process.env;
 const required = (name) => {
@@ -429,6 +429,24 @@ const tail = (lines, count) => nonEmpty(lines).slice(-count).join('\n');
 const lastLine = (lines) => nonEmpty(lines).at(-1) ?? '';
 
 // The host's Panes and Claude panels by id, through its own API with the saved host token (memory only).
+// Size of the Claude panel's transcript (<panelId>.jsonl) on the host: boat exec on a sandbox, the files on
+// the fake host. Undefined where it can't be read (SOBECK).
+async function transcriptSize() {
+  const name = `${state.claudePanelId}.jsonl`;
+  if (mode === 'fake') {
+    const found = spawnSync('find', [path.join(fakeHome, '.claude/projects'), '-name', name, '-printf', '%s\n'], { encoding: 'utf8' }).stdout.trim();
+    return found ? Number(found.split('\n')[0]) : undefined;
+  }
+  if (relay) return undefined;
+  return (await sandboxAgentState(state.cloud.sandboxId, boatOrg)).transcripts[name];
+}
+
+async function hostPaneSetNow() {
+  const host = savedHosts(paneDir).find((entry) => entry.label === state.label);
+  if (!host) throw new Error(`no saved host "${state.label}"`);
+  return hostPaneSet(host.baseUrl, savedHostToken(paneDir, host.id));
+}
+
 async function hostPanes() {
   const host = savedHosts(paneDir).find((entry) => entry.label === state.label);
   if (!host) throw new Error(`no saved host "${state.label}"`);
@@ -628,7 +646,16 @@ async function phaseAgent() {
   const startedAt = Date.now();
   await ui.newPaneIn(env.REPO).first().click();
   const dialog = page.getByRole('dialog', { name: /^New Pane/ });
-  await dialog.getByPlaceholder('Enter a name for your pane').fill(state.paneName);
+  // The dialog auto-fills the name from the branch once branches load; a fill before that ends up prefixed
+  // ("main-1cs-e2e-…"). Fill until the field holds exactly the name and stays that way.
+  const nameField = dialog.getByPlaceholder('Enter a name for your pane');
+  await until(async () => (await nameField.inputValue()) !== '', 10_000, 300);
+  const named = await until(async () => {
+    if ((await nameField.inputValue()) !== state.paneName) await nameField.fill(state.paneName);
+    await page.waitForTimeout(700);
+    return (await nameField.inputValue()) === state.paneName;
+  }, 15_000, 300);
+  if (!named) throw new Error(`the New Pane name field does not keep "${state.paneName}"`);
   await dialog.getByRole('button', { name: /^Create/ }).click();
   const paneShown = await visible(ui.paneButton(state.paneName), 60_000);
   timing('create-pane', startedAt);
@@ -670,7 +697,30 @@ async function phaseAgent() {
   await shot('claude-answered');
 }
 
+// Every Pane row in the sidebar carries an "Archive <name>" button.
+const sidebarPanes = async () => (await page.locator('[aria-label^="Archive "]').evaluateAll((buttons) => buttons.map((button) => button.getAttribute('aria-label').slice('Archive '.length)))).sort();
+
 async function phaseStop() {
+  // DW2 "same Panes": every Pane before Stop, by id on the host and by name in the sidebar.
+  state.panesBefore = await hostPaneSetNow();
+  state.sidebarBefore = await sidebarPanes();
+  saveState();
+  log(`Panes before Stop: host ${JSON.stringify(state.panesBefore)}; sidebar ${JSON.stringify(state.sidebarBefore)}`);
+  await shot('panes-before-stop');
+  // Control for DW2: the same window reload the start phase does, with no Stop/Start in between. A Pane missing
+  // here as well is lost by the reload, not by Stop/Start.
+  await page.reload();
+  await page.waitForLoadState('domcontentloaded');
+  await page.waitForTimeout(4000);
+  await dismissFirstRun();
+  await waitConnected(state.label, 30_000);
+  await visible(ui.paneButton(state.paneName), 30_000);
+  await page.waitForTimeout(3000);
+  state.sidebarAfterPlainReload = await sidebarPanes();
+  saveState();
+  const lostByReload = state.sidebarBefore.filter((name) => !state.sidebarAfterPlainReload.includes(name));
+  log(`control: sidebar after a plain reload (no Stop/Start) ${JSON.stringify(state.sidebarAfterPlainReload)}; missing ${JSON.stringify(lostByReload)}`);
+  if (lostByReload.length > 0) finding(`a plain window reload (no Stop/Start) already drops ${JSON.stringify(lostByReload)} from the sidebar`);
   const startedAt = Date.now();
   if (mode === 'fake') {
     check('fake-host-killed', fakeDaemonKill(), 'SIGKILL to the headless daemon (power loss)');
@@ -746,6 +796,13 @@ async function phaseStart() {
   }
   timing('start-to-connected', startedAt);
   check('reconnected', connected, state.label);
+  // What the user sees after reconnecting (no reload): every Pane the sidebar showed before Stop.
+  await visible(ui.paneButton(state.paneName), 30_000);
+  await page.waitForTimeout(3000);
+  const sidebarAfterStart = await sidebarPanes();
+  const missingInSidebar = (state.sidebarBefore ?? []).filter((name) => !sidebarAfterStart.includes(name));
+  check('same-panes-in-sidebar', missingInSidebar.length === 0, `after Start ${JSON.stringify(sidebarAfterStart)}; missing: ${JSON.stringify(missingInSidebar)}`);
+  await shot('panes-after-start');
   // Reload so the Pane list comes from the restarted host, not from what the window still shows.
   await page.reload();
   await page.waitForLoadState('domcontentloaded');
@@ -757,6 +814,17 @@ async function phaseStart() {
   }
   const paneBack = await visible(ui.paneButton(state.paneName), 60_000);
   check('pane-back', paneBack, `Pane "${state.paneName}" listed after Start`);
+  await page.waitForTimeout(3000);
+  const panesAfter = await hostPaneSetNow().catch(() => []);
+  const key = (pane) => JSON.stringify([pane.id, pane.name, pane.isMainRepo, pane.archived]);
+  const missingOnHost = (state.panesBefore ?? []).filter((before) => !panesAfter.some((after) => key(after) === key(before)));
+  const newOnHost = panesAfter.filter((after) => !(state.panesBefore ?? []).some((before) => key(before) === key(after)));
+  const sidebarAfterReload = await sidebarPanes();
+  log(`sidebar after Start + window reload: ${JSON.stringify(sidebarAfterReload)} (a reload also drops Main without Stop/Start: see the control)`);
+  // DW2 "same Panes": the host's Panes (id, name, isMainRepo, archived) after Start equal those before Stop.
+  check('same-panes', missingOnHost.length === 0 && newOnHost.length === 0,
+    `before ${JSON.stringify(state.panesBefore)}; after ${JSON.stringify(panesAfter)}; missing ${JSON.stringify(missingOnHost)}; new ${JSON.stringify(newOnHost)}`);
+
   const backPanes = await hostPanes().catch(() => []);
   const backPanels = backPanes.find((pane) => pane.id === state.paneId)?.claudePanels ?? [];
   check('same-claude-panel-back', backPanels.length === 1 && backPanels[0].id === state.claudePanelId,
@@ -784,12 +852,21 @@ async function phaseStart() {
   timing('start-to-claude-ready', connectedAt);
 
   await shot('claude-resumed');
+  const transcriptBefore = await transcriptSize().catch(() => undefined);
   const reply = await askClaude('What was the code word I gave you earlier in this conversation? Reply with only WORD= followed by it.', `WORD=${state.codeWord}`);
   results.timings['claude-resumed-answer'] = Math.round(reply.ms / 100) / 10;
   const after = (await hostPanes()).find((pane) => pane.id === state.paneId)?.claudePanels ?? [];
   check('no-panel-added', after.length === 1 && after[0].id === state.claudePanelId, JSON.stringify(after));
   check('claude-resumes-conversation', reply.answered, reply.answered ? `WORD=${state.codeWord} after ${Math.round(reply.ms / 1000)} s` : 'the resumed panel did not recall the code word');
   timing('start-to-resumed-answer', startedAt);
+  // The resumed conversation is the one being written: the same panel's transcript grows with this exchange.
+  if (!relay) {
+    const transcriptAfter = await until(async () => {
+      const size = await transcriptSize();
+      return size > (transcriptBefore ?? Infinity) ? size : undefined;
+    }, 30_000, 3000);
+    check('transcript-grows-after-resume', Boolean(transcriptAfter), `${state.claudePanelId}.jsonl ${transcriptBefore} → ${transcriptAfter ?? await transcriptSize().catch(() => undefined)} bytes`);
+  }
   await shot('claude-recalled');
 }
 
