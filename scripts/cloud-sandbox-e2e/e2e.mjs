@@ -532,12 +532,16 @@ async function phaseAdd() {
     await ui.addSandbox().click();
     const startedAt = Date.now();
     const progress = [];
+    let lastRow;
     const listed = await until(async () => {
       const steps = await ui.progress(state.label).getByRole('listitem').allTextContents().catch(() => []);
       const latest = steps.at(-1)?.replace(/\s+/g, ' ').trim();
       if (latest && !progress.some((line) => line.endsWith(` ${latest}`))) progress.push(`${Math.round((Date.now() - startedAt) / 1000)} s ${latest}`);
       if (await visible(ui.rowAlert(state.label), 100)) throw new Error(`row error: ${await ui.rowAlert(state.label).textContent()}`);
-      return /\bRunning\b/.test(await rowText(state.label));
+      const row = await rowText(state.label);
+      if (row !== lastRow) log(`row: ${row || '(not found)'}`);
+      lastRow = row;
+      return /\bRunning\b/.test(row);
     }, Number(env.ADD_TIMEOUT_MS ?? 600_000), 2000);
     fs.writeFileSync(path.join(out, 'add-progress.txt'), `${redact(progress.join('\n'))}\n`);
     timing('add-to-running', startedAt);

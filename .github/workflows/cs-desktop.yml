@@ -5,7 +5,8 @@ name: Cloud sandbox desktop test build (fork)
 # it with the relay kit as the fork prerelease cs-desktop-<app sha8>-k<harness sha8>.
 #
 # cs/integration has no side-by-side support (it stays in #864's fork scaffolding), so the build applies
-# .github/cs-e2e/side-by-side.patch first: rc/integration's main/src/utils/sideBySide.ts and its wiring,
+# .github/cs-e2e/side-by-side.patch first: rc/integration's main/src/utils/sideBySide.ts and its wiring, and
+# scripts/build-win.js passing electron-builder arguments through (-c.extraMetadata.*),
 # unchanged. Without it the build would share ~/.pane with Red's installed Pane and update itself.
 #
 # Its own side-by-side name (cloudsandbox: ~/.pane_cloudsandbox) keeps it apart from the Run 4 build in

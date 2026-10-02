@@ -14,7 +14,8 @@ export async function boatSandbox(sandboxId, org) {
   });
   if (response.status === 404) return { exists: false, status: 404 };
   const body = await response.json().catch(() => ({}));
-  return { exists: response.ok && body.state !== 'destroyed', status: response.status, state: body.state, name: body.name, team: body.team ?? null };
+  const sandbox = body.sandbox ?? body;
+  return { exists: response.ok && sandbox.state !== 'destroyed', status: response.status, state: sandbox.state, name: sandbox.name, team: sandbox.team?.id ?? sandbox.team ?? null, teamName: sandbox.team?.name ?? null };
 }
 
 async function tailscaleToken() {
