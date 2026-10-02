@@ -199,8 +199,13 @@ function fakeSetup() {
   fs.writeFileSync(path.join(fakeHome, '.claude.json'), `${JSON.stringify({
     hasCompletedOnboarding: true,
     bypassPermissionsModeAccepted: true,
-    projects: { [fakeHome]: { hasTrustDialogAccepted: true } },
+    projects: {
+      [fakeHome]: { hasTrustDialogAccepted: true },
+      // FAKE_TRUST_PROJECT=1 (fake only): also trust the project folder, to test the later phases before fix B.
+      ...(env.FAKE_TRUST_PROJECT === '1' ? { [path.join(fakeHome, 'cs-e2e-project')]: { hasTrustDialogAccepted: true } } : {}),
+    },
   })}\n`, { mode: 0o600 });
+  if (env.FAKE_TRUST_PROJECT === '1') finding('FAKE_TRUST_PROJECT=1: the fake host trusts the project folder too (not what the bootstrap does)');
   // Without a git identity the first Pane in a new project fails ("Author identity unknown").
   fs.writeFileSync(path.join(fakeHome, '.gitconfig'), '[user]\n\tname = cs-e2e\n\temail = cs-e2e@localhost\n');
   const setup = spawnSync(paneBin, ['--ozone-platform=headless', '--disable-gpu', '--no-sandbox', '--remote-setup', '--label', 'rp-loop-cs-fake', '--pane-dir', fakeDir, '--listen-port', String(fakePort),
