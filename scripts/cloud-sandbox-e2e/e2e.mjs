@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { addSecret, loadSecret, redact, scanForSecrets, secretNames, secretValue } from './secrets.mjs';
-import { boatSandbox, health, sandboxAgentState, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
+import { boatSandbox, health, panesWithClaude, sandboxAgentState, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
 
 const env = process.env;
 const required = (name) => {
@@ -53,6 +53,7 @@ const startsLog = env.STARTS_LOG ?? (relay ? path.join(out, 'starts.txt') : path
 const secretsDir = env.SECRETS_DIR ?? path.join(realHome, 'rc-loop/secrets');
 const boatOrg = env.BOAT_ORG ?? 'test';
 if (mode === 'live' && boatOrg !== 'test') throw new Error('e2e: live runs use the boat test org only (BOAT_ORG=test)');
+if (mode !== 'fake' && env.FAKE_TRUST_PROJECT) throw new Error('e2e: FAKE_TRUST_PROJECT is for fake runs only');
 fs.mkdirSync(out, { recursive: true });
 fs.mkdirSync(paneDir, { recursive: true, mode: 0o700 });
 
@@ -346,7 +347,9 @@ const ui = {
   claudeTool: () => page.getByRole('menuitem', { name: /Claude Code/ }),
   // A stopped sandbox's switcher entry reads "Stopped · Select to start"; selecting it starts, then connects.
   switcherStart: (label) => ui.hostItem(label).filter({ hasText: /Select to start/ }),
-  claudeTab: () => page.getByRole('button', { name: /Claude Code/ }).first(),
+  claudeTab: () => page.getByRole('tab', { name: /Claude Code/ }).first(),
+  // Shown while the project's Main Pane (the repository root) is the open one.
+  mainPaneOpen: () => page.getByRole('separator', { name: /main repository/i }),
 };
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const visible = (locator, timeout = 1000) => locator.waitFor({ state: 'visible', timeout }).then(() => true, () => false);
@@ -423,6 +426,13 @@ const terminalText = async () => (await terminalLines()).join('\n');
 const nonEmpty = (lines) => lines.filter((line) => line.trim() !== '');
 const tail = (lines, count) => nonEmpty(lines).slice(-count).join('\n');
 const lastLine = (lines) => nonEmpty(lines).at(-1) ?? '';
+
+// The host's Panes and Claude panels by id, through its own API with the saved host token (memory only).
+async function hostPanes() {
+  const host = savedHosts(paneDir).find((entry) => entry.label === state.label);
+  if (!host) throw new Error(`no saved host "${state.label}"`);
+  return panesWithClaude(host.baseUrl, savedHostToken(paneDir, host.id));
+}
 
 // Claude Code's first-run screens must not appear on a provisioned host (ruling C, DW1): the bootstrap seeds
 // ~/.claude.json. The harness never answers them for the user; it FAILs and stops.
@@ -619,9 +629,19 @@ async function phaseAgent() {
   const dialog = page.getByRole('dialog', { name: /^New Pane/ });
   await dialog.getByPlaceholder('Enter a name for your pane').fill(state.paneName);
   await dialog.getByRole('button', { name: /^Create/ }).click();
-  const paneShown = await visible(ui.addTool(), 60_000);
+  const paneShown = await visible(ui.paneButton(state.paneName), 60_000);
   timing('create-pane', startedAt);
-  check('pane-created', paneShown, `Pane "${state.paneName}" open`);
+  check('pane-created', paneShown, `Pane "${state.paneName}" listed`);
+  await page.waitForTimeout(1500);
+  if (await visible(ui.mainPaneOpen(), 500)) finding(`after Create the project's Main Pane stayed open, not "${state.paneName}"; opened it from the sidebar`);
+  // The agent must run in the new Pane (its worktree), never in the Main Pane.
+  await ui.paneButton(state.paneName).click();
+  await page.waitForTimeout(1500);
+  check('new-pane-open', !(await visible(ui.mainPaneOpen(), 1000)), `"${state.paneName}" is the open Pane`);
+  const newPane = (await hostPanes()).find((pane) => pane.name === state.paneName);
+  state.paneId = newPane?.id;
+  saveState();
+  check('new-pane-id', Boolean(state.paneId), `Pane "${state.paneName}" is ${state.paneId} on the host`);
   // PANE_SETTLE_MS: how long a user looks at the new Pane before adding the Claude panel (default: at once).
   if (env.PANE_SETTLE_MS) await page.waitForTimeout(Number(env.PANE_SETTLE_MS));
   await ui.addTool().click();
@@ -630,6 +650,15 @@ async function phaseAgent() {
   await page.locator('.xterm').last().waitFor({ timeout: 60_000 });
   await waitClaudeReady(120_000);
   timing('claude-panel-ready', claudeStartedAt);
+  // By id, before prompting: exactly one Claude panel, in THIS Pane, and it is the active one.
+  const panes = await hostPanes();
+  const mine = panes.find((pane) => pane.id === state.paneId)?.claudePanels ?? [];
+  const elsewhere = panes.filter((pane) => pane.id !== state.paneId && pane.claudePanels.length > 0).map((pane) => pane.name);
+  state.claudePanelId = mine[0]?.id;
+  saveState();
+  check('claude-panel-in-new-pane', mine.length === 1 && elsewhere.length === 0 && mine[0].isActive,
+    `Claude panels in "${state.paneName}" (${state.paneId}): ${JSON.stringify(mine)}; other Panes with a Claude panel: ${JSON.stringify(elsewhere)}`);
+  if (!(mine.length === 1 && mine[0].isActive)) throw new Error('the Claude panel is not the active panel of the new Pane; not prompting');
   const a = 100 + crypto.randomInt(800);
   const b = 100 + crypto.randomInt(800);
   state.codeWord = `kestrel${crypto.randomInt(1000, 9999)}`;
@@ -727,18 +756,37 @@ async function phaseStart() {
   }
   const paneBack = await visible(ui.paneButton(state.paneName), 60_000);
   check('pane-back', paneBack, `Pane "${state.paneName}" listed after Start`);
+  const backPanes = await hostPanes().catch(() => []);
+  const backPanels = backPanes.find((pane) => pane.id === state.paneId)?.claudePanels ?? [];
+  check('same-claude-panel-back', backPanels.length === 1 && backPanels[0].id === state.claudePanelId,
+    `Pane ${state.paneId}: ${JSON.stringify(backPanels)} (before Stop: ${state.claudePanelId})`);
   if (!paneBack) {
     await shot('pane-missing');
     return;
   }
   await ui.paneButton(state.paneName).click();
-  await ui.claudeTab().click().catch(() => undefined);
+  await page.waitForTimeout(1500);
+  // The same panel must be back; the harness never adds a new one here.
+  const tabBack = await visible(ui.claudeTab(), 30_000);
+  check('claude-tab-back', tabBack, `the Pane's Claude Code tab after Start`);
+  if (!tabBack) {
+    await shot('claude-tab-missing');
+    return;
+  }
+  await ui.claudeTab().click();
   await page.locator('.xterm').last().waitFor({ timeout: 60_000 });
+  const reopened = (await hostPanes()).find((pane) => pane.id === state.paneId)?.claudePanels ?? [];
+  check('reopened-same-panel', reopened.length === 1 && reopened[0].id === state.claudePanelId && reopened[0].isActive,
+    `active Claude panel of ${state.paneId}: ${JSON.stringify(reopened)}`);
+  if (!(reopened.length === 1 && reopened[0].id === state.claudePanelId)) throw new Error('not the Claude panel from before Stop; not prompting');
   await waitClaudeReady(180_000);
   timing('start-to-claude-ready', connectedAt);
+
   await shot('claude-resumed');
   const reply = await askClaude('What was the code word I gave you earlier in this conversation? Reply with only WORD= followed by it.', `WORD=${state.codeWord}`);
   results.timings['claude-resumed-answer'] = Math.round(reply.ms / 100) / 10;
+  const after = (await hostPanes()).find((pane) => pane.id === state.paneId)?.claudePanels ?? [];
+  check('no-panel-added', after.length === 1 && after[0].id === state.claudePanelId, JSON.stringify(after));
   check('claude-resumes-conversation', reply.answered, reply.answered ? `WORD=${state.codeWord} after ${Math.round(reply.ms / 1000)} s` : 'the resumed panel did not recall the code word');
   timing('start-to-resumed-answer', startedAt);
   await shot('claude-recalled');

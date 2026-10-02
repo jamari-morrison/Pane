@@ -101,3 +101,33 @@ export async function sandboxAgentState(sandboxId, org) {
   const transcripts = Object.fromEntries([...stdout.matchAll(/^transcript (\S+) (\d+)$/gm)].map((match) => [match[1], Number(match[2])]));
   return { claude: Number(field('claude') || 0), claudeResume: Number(field('claude_resume') || 0), resumedLog: field('resumed_log'), transcripts };
 }
+
+/** Calls the host's daemon like a paired client (POST /invoke with the saved host token) and returns the
+ *  handler's data. Used to identify Panes and panels by id; never prints the token. */
+export async function daemonInvoke(baseUrl, token, channel, ...args) {
+  const response = await fetch(`${baseUrl}/invoke`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel, args }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.ok === false) throw new Error(`${channel}: HTTP ${response.status} ${body.error?.code ?? ''}`.trim());
+  const result = body.result;
+  if (result && result.success === false) throw new Error(`${channel}: ${result.error ?? 'failed'}`);
+  return result?.data ?? result;
+}
+
+/** The host's Panes with their Claude Code panels: [{ id, name, worktreePath, claudePanels: [{ id, isActive }] }]. */
+export async function panesWithClaude(baseUrl, token) {
+  const sessions = await daemonInvoke(baseUrl, token, 'sessions:get-all');
+  return Promise.all((sessions ?? []).map(async (session) => {
+    const panels = await daemonInvoke(baseUrl, token, 'panels:list', session.id).catch(() => []);
+    return {
+      id: session.id,
+      name: session.name,
+      worktreePath: session.worktreePath,
+      claudePanels: (panels ?? []).filter((panel) => /Claude Code/.test(panel.title ?? '')).map((panel) => ({ id: panel.id, isActive: Boolean(panel.state?.isActive) })),
+    };
+  }));
+}
