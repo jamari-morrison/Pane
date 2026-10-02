@@ -294,8 +294,11 @@ model your Claude Code picks for itself (your account's default). It starts your
 blocked (every proxy variable points at a closed local port), reads the model from the first line Claude prints, and
 stops it. No message reaches Anthropic, nothing is saved, and Pane reads only that line. The result is cached until
 `claude` or your settings file changes. Create, Start and Update apply the model again, and so does connecting to a
-sandbox, so a change follows. If detection fails (no `claude` on `PATH`, no answer within 15 s), Pane sends no model:
-the sandbox keeps the model it has (a new one uses Claude Code's own default), and a notice saying why is logged. It is not a pin: a model picked inside
+sandbox, so a change follows. While the desktop is connected to a sandbox, it also watches Claude's settings folder
+(read-only): when `settings.json` changes and the default it now gives differs from the one a running sandbox last got,
+the desktop sends the new one, so it reaches the sandbox's next new panel within seconds. If detection fails (no
+`claude` on `PATH`, no answer within 15 s), Pane sends no model: the sandbox keeps the model it has (a new one uses
+Claude Code's own default), and a notice saying why is logged. It is not a pin: a model picked inside
 the sandbox with `/model` is kept.
 
 ### Stop, start, update and remove

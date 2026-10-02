@@ -59,8 +59,9 @@ interface CloudSandboxManagerOptions {
   /** The Pane .deb for a version, from that release's published checksums. */
   resolvePaneDeb: (version: string) => Promise<CloudPaneDeb>;
   /**
-   * The Claude Code default model new panels in a sandbox should start with (null: Claude's own default). The
-   * library reads the same source when it applies the model, so this only decides when a sandbox needs it again.
+   * The Claude Code default model new panels in a sandbox should start with (null: unknown right now, so nothing is
+   * sent and every sandbox keeps the model it has). The library reads the same source when it applies the model, so
+   * this only decides when a sandbox needs it again.
    */
   readDefaultClaudeModel: () => Promise<string | null>;
 }
@@ -178,7 +179,7 @@ export class CloudSandboxManager {
       });
       this.operations.delete(id);
       this.replaceListed(summary.hostname, summary);
-      this.syncedClaudeModels.set(summary.hostname, claudeModel);
+      if (claudeModel !== null) this.syncedClaudeModels.set(summary.hostname, claudeModel);
       void this.readDaemonVersion(summary);
     } catch (error) {
       operation.running = false;
@@ -255,7 +256,7 @@ export class CloudSandboxManager {
       this.operations.delete(id);
       this.daemonVersions.delete(id);
       if (!summary) this.syncedClaudeModels.delete(id);
-      else if (claudeModel !== undefined) this.syncedClaudeModels.set(id, claudeModel);
+      else if (claudeModel) this.syncedClaudeModels.set(id, claudeModel);
       this.replaceListed(id, summary);
       if (summary) void this.readDaemonVersion(summary);
     } catch (error) {
@@ -274,13 +275,18 @@ export class CloudSandboxManager {
     const library = await this.getLibrary();
     if (!library) return;
     if (target && !this.listed.some((summary) => summary.profileId === target.profileId)) await this.refresh();
-    const model = await this.readDefaultClaudeModel();
-    const due = this.listed.filter((summary) => summary.state === 'running'
+    const candidates = this.listed.filter((summary) => summary.state === 'running'
       && !this.operations.get(summary.hostname)?.running
       && !this.syncingClaudeModels.has(summary.hostname)
-      && (target
-        ? summary.profileId === target.profileId
-        : !this.syncedClaudeModels.has(summary.hostname) || this.syncedClaudeModels.get(summary.hostname) !== model));
+      && (!target || summary.profileId === target.profileId));
+    // Reading the default can run the user's own claude, so only when a running sandbox could need it.
+    if (candidates.length === 0) return;
+    const model = await this.readDefaultClaudeModel();
+    // Unknown (a failed detection) is not a change: send nothing and keep what each sandbox last got.
+    if (model === null) return;
+    // Another sync may have started one of them while the default was read.
+    const due = candidates.filter((summary) => !this.syncingClaudeModels.has(summary.hostname) && (target
+      || !this.syncedClaudeModels.has(summary.hostname) || this.syncedClaudeModels.get(summary.hostname) !== model));
     await Promise.all(due.map(async (summary) => {
       this.syncingClaudeModels.add(summary.hostname);
       try {

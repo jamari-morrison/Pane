@@ -341,6 +341,80 @@ describe('CloudSandboxManager default Claude model', () => {
     expect(library.syncAgentDefaults).toHaveBeenCalledTimes(4);
   });
 
+  it('never reads the default (which can run the user\'s claude) without a running sandbox', async () => {
+    const readDefaultClaudeModel = vi.fn(async () => 'opus');
+    const empty = createManager(createLibrary(), { readDefaultClaudeModel });
+    await empty.manager.refresh();
+    await empty.manager.syncDefaultClaudeModel();
+
+    const stoppedOnly = createManager(
+      createLibrary({ list: vi.fn(async () => [summary({ state: 'stopped' })]) }),
+      { readDefaultClaudeModel },
+    );
+    await stoppedOnly.manager.refresh();
+    await stoppedOnly.manager.syncDefaultClaudeModel();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(readDefaultClaudeModel).not.toHaveBeenCalled();
+  });
+
+  it('reads the default once a sandbox is running', async () => {
+    const readDefaultClaudeModel = vi.fn(async () => 'opus');
+    const { manager } = createManager(createLibrary({ list: vi.fn(async () => [summary()]) }), { readDefaultClaudeModel });
+
+    await manager.refresh();
+
+    await vi.waitFor(() => expect(readDefaultClaudeModel).toHaveBeenCalled());
+  });
+
+  it('treats an unknown default (failed detection) as no change, and syncs once the default is known', async () => {
+    let model: string | null = null;
+    const library = createLibrary({ list: vi.fn(async () => [summary()]) });
+    const { manager } = createManager(library, { readDefaultClaudeModel: async () => model });
+
+    await manager.refresh();
+    await manager.syncDefaultClaudeModel();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(library.syncAgentDefaults).not.toHaveBeenCalled();
+
+    model = 'claude-opus-5-5';
+    await manager.syncDefaultClaudeModel();
+    expect(library.syncAgentDefaults).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the last synced default through a failed detection', async () => {
+    let model: string | null = 'claude-opus-5-5';
+    const library = createLibrary({ list: vi.fn(async () => [summary()]) });
+    const { manager } = createManager(library, { readDefaultClaudeModel: async () => model });
+    await manager.refresh();
+    await vi.waitFor(() => expect(library.syncAgentDefaults).toHaveBeenCalledTimes(1));
+
+    model = null;
+    await manager.syncDefaultClaudeModel();
+    model = 'claude-opus-5-5';
+    await manager.syncDefaultClaudeModel();
+    expect(library.syncAgentDefaults).toHaveBeenCalledTimes(1);
+
+    model = 'claude-sonnet-5-5';
+    await manager.syncDefaultClaudeModel();
+    expect(library.syncAgentDefaults).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the last synced default through a start while the default is unknown', async () => {
+    let model: string | null = 'claude-opus-5-5';
+    const library = createLibrary({ list: vi.fn(async () => [summary()]) });
+    const { manager } = createManager(library, { readDefaultClaudeModel: async () => model });
+    await manager.refresh();
+    await vi.waitFor(() => expect(library.syncAgentDefaults).toHaveBeenCalledTimes(1));
+
+    model = null;
+    await manager.start('rp-alpha');
+    model = 'claude-opus-5-5';
+    await manager.syncDefaultClaudeModel();
+
+    expect(library.syncAgentDefaults).toHaveBeenCalledTimes(1);
+  });
+
   it('does not sync again after create or start, which give the sandbox the default themselves', async () => {
     const library = createLibrary({ list: vi.fn(async () => [summary({ state: 'stopped' })]) });
     const { manager } = createManager(library, { readDefaultClaudeModel: async () => 'opus' });
