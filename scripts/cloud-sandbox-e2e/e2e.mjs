@@ -182,7 +182,13 @@ function fakeSetup() {
   fs.mkdirSync(fakeDir, { recursive: true, mode: 0o700 });
   // Claude Code with only an OAuth token still shows its onboarding; a provisioned sandbox is expected to
   // have this done, so the fake does it too.
-  fs.writeFileSync(path.join(fakeHome, '.claude.json'), `${JSON.stringify({ hasCompletedOnboarding: true })}\n`, { mode: 0o600 });
+  // What the bootstrap seeds on a sandbox (ruling B): onboarding done, bypass mode accepted, the home folder
+  // (where projects and worktrees live) trusted.
+  fs.writeFileSync(path.join(fakeHome, '.claude.json'), `${JSON.stringify({
+    hasCompletedOnboarding: true,
+    bypassPermissionsModeAccepted: true,
+    projects: { [fakeHome]: { hasTrustDialogAccepted: true } },
+  })}\n`, { mode: 0o600 });
   // Without a git identity the first Pane in a new project fails ("Author identity unknown").
   fs.writeFileSync(path.join(fakeHome, '.gitconfig'), '[user]\n\tname = cs-e2e\n\temail = cs-e2e@localhost\n');
   const setup = spawnSync(paneBin, ['--ozone-platform=headless', '--disable-gpu', '--no-sandbox', '--remote-setup', '--label', 'rp-loop-cs-fake', '--pane-dir', fakeDir, '--listen-port', String(fakePort),
@@ -347,9 +353,11 @@ async function openCloud() {
   await ui.cloudSection().waitFor({ timeout: 10_000 });
 }
 
+// innerText keeps the row's line breaks; textContent runs the badge into its neighbours ("…5bRunningrp-…").
 async function rowText(label) {
-  return ((await ui.row(label).textContent({ timeout: 2000 }).catch(() => '')) ?? '').replace(/\s+/g, ' ');
+  return ((await ui.row(label).innerText({ timeout: 2000 }).catch(() => '')) ?? '').replace(/\s+/g, ' ');
 }
+const rowBadge = (text, badge) => new RegExp(`(^|\\s)${badge}(\\s|$)`).test(text);
 
 async function openConnections() {
   await openSwitcher();
@@ -399,44 +407,31 @@ const nonEmpty = (lines) => lines.filter((line) => line.trim() !== '');
 const tail = (lines, count) => nonEmpty(lines).slice(-count).join('\n');
 const lastLine = (lines) => nonEmpty(lines).at(-1) ?? '';
 
-// Moves the cursor (❯) of the Claude Code menu on screen to the option matching `option`, then confirms.
-async function chooseOption(option) {
-  const lines = await terminalLines();
-  const cursor = lines.findLastIndex((line) => line.includes('\u276f'));
-  const target = lines.findLastIndex((line) => option.test(line));
-  if (cursor === -1 || target === -1) return false;
-  const key = target > cursor ? 'ArrowDown' : 'ArrowUp';
-  for (let step = 0; step < Math.abs(target - cursor); step++) await page.keyboard.press(key);
-  await page.waitForTimeout(300);
-  await page.keyboard.press('Enter');
-  return true;
-}
-
-// Claude Code first-run screens, answered like a user and reported (a provisioned sandbox should not show them).
-async function answerClaudePrompts(timeoutMs) {
-  const answered = [];
+// Claude Code's first-run screens must not appear on a provisioned host (ruling C, DW1): the bootstrap seeds
+// ~/.claude.json. The harness never answers them for the user; it FAILs and stops.
+async function waitClaudeReady(timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const lines = await terminalLines();
     const text = tail(lines, 30);
     if (/Select login method|Paste code here/i.test(text)) throw new Error('Claude Code asks to log in: the Claude token did not reach the panel');
-    if (/Yes, I accept/.test(text)) {
-      answered.push('bypass-permissions');
-      await chooseOption(/Yes, I accept/);
-    } else if (/Yes, I trust this folder|Yes, proceed/.test(text)) {
-      answered.push('trust-folder');
-      await chooseOption(/Yes, I trust this folder|Yes, proceed/);
-    } else if (/Choose the text style|Press Enter to continue/i.test(text)) {
-      answered.push('first-run-screen');
-      await page.keyboard.press('Enter');
-    } else if (/\? for shortcuts|bypass permissions on/i.test(tail(lines, 6)) && !/\$\s*$/.test(lastLine(lines))) {
-      return answered;
-    } else if (/\$ $/.test(text.trimEnd() + ' ') && /claude --/.test(text) && answered.length > 0) {
-      throw new Error(`Claude Code exited after: ${answered.join(', ')}`);
+    const screens = [
+      [/Yes, I trust this folder|Do you trust the files|Quick safety check/i, 'folder-trust prompt'],
+      [/Yes, I accept|Bypass Permissions mode/i, 'bypass-permissions accept screen'],
+      [/Choose the text style|Press Enter to continue/i, 'onboarding screen'],
+    ].filter(([pattern]) => pattern.test(text)).map(([, name]) => name);
+    if (screens.length > 0) {
+      await shot('claude-first-run-screen');
+      check('claude-no-first-run-screens', false, `Claude Code showed: ${screens.join(', ')}`);
+      throw new Error(`Claude Code showed ${screens.join(', ')}; not answered for the user`);
     }
-    await page.waitForTimeout(answered.length ? 2500 : 1500);
+    if (/\? for shortcuts|bypass permissions on/i.test(tail(lines, 6)) && !/\$\s*$/.test(lastLine(lines))) {
+      check('claude-no-first-run-screens', true, 'straight to the Claude prompt');
+      return;
+    }
+    await page.waitForTimeout(1500);
   }
-  throw new Error(`Claude Code was not ready within ${Math.round(timeoutMs / 1000)} s (answered: ${answered.join(', ') || 'nothing'})`);
+  throw new Error(`Claude Code was not ready within ${Math.round(timeoutMs / 1000)} s`);
 }
 
 async function askClaude(prompt, expected, timeoutMs = 240_000) {
@@ -541,7 +536,7 @@ async function phaseAdd() {
       const row = await rowText(state.label);
       if (row !== lastRow) log(`row: ${row || '(not found)'}`);
       lastRow = row;
-      return /\bRunning\b/.test(row);
+      return rowBadge(row, 'Running');
     }, Number(env.ADD_TIMEOUT_MS ?? 600_000), 2000);
     fs.writeFileSync(path.join(out, 'add-progress.txt'), `${redact(progress.join('\n'))}\n`);
     timing('add-to-running', startedAt);
@@ -616,8 +611,7 @@ async function phaseAgent() {
   await ui.claudeTool().click();
   const claudeStartedAt = Date.now();
   await page.locator('.xterm').last().waitFor({ timeout: 60_000 });
-  const prompts = await answerClaudePrompts(120_000);
-  if (prompts.length > 0) finding(`Claude Code showed first-run screens in the new panel: ${prompts.join(', ')}`);
+  await waitClaudeReady(120_000);
   timing('claude-panel-ready', claudeStartedAt);
   const a = 100 + crypto.randomInt(800);
   const b = 100 + crypto.randomInt(800);
@@ -642,7 +636,7 @@ async function phaseStop() {
   } else {
     await openCloud();
     await ui.rowAction('Stop', state.label).click();
-    const stopped = await until(async () => /\bStopped\b/.test(await rowText(state.label)), 300_000, 2000);
+    const stopped = await until(async () => rowBadge(await rowText(state.label), 'Stopped'), 300_000, 2000);
     timing('stop', startedAt);
     check('row-stopped', Boolean(stopped), `row "${state.label}" shows stopped`);
     await shot('row-stopped');
@@ -676,7 +670,7 @@ async function phaseStart() {
     const backConnected = await waitConnected(state.label, 600_000);
     timing('start-to-connected-from-switcher', startedAt);
     await openCloud();
-    const running = /\bRunning\b/.test(await rowText(state.label));
+    const running = rowBadge(await rowText(state.label), 'Running');
     check('row-running-again', backConnected && running, `connected ${backConnected}; row: ${await rowText(state.label)}`);
     await closeSettings();
     const host = savedHosts(paneDir).find((entry) => entry.id === state.profileId);
@@ -711,8 +705,7 @@ async function phaseStart() {
   await ui.paneButton(state.paneName).click();
   await ui.claudeTab().click().catch(() => undefined);
   await page.locator('.xterm').last().waitFor({ timeout: 60_000 });
-  const prompts = await answerClaudePrompts(180_000);
-  if (prompts.length > 0) finding(`resumed Claude panel showed: ${prompts.join(', ')}`);
+  await waitClaudeReady(180_000);
   timing('start-to-claude-ready', connectedAt);
   await shot('claude-resumed');
   const reply = await askClaude('What was the code word I gave you earlier in this conversation? Reply with only WORD= followed by it.', `WORD=${state.codeWord}`);
@@ -800,6 +793,11 @@ try {
 } catch (error) {
   check('run-completed', false, error instanceof Error ? error.message.split('\n')[0] : String(error));
   if (page) await shot('error');
+  // Never leave a sandbox behind: a failed live run still removes what it created, through the app.
+  if (mode !== 'fake' && state.cloud && !state.removed && page) {
+    log('cleanup: removing the sandbox after the failure');
+    await phaseRemove().catch((cleanupError) => check('cleanup-remove', false, `${cleanupError instanceof Error ? cleanupError.message.split('\n')[0] : cleanupError}; remove ${state.cloud.sandboxId} by hand`));
+  }
 } finally {
   if (context && !relay) await context.tracing.stopChunk({ path: path.join(out, `trace-${String(++traceChunk).padStart(2, '0')}.zip`) }).catch(() => undefined);
   if (context && !relay) await context.tracing.stop().catch(() => undefined);
