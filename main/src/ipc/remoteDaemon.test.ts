@@ -33,7 +33,7 @@ type RemoteDaemonTestDependencies = NonNullable<Parameters<typeof registerRemote
 function registerTestRemoteDaemonHandlers(
   ipcMain: Parameters<typeof registerRemoteDaemonHandlersImpl>[0],
   services: Omit<Parameters<typeof registerRemoteDaemonHandlersImpl>[1], 'dependencies'>,
-  cloudDependencies: Partial<Pick<RemoteDaemonTestDependencies, 'loadCloudSandboxLibrary' | 'readCloudDaemonVersion' | 'resolvePaneReleaseDeb'>> = {},
+  cloudDependencies: Partial<Pick<RemoteDaemonTestDependencies, 'loadCloudSandboxLibrary' | 'readCloudDaemonVersion' | 'resolvePaneReleaseDeb' | 'readDefaultClaudeModel' | 'watchClaudeSettings'>> = {},
 ): void {
   registerRemoteDaemonHandlersImpl(ipcMain, {
     ...services,
@@ -45,6 +45,7 @@ function registerTestRemoteDaemonHandlers(
       readCloudDaemonVersion: async () => undefined,
       readDefaultClaudeModel: async () => null,
       resolvePaneReleaseDeb: async () => { throw new Error('no releases in tests'); },
+      watchClaudeSettings: () => () => undefined,
       ...cloudDependencies,
     },
   });
@@ -1494,5 +1495,46 @@ describe('cloud sandbox IPC', () => {
     await vi.waitFor(() => expect(cloud.library.syncAgentDefaults).toHaveBeenCalledTimes(2));
     // The library reads the same source the desktop checks, so a second source plugs in in one place.
     expect(libraryModelSource).toBe(readDefaultClaudeModel);
+  });
+
+  it('follows a change of the user\'s Claude default while connected, and stops watching when it leaves', async () => {
+    const ipcMain = createIpcMainStub();
+    const initialConfig = createDefaultRemoteDaemonConfig();
+    initialConfig.client.profiles = [cloudProfile, { ...cloudProfile, id: 'plain', cloud: undefined }];
+    const cloud = createCloudLibrary({});
+    let model = 'claude-opus-5-5';
+    const watches: Array<{ onChange: () => void; stop: ReturnType<typeof vi.fn> }> = [];
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager: createConfigManagerStub(initialConfig) }, {
+      loadCloudSandboxLibrary: async () => cloud.library,
+      readDefaultClaudeModel: async () => model,
+      watchClaudeSettings: (onChange) => {
+        const stop = vi.fn();
+        watches.push({ onChange, stop });
+        return stop;
+      },
+    });
+    const connected = { mode: 'remote' as const, status: 'connected' as const, activeProfileLabel: 'alpha', activeBaseUrl: cloudProfile.baseUrl, lastError: null };
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+    remotePaneClientController.emit('state-changed', { ...connected, activeProfileId: 'plain' });
+    await settle();
+    expect(watches).toHaveLength(0);
+
+    remotePaneClientController.emit('state-changed', { ...connected, activeProfileId: 'profile-alpha' });
+    await vi.waitFor(() => expect(cloud.library.syncAgentDefaults).toHaveBeenCalled());
+    await settle();
+    expect(watches).toHaveLength(1);
+    vi.mocked(cloud.library.syncAgentDefaults).mockClear();
+
+    // An unchanged default is not synced again; a changed one is, with no host switch or Start.
+    watches[0].onChange();
+    await settle();
+    expect(cloud.library.syncAgentDefaults).not.toHaveBeenCalled();
+    model = 'claude-sonnet-5-5';
+    watches[0].onChange();
+    await vi.waitFor(() => expect(cloud.library.syncAgentDefaults).toHaveBeenCalledWith('rp-alpha'));
+
+    remotePaneClientController.emit('state-changed', { ...connected, status: 'reconnecting' as const, activeProfileId: 'profile-alpha' });
+    expect(watches[0].stop).toHaveBeenCalledTimes(1);
   });
 });

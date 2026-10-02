@@ -66,6 +66,7 @@ import {
 import type { SavedRemoteHosts } from '../../../packages/runpane/src/cloud/savedHosts';
 import { createDefaultClaudeModelSource } from '../../../packages/runpane/src/cloud/claudeDefaults';
 import { getShellPath } from '../utils/shellPath';
+import { watchClaudeSettings } from '../services/claudeSettingsWatcher';
 
 interface IpcMainHandleLike {
   handle(
@@ -95,6 +96,8 @@ interface RemoteDaemonHandlerDependencies {
   /** The one source of the user's default Claude model for cloud sandboxes; swap it here to change where it comes from. */
   readDefaultClaudeModel: () => Promise<string | null>;
   readCloudDaemonVersion: (profile: RemotePaneConnectionProfile) => Promise<string | undefined>;
+  /** Signals (debounced) that the user's Claude settings may have changed; returns a function that stops it. */
+  watchClaudeSettings: (onChange: () => void) => () => void;
   resolvePaneReleaseDeb: typeof resolvePaneReleaseDeb;
 }
 
@@ -110,6 +113,7 @@ const defaultRemoteDaemonHandlerDependencies: RemoteDaemonHandlerDependencies = 
   readDefaultClaudeModel: lazyDefaultClaudeModel(),
   readCloudDaemonVersion: readRemoteDaemonVersion,
   resolvePaneReleaseDeb,
+  watchClaudeSettings: (onChange) => watchClaudeSettings(onChange),
 };
 
 /**
@@ -132,6 +136,7 @@ function lazyDefaultClaudeModel(): () => Promise<string | null> {
 }
 
 let cloudConnectionListener: ((state: RemotePaneConnectionState) => void) | null = null;
+let stopClaudeSettingsWatch: (() => void) | null = null;
 
 let remoteHostStateForwarder:
   | ((state: RemoteDaemonHostRuntimeState) => void)
@@ -759,17 +764,28 @@ export function registerRemoteDaemonHandlers(
     },
   });
 
-  // Connecting to a cloud sandbox (switcher, settings, or a reconnect) gives it the user's current default model.
+  // Connecting to a cloud sandbox (switcher, settings, or a reconnect) gives it the user's current default model,
+  // and while it stays connected a change to the user's Claude settings does too, without a switch or a Start.
   let connectedProfileId: string | null = null;
   if (cloudConnectionListener) remotePaneClientController.off('state-changed', cloudConnectionListener);
+  stopClaudeSettingsWatch?.();
+  stopClaudeSettingsWatch = null;
   cloudConnectionListener = (state) => {
     const profileId = state.mode === 'remote' && state.status === 'connected' ? state.activeProfileId : null;
     if (profileId === connectedProfileId) return;
     connectedProfileId = profileId;
-    if (!profileId) return;
-    const profile = getRemoteDaemonConfig(configManager.getConfig().remoteDaemon).client.profiles
-      .find((candidate) => candidate.id === profileId);
-    if (profile?.cloud) void cloudSandboxes.syncDefaultClaudeModel({ profileId });
+    const profile = profileId
+      ? getRemoteDaemonConfig(configManager.getConfig().remoteDaemon).client.profiles.find((candidate) => candidate.id === profileId)
+      : undefined;
+    if (!profileId || !profile?.cloud) {
+      stopClaudeSettingsWatch?.();
+      stopClaudeSettingsWatch = null;
+      return;
+    }
+    void cloudSandboxes.syncDefaultClaudeModel({ profileId });
+    stopClaudeSettingsWatch ??= dependencies.watchClaudeSettings(() => {
+      void cloudSandboxes.syncDefaultClaudeModel();
+    });
   };
   remotePaneClientController.on('state-changed', cloudConnectionListener);
 

@@ -261,7 +261,8 @@ async function fileIdentity(file: string): Promise<string> {
   }
 }
 
-function claudeConfigDir(env: NodeJS.ProcessEnv, home: string): string {
+/** Claude Code's user config folder, which holds settings.json: `$CLAUDE_CONFIG_DIR`, else `~/.claude`. */
+export function claudeConfigDir(env: NodeJS.ProcessEnv, home: string): string {
   return env.CLAUDE_CONFIG_DIR?.trim() || path.join(home, '.claude');
 }
 
