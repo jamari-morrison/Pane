@@ -179,6 +179,9 @@ function cleanEnv(extra) {
   };
 }
 fs.mkdirSync(path.join(work, 'run'), { recursive: true, mode: 0o700 });
+// A Playwright trace records the launch options, environment included: no trace while the app's environment
+// holds a token (cs-b8fa53a9 live run: the token reached trace.trace; caught by the scan, shredded).
+const tokenInAppEnv = mode === 'live' && phases.includes('model-detect');
 const appEnv = relay ? {
   ...relayEnv(),
   ...(env.PANE_DEB_URL ? { RUNPANE_CLOUD_PANE_DEB_URL: env.PANE_DEB_URL, RUNPANE_CLOUD_PANE_DEB_SHA256: env.PANE_DEB_SHA256 ?? '' } : {}),
@@ -189,8 +192,8 @@ const appEnv = relay ? {
   ...(env.PANE_DEB_URL ? { RUNPANE_CLOUD_PANE_DEB_URL: env.PANE_DEB_URL, RUNPANE_CLOUD_PANE_DEB_SHA256: env.PANE_DEB_SHA256 ?? '' } : {}),
   ...(mode === 'live' ? { RUNPANE_CLOUD_BOAT_ORG: boatOrg, RUNPANE_CLOUD_NAME_PREFIX: 'rp-loop-cs' } : {}),
   // D2 (ii): the desktop user's local Claude is signed in with the subscription token, so local Claude (and the
-  // desktop's detection probe) has a real default to report. DETECT_LOGIN=1 stages a full login file instead.
-  ...(mode === 'live' && env.DETECT_LOGIN !== '1' ? { CLAUDE_CODE_OAUTH_TOKEN: secretValue('claudeToken') } : {}),
+  // desktop's detection probe) has a real default to report. Never a copy of a login file (orchestrator).
+  ...(tokenInAppEnv ? { CLAUDE_CODE_OAUTH_TOKEN: secretValue('claudeToken') } : {}),
 });
 
 // ---------------------------------------------------------------- the user's default model (D2/D3)
@@ -374,8 +377,9 @@ async function launch() {
   const mainLog = path.join(out, 'app-main.log');
   for (const stream of [app.process().stdout, app.process().stderr]) stream?.on('data', (chunk) => fs.appendFileSync(mainLog, redact(chunk.toString())));
   context = app.context();
-  // No trace on SOBECK (Red's own data on screen); elsewhere a trace with credentials paused out of it.
-  if (!relay) {
+  // No trace on SOBECK (Red's own data on screen), nor while the app's environment holds a token; elsewhere a
+  // trace with credentials paused out of it.
+  if (!relay && !tokenInAppEnv) {
     await context.tracing.start({ screenshots: true, snapshots: true, title: `cloud-sandbox-e2e ${mode}` });
     await context.tracing.startChunk();
   }
@@ -388,11 +392,11 @@ async function launch() {
 
 let traceChunk = 0;
 async function pauseTrace() {
-  if (relay) return;
+  if (relay || tokenInAppEnv) return;
   await context.tracing.stopChunk({ path: path.join(out, `trace-${String(++traceChunk).padStart(2, '0')}.zip`) });
 }
 async function resumeTrace() {
-  if (relay) return;
+  if (relay || tokenInAppEnv) return;
   await context.tracing.startChunk();
 }
 
@@ -558,7 +562,7 @@ async function transcriptSize() {
 // (<panelId>.jsonl) on the host. Fake host: read from its files. A sandbox: a plain terminal panel the harness
 // opens in the same Pane through the host API prints only that field (works on SOBECK too, no boat access).
 async function panelModel(panelId, paneId) {
-  if (mode === 'fake') {
+  if (mode === 'fake' && env.MODEL_READ !== 'api') {
     const root = path.join(fakeHome, '.claude', 'projects');
     const file = fs.existsSync(root) ? fs.readdirSync(root, { recursive: true }).map(String).find((entry) => path.basename(entry) === `${panelId}.jsonl`) : undefined;
     if (!file) return undefined;
@@ -572,19 +576,19 @@ async function panelModel(panelId, paneId) {
   }
   const host = savedHosts(paneDir).find((entry) => entry.label === state.label);
   const token = savedHostToken(paneDir, host.id);
-  state.probePanels ??= {};
-  if (!state.probePanels[paneId]) {
-    const created = await daemonInvoke(host.baseUrl, token, 'runpane:panels:create', { paneId, type: 'terminal', noFocus: true });
-    state.probePanels[paneId] = created?.panelId ?? created?.panel?.id;
-    saveState();
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-  }
-  const probe = state.probePanels[paneId];
+  // A terminal panel whose command prints only the model field (the host API requires a tool object).
   const marker = `CSE2E_MODEL_${crypto.randomBytes(3).toString('hex')}`;
-  await daemonInvoke(host.baseUrl, token, 'runpane:panels:input', {
-    panelId: probe,
-    input: `echo ${marker}=$(grep -ho '"model":"[^"]*"' ~/.claude/projects/*/${panelId}.jsonl 2>/dev/null | grep -v synthetic | head -1)\r`,
+  const created = await daemonInvoke(host.baseUrl, token, 'runpane:panels:create', {
+    paneId,
+    type: 'terminal',
+    noFocus: true,
+    tool: {
+      title: 'cs-e2e model probe',
+      command: `echo ${marker}=$(grep -ho '"model":"[^"]*"' ~/.claude/projects/*/${panelId}.jsonl 2>/dev/null | grep -v synthetic | head -1)`,
+    },
   });
+  const probe = created?.panelId ?? created?.panel?.id;
+  if (!probe) throw new Error('the host created no probe panel');
   const found = await until(async () => {
     const screen = await daemonInvoke(host.baseUrl, token, 'runpane:panels:screen', { panelId: probe, limit: 40 });
     return String(screen?.text ?? '').match(new RegExp(`${marker}="model":"([^"]+)"`))?.[1];
@@ -1145,7 +1149,6 @@ function localClaudeActualModel() {
 
 async function phaseModelDetect() {
   clearLocalDefaultModel();
-  if (env.DETECT_LOGIN === '1') stageClaudeLogin();
   const local = localClaudeActualModel();
   state.localClaudeModel = local;
   saveState();
@@ -1158,20 +1161,6 @@ async function phaseModelDetect() {
   const { panelId, paneId } = await newPaneWithClaude('cs-e2e-detect');
   await checkPanelModel('model-detected-default', panelId, paneId, local.actual);
   await shot('model-detect');
-}
-
-// DETECT_LOGIN=1 (live only, opt-in): a copy of this machine's Claude login in the isolated HOME, so local Claude
-// has an account-tier default. Off by default: a refresh by the copy could rotate the shared login's token.
-function stageClaudeLogin() {
-  const source = path.join(realHome, '.claude', '.credentials.json');
-  const target = path.join(home, '.claude', '.credentials.json');
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.copyFileSync(source, target);
-  fs.chmodSync(target, 0o600);
-  const credentials = JSON.parse(fs.readFileSync(target, 'utf8'));
-  addSecret('claudeLoginAccess', credentials.claudeAiOauth?.accessToken);
-  addSecret('claudeLoginRefresh', credentials.claudeAiOauth?.refreshToken);
-  log('staged a copy of the Claude login in the isolated HOME (values not shown)');
 }
 
 async function phaseRemove() {
@@ -1267,8 +1256,8 @@ try {
     });
   }
 } finally {
-  if (context && !relay) await context.tracing.stopChunk({ path: path.join(out, `trace-${String(++traceChunk).padStart(2, '0')}.zip`) }).catch(() => undefined);
-  if (context && !relay) await context.tracing.stop().catch(() => undefined);
+  if (context && !relay && !tokenInAppEnv) await context.tracing.stopChunk({ path: path.join(out, `trace-${String(++traceChunk).padStart(2, '0')}.zip`) }).catch(() => undefined);
+  if (context && !relay && !tokenInAppEnv) await context.tracing.stop().catch(() => undefined);
   await app?.close().catch(() => undefined);
   if (mode === 'fake' && phases.at(-1) !== 'stop') fakeDaemonKill();
   saveState();
