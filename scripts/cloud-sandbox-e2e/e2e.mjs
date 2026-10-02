@@ -575,6 +575,12 @@ async function panelModel(panelId, paneId) {
 
 async function checkPanelModel(name, panelId, paneId, expected) {
   const actual = await panelModel(panelId, paneId).catch((error) => `unreadable (${error instanceof Error ? error.message : error})`);
+  // D2 reaches cloud sandboxes (create/start/update and the desktop's sync); a fake host is never provisioned, so
+  // there the model is recorded but not judged. Live and SOBECK runs FAIL on a mismatch.
+  if (mode === 'fake') {
+    check(name, null, `fake host (not provisioned, D2 applies to cloud sandboxes): panel ${panelId} ran ${actual ?? 'unknown'}; the user's default is ${expected ?? 'unset'}`);
+    return actual;
+  }
   if (!expected) {
     check(name, null, `no local default set (Claude Code's own default applies); the panel ran ${actual}`);
     return actual;
