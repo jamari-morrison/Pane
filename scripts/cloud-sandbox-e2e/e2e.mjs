@@ -1059,6 +1059,12 @@ async function phaseStart() {
   await shot('claude-recalled');
 }
 
+async function settleAfterDefaultChange() {
+  const waitMs = Number(env.DEFAULT_SYNC_WAIT_MS ?? 10_000);
+  await page.waitForTimeout(waitMs);
+  check('still-connected-after-default-change', await isConnected(state.label), `no reconnect or host switch; waited ${Math.round(waitMs / 1000)} s`);
+}
+
 // A new Pane with a Claude panel that has answered once (so its transcript has a model): { paneId, panelId }.
 async function newPaneWithClaude(prefix) {
   const paneName = `${prefix}-${crypto.randomBytes(2).toString('hex')}`;
@@ -1107,12 +1113,9 @@ async function phaseModelFollow() {
   if (/sonnet/i.test(next)) throw new Error(`LOCAL_DEFAULT_MODEL_2 (${next}) is the hosts' fallback model; the check would pass without D2`);
   setLocalDefaultModel(next);
   const changedAt = Date.now();
-  // A user's way to bring the change over: switch hosts (This computer, then the sandbox again); the desktop
-  // syncs the default to a running sandbox when it becomes the active host (cs-provision syncAgentDefaults).
-  await openSwitcher();
-  await ui.localItem().click();
-  await page.waitForTimeout(2000);
-  check('switched-back-for-model-follow', await connectTo(state.label, 90_000), `host switch to ${state.label} after the default changed`);
+  // The user just edits their default and keeps working: no reconnect, no host switch (D2 done-when iii as the
+  // integrator reads it). A bounded settle time for a debounced watcher, then the next new panel.
+  await settleAfterDefaultChange();
   const { panelId, paneId } = await newPaneWithClaude('cs-e2e-follow');
   await checkPanelModel('model-follows-change', panelId, paneId, next);
   timing('default-change-to-followed-answer', changedAt);
@@ -1150,11 +1153,8 @@ async function phaseModelDetect() {
   const detected = fs.existsSync(path.join(out, 'app-main.log'))
     ? (fs.readFileSync(path.join(out, 'app-main.log'), 'utf8').match(/detect[^\n]*?(claude-[a-z0-9.-]+)/gi) ?? []).slice(-3) : [];
   log(`desktop log lines about detection: ${JSON.stringify(detected)}`);
-  // The same user steps as model-follow: switch hosts, then a new Pane with a Claude panel.
-  await openSwitcher();
-  await ui.localItem().click();
-  await page.waitForTimeout(2000);
-  check('switched-back-for-model-detect', await connectTo(state.label, 90_000), state.label);
+  // The same user steps as model-follow: stay connected, then a new Pane with a Claude panel.
+  await settleAfterDefaultChange();
   const { panelId, paneId } = await newPaneWithClaude('cs-e2e-detect');
   await checkPanelModel('model-detected-default', panelId, paneId, local.actual);
   await shot('model-detect');
