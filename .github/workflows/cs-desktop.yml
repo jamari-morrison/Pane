@@ -289,7 +289,7 @@ jobs:
         MODE: fake
         FAKE_CLAUDE: '1'
         SIDE_BY_SIDE_NAME: cloudsandbox
-        PHASES: add,agent,stop,start,remove,hygiene
+        PHASES: add,agent,stop,start,model-follow,remove,hygiene
       run: |
         export WORK="$(cygpath -w "$PWD/work")" OUT="$(cygpath -w "$PWD/work/evidence")"
         node kit/relay-kit/e2e.mjs || true
