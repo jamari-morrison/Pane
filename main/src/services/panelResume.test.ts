@@ -22,6 +22,7 @@ function harness(
   options: {
     transcript?: boolean;
     hidden?: PanelResumeSession[];
+    missingDirectories?: string[];
     /** Per panel: pids an earlier daemon left running, and which of them survive. */
     strays?: Map<string, { stopped: number[]; survivors?: number[] }>;
   } = {},
@@ -44,6 +45,7 @@ function harness(
       launches.push({ panelId: panel.id, cwd, state: terminalState(panel) });
       running.add(panel.id);
     }),
+    isDirectory: directoryPath => !options.missingDirectories?.includes(directoryPath),
     claudeTranscriptExists: () => options.transcript,
     stopStrayProcesses: vi.fn(async (panelId: string) => {
       const stray = options.strays?.get(panelId);
@@ -125,6 +127,23 @@ describe('PanelResume.resumeInterruptedAgents', () => {
     expect(results.map(result => [result.panelId, result.state])).toEqual([['claude', 'running'], ['codex', 'running']]);
     // The launch resolver turns these into `claude --resume <id>` and `codex resume <id>`.
     expect(h.launches[0]?.state).toMatchObject({ wasInterrupted: true, hasClaudeSessionId: true });
+  });
+
+  it('relaunches an agent in the folder it was started in, or in the worktree when that folder is gone', async () => {
+    const panels = [
+      terminalPanel('in-repo-root', pane.id, { initialCommand: 'claude', wasInterrupted: true, cwd: '/repo' }),
+      terminalPanel('folder-gone', pane.id, { initialCommand: 'claude', wasInterrupted: true, cwd: '/tmp/removed' }),
+      terminalPanel('never-recorded', pane.id, { initialCommand: 'codex', wasInterrupted: true }),
+    ];
+    const h = harness([pane], panels, { missingDirectories: ['/tmp/removed'] });
+
+    await new PanelResume(h.deps).resumeInterruptedAgents();
+
+    expect(h.launches.map(launch => [launch.panelId, launch.cwd])).toEqual([
+      ['in-repo-root', '/repo'],
+      ['folder-gone', '/repo/worktrees/a'],
+      ['never-recorded', '/repo/worktrees/a'],
+    ]);
   });
 
   it('also resumes the orchestrator of a live Session, whose Pane is hidden, but no other hidden Pane', async () => {

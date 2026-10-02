@@ -1,3 +1,4 @@
+import fs from 'fs';
 import type { DatabaseService } from '../database/database';
 import type { Session as SessionRow } from '../database/models';
 import type { SessionManager } from './sessionManager';
@@ -47,6 +48,13 @@ export function createPanelResume(
     startTerminal: async (panel, cwd) => {
       const wslContext = sessionManager.getProjectContext(panel.sessionId)?.commandRunner.wslContext ?? null;
       await terminalPanelManager.initializeTerminal(panel, cwd, wslContext);
+    },
+    isDirectory: directoryPath => {
+      try {
+        return fs.statSync(directoryPath).isDirectory();
+      } catch {
+        return false;
+      }
     },
     claudeTranscriptExists: sessionId => canReadClaudeTranscripts()
       ? findClaudeSessionTranscript(sessionId) !== undefined
