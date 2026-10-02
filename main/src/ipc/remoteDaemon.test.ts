@@ -1,3 +1,6 @@
+import { promises as fs } from 'fs';
+import os from 'os';
+import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createDefaultRemoteDaemonConfig,
@@ -15,6 +18,9 @@ import {
   setupRemoteHost as setupRemoteHostImpl,
 } from '../daemon/setupRemoteHost';
 import { registerRemoteDaemonHandlers as registerRemoteDaemonHandlersImpl } from './remoteDaemon';
+import { CloudSandboxesUnavailableError, type CloudSandboxLibrary } from '../services/cloudSandboxes';
+import type { CloudSandboxInfo } from '../../../packages/runpane/src/cloud/api';
+import type { SavedRemoteHosts } from '../../../packages/runpane/src/cloud/savedHosts';
 import type { PaneCommandValue } from '../daemon/commandRegistry';
 
 const readConfiguredTailscaleServeAccess = vi.fn<typeof readConfiguredTailscaleServeAccessImpl>();
@@ -22,9 +28,12 @@ const setupRemoteHost = vi.fn<typeof setupRemoteHostImpl>();
 const disconnectActiveRemoteHostClients = vi.fn<typeof disconnectActiveRemoteHostClientsImpl>()
   .mockReturnValue(0);
 
+type RemoteDaemonTestDependencies = NonNullable<Parameters<typeof registerRemoteDaemonHandlersImpl>[1]['dependencies']>;
+
 function registerTestRemoteDaemonHandlers(
   ipcMain: Parameters<typeof registerRemoteDaemonHandlersImpl>[0],
   services: Omit<Parameters<typeof registerRemoteDaemonHandlersImpl>[1], 'dependencies'>,
+  cloudDependencies: Partial<Pick<RemoteDaemonTestDependencies, 'loadCloudSandboxLibrary' | 'readCloudDaemonVersion' | 'resolvePaneReleaseDeb'>> = {},
 ): void {
   registerRemoteDaemonHandlersImpl(ipcMain, {
     ...services,
@@ -32,6 +41,10 @@ function registerTestRemoteDaemonHandlers(
       disconnectActiveRemoteHostClients,
       readConfiguredTailscaleServeAccess,
       setupRemoteHost,
+      loadCloudSandboxLibrary: () => Promise.reject(new CloudSandboxesUnavailableError()),
+      readCloudDaemonVersion: async () => undefined,
+      resolvePaneReleaseDeb: async () => { throw new Error('no releases in tests'); },
+      ...cloudDependencies,
     },
   });
 }
@@ -349,7 +362,7 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub();
 
-    registerTestRemoteDaemonHandlers(ipcMain, { configManager, app: { isPackaged: false } });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager, app: { isPackaged: false, getVersion: () => '2.4.146' } });
 
     const getCommand = ipcMain.handlers.get('remote-daemon:get-interactive-setup-command');
     // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
@@ -1207,5 +1220,230 @@ describe('remote daemon IPC', () => {
       data: [],
     });
     expect(disconnectActiveRemoteHostClients).toHaveBeenCalledWith(['client-1']);
+  });
+});
+
+describe('cloud sandbox IPC', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const cloudProfile = {
+    id: 'profile-alpha',
+    label: 'alpha',
+    baseUrl: 'https://rp-alpha.tail1234.ts.net',
+    token: 'synthetic-token',
+    transport: 'http+sse' as const,
+    cloud: {
+      provider: 'boat' as const,
+      sandboxId: 'sbx-1',
+      sessionId: 'session-alpha',
+      nodeId: 'node-1',
+      hostname: 'rp-alpha',
+      version: 1,
+    },
+  };
+
+  const alpha: CloudSandboxInfo = {
+    hostname: 'rp-alpha',
+    label: 'alpha',
+    profileId: 'profile-alpha',
+    sessionId: 'session-alpha',
+    sandboxId: 'sbx-1',
+    state: 'running',
+    providerState: 'running',
+    baseUrl: 'https://rp-alpha.tail1234.ts.net',
+    transport: 'https',
+    size: 'default',
+    createdAt: '2026-10-01T09:00:00.000Z',
+  };
+  const configured = { boat: { configured: true }, tailscale: { configured: true }, claude: { configured: true }, ready: true };
+
+  interface DesktopHostsRef {
+    current?: SavedRemoteHosts;
+  }
+
+  function createCloudLibrary(hostsRef: DesktopHostsRef, overrides: Partial<CloudSandboxLibrary> = {}) {
+    const library: CloudSandboxLibrary = {
+      getCredentialsStatus: vi.fn(async () => configured),
+      setup: vi.fn(async () => configured),
+      create: vi.fn(async () => {
+        await hostsRef.current?.upsert(cloudProfile);
+        return alpha;
+      }),
+      list: vi.fn(async () => [alpha]),
+      stop: vi.fn(async () => ({ ...alpha, state: 'stopped' as const })),
+      start: vi.fn(async () => alpha),
+      update: vi.fn(async () => alpha),
+      remove: vi.fn(async () => {
+        await hostsRef.current?.remove('session-alpha');
+      }),
+      ...overrides,
+    };
+    return {
+      library,
+      loadCloudSandboxLibrary: async (hosts: SavedRemoteHosts) => {
+        hostsRef.current = hosts;
+        return library;
+      },
+    };
+  }
+
+  function stubSwitchToLocal() {
+    return vi.spyOn(remotePaneClientController, 'switchToLocalMode').mockResolvedValue({
+      mode: 'local',
+      status: 'local',
+      activeProfileId: null,
+      activeProfileLabel: null,
+      activeBaseUrl: null,
+      lastError: null,
+    });
+  }
+
+  it('loads runpane\'s cloud library by default and reports an empty, unconfigured setup', async () => {
+    const cloudDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pane-cloud-ipc-'));
+    vi.stubEnv('RUNPANE_CLOUD_DIR', cloudDir);
+    try {
+      const ipcMain = createIpcMainStub();
+      registerRemoteDaemonHandlersImpl(ipcMain, { configManager: createConfigManagerStub() });
+
+      const result = await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
+
+      expect(result).toMatchObject({
+        success: true,
+        data: { available: true, credentials: { boat: false, tailscale: false, claude: false }, sandboxes: [] },
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      await fs.rm(cloudDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports cloud sandboxes as unavailable when the cloud library is missing', async () => {
+    const ipcMain = createIpcMainStub();
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager: createConfigManagerStub() });
+
+    await expect(ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({})).resolves.toMatchObject({
+      success: true,
+      data: { available: false, sandboxes: [] },
+    });
+    await expect(ipcMain.handlers.get('remote-daemon:create-cloud-sandbox')?.({}, { name: 'alpha', size: 'default' }))
+      .resolves.toEqual({ success: false, error: 'Cloud sandboxes are not available in this build of Pane.' });
+  });
+
+  it('saves a created sandbox as a cloud host profile and pushes snapshots to the renderer', async () => {
+    const ipcMain = createIpcMainStub();
+    const configManager = createConfigManagerStub();
+    const send = vi.fn();
+    const cloud = createCloudLibrary({});
+    registerTestRemoteDaemonHandlers(ipcMain, {
+      configManager,
+      // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
+      getMainWindow: () => ({ isDestroyed: () => false, webContents: { send } }) as never,
+    }, cloud);
+
+    const result = await ipcMain.handlers.get('remote-daemon:create-cloud-sandbox')?.({}, {
+      name: ' alpha ',
+      size: 'default',
+    });
+
+    expect(cloud.library.create).toHaveBeenCalledWith({ label: 'alpha', size: 'default' }, expect.anything());
+    expect(result).toMatchObject({ success: true, data: { sandboxes: [{ id: 'rp-alpha', state: 'running' }] } });
+    expect(configManager.getConfig().remoteDaemon?.client.profiles).toEqual([cloudProfile]);
+    expect(send).toHaveBeenCalledWith('remote-daemon:cloud-sandboxes-changed', expect.objectContaining({ available: true }));
+  });
+
+  it('keeps the saved profile id when the library saves the same sandbox again', async () => {
+    const ipcMain = createIpcMainStub();
+    const initialConfig = createDefaultRemoteDaemonConfig();
+    initialConfig.client.profiles = [{ ...cloudProfile, id: 'desktop-id', baseUrl: 'http://rp-alpha.tail1234.ts.net:42137' }];
+    const configManager = createConfigManagerStub(initialConfig);
+    const hostsRef: DesktopHostsRef = {};
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager }, createCloudLibrary(hostsRef));
+
+    await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
+    await hostsRef.current?.upsert(cloudProfile);
+
+    expect(configManager.getConfig().remoteDaemon?.client.profiles).toEqual([{ ...cloudProfile, id: 'desktop-id' }]);
+  });
+
+  it('rejects an invalid sandbox name before calling the library', async () => {
+    const ipcMain = createIpcMainStub();
+    const cloud = createCloudLibrary({});
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager: createConfigManagerStub() }, cloud);
+
+    await expect(ipcMain.handlers.get('remote-daemon:create-cloud-sandbox')?.({}, { name: 'My Box', size: 'default' }))
+      .resolves.toEqual({ success: false, error: 'Cloud sandbox name: Use lowercase letters, digits and dashes' });
+    expect(cloud.library.create).not.toHaveBeenCalled();
+  });
+
+  it('passes credential updates through and answers with set/not-set only', async () => {
+    const ipcMain = createIpcMainStub();
+    const cloud = createCloudLibrary({});
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager: createConfigManagerStub() }, cloud);
+    const update = { tailscale: { clientId: 'client-id', clientSecret: 'client-secret' } };
+
+    const result = await ipcMain.handlers.get('remote-daemon:update-cloud-credentials')?.({}, update);
+
+    expect(cloud.library.setup).toHaveBeenCalledWith(expect.objectContaining({
+      tailscaleClientId: 'client-id',
+      tailscaleClientSecret: 'client-secret',
+    }));
+    expect(result).toMatchObject({ success: true, data: { credentials: { boat: true, tailscale: true, claude: true } } });
+    expect(JSON.stringify(result)).not.toContain('client-secret');
+    await expect(ipcMain.handlers.get('remote-daemon:update-cloud-credentials')?.({}, {}))
+      .resolves.toEqual({ success: false, error: 'Enter at least one credential to save' });
+  });
+
+  it('switches to the local runtime before stopping the connected sandbox', async () => {
+    const ipcMain = createIpcMainStub();
+    const initialConfig = createDefaultRemoteDaemonConfig();
+    initialConfig.client = { profiles: [cloudProfile], activeProfileId: 'profile-alpha', mode: 'remote' };
+    const configManager = createConfigManagerStub(initialConfig);
+    const switchToLocal = stubSwitchToLocal();
+    const cloud = createCloudLibrary({});
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager }, cloud);
+    await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
+
+    const result = await ipcMain.handlers.get('remote-daemon:stop-cloud-sandbox')?.({}, 'rp-alpha');
+
+    expect(switchToLocal).toHaveBeenCalledTimes(1);
+    expect(switchToLocal.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(cloud.library.stop).mock.invocationCallOrder[0]);
+    expect(configManager.getConfig().remoteDaemon?.client).toMatchObject({ mode: 'local', profiles: [cloudProfile] });
+    expect(result).toMatchObject({ success: true, data: { sandboxes: [{ id: 'rp-alpha', state: 'stopped' }] } });
+  });
+
+  it('forgets the saved profile and leaves remote mode when the connected sandbox is removed', async () => {
+    const ipcMain = createIpcMainStub();
+    const initialConfig = createDefaultRemoteDaemonConfig();
+    initialConfig.client = { profiles: [cloudProfile], activeProfileId: 'profile-alpha', mode: 'remote' };
+    const configManager = createConfigManagerStub(initialConfig);
+    stubSwitchToLocal();
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager }, createCloudLibrary({}));
+    await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
+
+    const result = await ipcMain.handlers.get('remote-daemon:remove-cloud-sandbox')?.({}, 'rp-alpha');
+
+    expect(result).toMatchObject({ success: true, data: { sandboxes: [] } });
+    expect(configManager.getConfig().remoteDaemon?.client).toEqual({ profiles: [], activeProfileId: null, mode: 'local' });
+  });
+
+  it('reads the daemon version through the saved profile and updates Pane to this app\'s version', async () => {
+    const ipcMain = createIpcMainStub();
+    const initialConfig = createDefaultRemoteDaemonConfig();
+    initialConfig.client.profiles = [cloudProfile];
+    const readCloudDaemonVersion = vi.fn(async () => '2.4.100');
+    const resolvePaneReleaseDeb = vi.fn(async (version: string) => ({ debUrl: `https://example.test/${version}.deb`, sha256: 'f'.repeat(64) }));
+    const cloud = createCloudLibrary({});
+    registerTestRemoteDaemonHandlers(ipcMain, {
+      configManager: createConfigManagerStub(initialConfig),
+      app: { isPackaged: true, getVersion: () => '2.4.146' },
+    }, { ...cloud, readCloudDaemonVersion, resolvePaneReleaseDeb });
+
+    await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
+    await vi.waitFor(() => expect(readCloudDaemonVersion).toHaveBeenCalledWith(cloudProfile));
+    await ipcMain.handlers.get('remote-daemon:update-cloud-sandbox')?.({}, 'rp-alpha');
+
+    expect(cloud.library.update).toHaveBeenCalledWith('rp-alpha', { debUrl: 'https://example.test/2.4.146.deb', sha256: 'f'.repeat(64) });
   });
 });

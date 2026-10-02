@@ -1,0 +1,341 @@
+import { useEffect, useState } from 'react';
+import { Check, Cloud, Loader2, Plus, X } from 'lucide-react';
+import { Badge } from '../ui/Badge';
+import { Button } from '../ui/Button';
+import { Input } from '../ui/Input';
+import { SettingsSection } from '../ui/SettingsSection';
+import { ConfirmDialog } from '../ConfirmDialog';
+import { SettingRow } from './SettingRow';
+import { SegmentedControl } from './SettingsControls';
+import { API, type IPCResponse } from '../../utils/api';
+import { useCloudSandboxes } from '../../hooks/useCloudSandboxes';
+import {
+  formatCloudUptime,
+  getCloudSandboxActions,
+  getCloudSandboxBadge,
+  getCloudStepLabel,
+  type CloudSandboxRowAction,
+} from '../../utils/cloudSandboxPresentation';
+import {
+  getCloudSandboxNameError,
+  type CloudCredentialStatus,
+  type CloudCredentialsUpdate,
+  type CloudSandboxCreateRequest,
+  type CloudSandboxesSnapshot,
+  type CloudSandboxSize,
+  type CloudSandboxView,
+} from '../../../../shared/types/cloudSandboxes';
+
+type SendCloudRequest = (send: () => Promise<IPCResponse<CloudSandboxesSnapshot>>) => Promise<boolean>;
+
+const SIZE_OPTIONS: Array<{ id: CloudSandboxSize; label: string }> = [
+  { id: 'small', label: 'Small' },
+  { id: 'default', label: 'Default' },
+  { id: 'large', label: 'Large' },
+];
+
+const ACTION_LABELS = new Map<CloudSandboxRowAction, string>([
+  ['retry', 'Retry'],
+  ['dismiss', 'Dismiss'],
+  ['start', 'Start'],
+  ['stop', 'Stop'],
+  ['update', 'Update Pane'],
+  ['remove', 'Remove'],
+]);
+
+/** Cloud sandboxes (experimental): Pane on a provider sandbox, joined to the user's tailnet. */
+export function CloudSandboxesSettings() {
+  const { snapshot, loaded, request } = useCloudSandboxes();
+  const [requestError, setRequestError] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<CloudSandboxView | null>(null);
+  const now = useMinuteClock();
+
+  const send: SendCloudRequest = async (call) => {
+    setRequestError(null);
+    const result = await request(call);
+    if (!result.ok) setRequestError(result.error);
+    return result.ok;
+  };
+
+  const runAction = (sandbox: CloudSandboxView, action: CloudSandboxRowAction) => {
+    if (action === 'remove') {
+      setRemoving(sandbox);
+      return;
+    }
+    void send(() => {
+      if (action === 'retry') return API.remoteDaemon.retryCloudSandbox(sandbox.id);
+      if (action === 'dismiss') return API.remoteDaemon.dismissCloudSandbox(sandbox.id);
+      if (action === 'start') return API.remoteDaemon.startCloudSandbox(sandbox.id);
+      if (action === 'update') return API.remoteDaemon.updateCloudSandbox(sandbox.id);
+      return API.remoteDaemon.stopCloudSandbox(sandbox.id);
+    });
+  };
+
+  const canCreate = snapshot.credentials.boat && snapshot.credentials.tailscale;
+
+  return (
+    <SettingsSection
+      title="Cloud sandboxes (experimental)"
+      description="Run Pane on a boat.dev sandbox in your tailnet. Stop snapshots it so it costs nothing while stopped; Start resumes it."
+    >
+      {!loaded && <p className="py-3 text-sm text-text-tertiary" aria-live="polite">Loading cloud sandboxes...</p>}
+      {loaded && !snapshot.available && (
+        <p className="py-3 text-sm text-text-tertiary">Cloud sandboxes are not available in this build of Pane.</p>
+      )}
+      {loaded && snapshot.available && (
+        <>
+          {snapshot.loadError && (
+            <div className="my-2 flex items-center justify-between gap-3 rounded-md border border-status-error/30 bg-status-error/10 p-3 text-sm text-status-error" role="alert">
+              <span>{snapshot.loadError}</span>
+              <Button type="button" variant="secondary" size="sm" onClick={() => void send(() => API.remoteDaemon.getCloudSandboxes())}>Retry</Button>
+            </div>
+          )}
+          <CloudCredentialsRow credentials={snapshot.credentials} send={send} />
+          <SettingRow
+            settingId="remote-cloud-sandboxes"
+            label="Add cloud sandbox"
+            description={canCreate ? 'Each sandbox shows up in the host switcher like any other remote host.' : 'Save the boat API key and Tailscale OAuth client first.'}
+            align="start"
+          >
+            <AddCloudSandboxForm
+              disabled={!canCreate}
+              takenNames={snapshot.sandboxes.map((sandbox) => sandbox.label)}
+              onCreate={(createRequest) => void send(() => API.remoteDaemon.createCloudSandbox(createRequest))}
+            />
+          </SettingRow>
+          {snapshot.sandboxes.length > 0 && (
+            <ul className="divide-y divide-border-secondary" aria-label="Cloud sandboxes">
+              {snapshot.sandboxes.map((sandbox) => (
+                <CloudSandboxRow key={sandbox.id} sandbox={sandbox} now={now} onAction={runAction} />
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+      {requestError && (
+        <div className="my-2 rounded-md border border-status-error/30 bg-status-error/10 p-3 text-sm text-status-error" role="alert">{requestError}</div>
+      )}
+      <ConfirmDialog
+        isOpen={removing !== null}
+        onClose={() => setRemoving(null)}
+        onConfirm={() => {
+          if (removing) void send(() => API.remoteDaemon.removeCloudSandbox(removing.id));
+        }}
+        title={`Remove ${removing?.label ?? 'cloud sandbox'}?`}
+        message="This destroys the sandbox and its tailnet device and forgets the saved host. Anything on it that you haven't pushed is lost."
+        confirmText="Remove"
+      />
+    </SettingsSection>
+  );
+}
+
+/** The current time, ticking each minute, for "running for" hints. */
+function useMinuteClock(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+  return now;
+}
+
+function CloudCredentialsRow({ credentials, send }: { credentials: CloudCredentialStatus; send: SendCloudRequest }) {
+  const [editing, setEditing] = useState(false);
+  const [boatApiKey, setBoatApiKey] = useState('');
+  const [boatOrg, setBoatOrg] = useState('');
+  const [tailscaleClientId, setTailscaleClientId] = useState('');
+  const [tailscaleClientSecret, setTailscaleClientSecret] = useState('');
+  const [claudeToken, setClaudeToken] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const missingRequired = !credentials.boat || !credentials.tailscale;
+  const formOpen = editing || missingRequired;
+  const tailscaleIncomplete = Boolean(tailscaleClientId.trim()) !== Boolean(tailscaleClientSecret.trim());
+  const update: CloudCredentialsUpdate = {};
+  if (boatApiKey.trim()) update.boatApiKey = boatApiKey.trim();
+  if (boatOrg.trim()) update.boatOrg = boatOrg.trim();
+  if (tailscaleClientId.trim() && tailscaleClientSecret.trim()) {
+    update.tailscale = { clientId: tailscaleClientId.trim(), clientSecret: tailscaleClientSecret.trim() };
+  }
+  if (claudeToken.trim()) update.claudeToken = claudeToken.trim();
+  const hasUpdate = Object.keys(update).length > 0;
+
+  const clear = () => {
+    setBoatApiKey('');
+    setBoatOrg('');
+    setTailscaleClientId('');
+    setTailscaleClientSecret('');
+    setClaudeToken('');
+  };
+
+  const save = async () => {
+    setSaving(true);
+    let saved = false;
+    try {
+      saved = await send(() => API.remoteDaemon.updateCloudCredentials(update));
+    } finally {
+      setSaving(false);
+    }
+    if (!saved) return;
+    clear();
+    setEditing(false);
+  };
+
+  return (
+    <SettingRow
+      settingId="remote-cloud-credentials"
+      label="Credentials"
+      description="Entered once and kept on this computer. Pane never shows them again."
+      align="start"
+    >
+      <div className="w-full space-y-3 sm:w-[460px]">
+        <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 text-sm" aria-label="Saved cloud credentials">
+          <CredentialStatus label="boat API key" set={credentials.boat} />
+          <dt className="text-text-secondary">boat wallet</dt>
+          <dd className="text-right text-text-primary">{credentials.boatOrg ?? 'Account default'}</dd>
+          <CredentialStatus label="Tailscale OAuth client" set={credentials.tailscale} />
+          <CredentialStatus label="Claude token (optional)" set={credentials.claude} />
+        </dl>
+        {formOpen ? (
+          <div className="ph-no-capture space-y-3">
+            <Input label="boat API key" type="password" autoComplete="off" value={boatApiKey} onChange={(event) => setBoatApiKey(event.target.value)} placeholder={credentials.boat ? 'Leave blank to keep the saved key' : undefined} fullWidth />
+            <Input label="boat wallet" autoComplete="off" value={boatOrg} onChange={(event) => setBoatOrg(event.target.value)} placeholder={credentials.boatOrg ?? 'personal'} helperText="The wallet new sandboxes bill: a team name or id, or personal." fullWidth />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Input label="Tailscale OAuth client ID" type="password" autoComplete="off" value={tailscaleClientId} onChange={(event) => setTailscaleClientId(event.target.value)} fullWidth />
+              <Input
+                label="Tailscale OAuth client secret"
+                type="password"
+                autoComplete="off"
+                value={tailscaleClientSecret}
+                onChange={(event) => setTailscaleClientSecret(event.target.value)}
+                error={tailscaleIncomplete ? 'Enter both the client ID and secret' : undefined}
+                fullWidth
+              />
+            </div>
+            <Input label="Claude token" type="password" autoComplete="off" value={claudeToken} onChange={(event) => setClaudeToken(event.target.value)} helperText="From claude setup-token. Without it, sign in to Claude on the sandbox yourself." fullWidth />
+            <div className="flex justify-end gap-2">
+              {!missingRequired && (
+                <Button type="button" variant="ghost" size="sm" onClick={() => { clear(); setEditing(false); }}>Cancel</Button>
+              )}
+              <Button type="button" size="sm" loading={saving} disabled={!hasUpdate || tailscaleIncomplete} onClick={() => void save()}>Save Credentials</Button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex justify-end">
+            <Button type="button" variant="secondary" size="sm" onClick={() => setEditing(true)}>Change Credentials</Button>
+          </div>
+        )}
+      </div>
+    </SettingRow>
+  );
+}
+
+function CredentialStatus({ label, set }: { label: string; set: boolean }) {
+  return (
+    <>
+      <dt className="text-text-secondary">{label}</dt>
+      <dd className="justify-self-end">
+        <Badge size="sm" variant={set ? 'success' : 'default'}>{set ? 'Set' : 'Not set'}</Badge>
+      </dd>
+    </>
+  );
+}
+
+function AddCloudSandboxForm({ disabled, takenNames, onCreate }: {
+  disabled: boolean;
+  takenNames: string[];
+  onCreate: (request: CloudSandboxCreateRequest) => void;
+}) {
+  const [name, setName] = useState('');
+  const [size, setSize] = useState<CloudSandboxSize>('default');
+  const trimmedName = name.trim();
+  const nameError = takenNames.includes(trimmedName) ? 'A cloud sandbox has this name' : getCloudSandboxNameError(trimmedName);
+
+  const create = () => {
+    onCreate({ name: trimmedName, size });
+    setName('');
+  };
+
+  return (
+    <div className="w-full space-y-3 sm:w-[460px]">
+      <Input
+        label="Name"
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        placeholder="api-refactor"
+        error={trimmedName && nameError ? nameError : undefined}
+        disabled={disabled}
+        fullWidth
+      />
+      <SegmentedControl label="Sandbox size" columns={3} value={size} options={SIZE_OPTIONS} onChange={setSize} />
+      <div className="flex justify-end">
+        <Button type="button" size="sm" icon={<Plus className="h-4 w-4" />} disabled={disabled || nameError !== null} onClick={create}>
+          Add Cloud Sandbox
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function CloudSandboxRow({ sandbox, now, onAction }: {
+  sandbox: CloudSandboxView;
+  now: number;
+  onAction: (sandbox: CloudSandboxView, action: CloudSandboxRowAction) => void;
+}) {
+  const badge = getCloudSandboxBadge(sandbox);
+  const details = [
+    sandbox.hostname,
+    sandbox.size,
+    sandbox.state === 'running' && !sandbox.pending ? formatCloudUptime(sandbox.startedAt, now) : null,
+    sandbox.daemonVersion ? `Pane ${sandbox.daemonVersion}${sandbox.updateAvailable ? ' (differs from this app)' : ''}` : null,
+  ].filter(Boolean).join(' · ');
+
+  return (
+    <li className="space-y-2 py-3" aria-label={`Cloud sandbox ${sandbox.label}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 text-sm font-medium text-text-primary">
+            <Cloud className="h-4 w-4 flex-none text-text-tertiary" />
+            <span className="truncate">{sandbox.label}</span>
+            <Badge size="sm" variant={badge.variant}>{badge.label}</Badge>
+          </p>
+          {details && <p className="mt-1 truncate text-xs text-text-tertiary">{details}</p>}
+        </div>
+        <div className="flex flex-none flex-wrap justify-end gap-1">
+          {sandbox.pending && <Loader2 className="h-4 w-4 animate-spin text-text-tertiary" aria-hidden="true" />}
+          {getCloudSandboxActions(sandbox).map((action) => (
+            <Button
+              key={action}
+              type="button"
+              size="sm"
+              variant={action === 'remove' ? 'ghost' : action === 'update' || action === 'retry' ? 'primary' : 'secondary'}
+              aria-label={`${ACTION_LABELS.get(action)} ${sandbox.label}`}
+              onClick={() => onAction(sandbox, action)}
+            >
+              {ACTION_LABELS.get(action)}
+            </Button>
+          ))}
+        </div>
+      </div>
+      {sandbox.steps && sandbox.steps.length > 0 && (
+        <div role="status" aria-label={`Progress for ${sandbox.label}`}>
+          <ol className="space-y-1 pl-6 text-xs">
+            {sandbox.steps.map((step) => (
+              <li key={step.step} className="flex items-center gap-2 text-text-secondary">
+                {step.state === 'done'
+                  ? <Check className="h-3.5 w-3.5 text-status-success" aria-hidden="true" />
+                  : sandbox.state === 'creating'
+                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                    : <X className="h-3.5 w-3.5 text-status-error" aria-hidden="true" />}
+                <span>{step.message ?? getCloudStepLabel(step.step)}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+      {sandbox.error && (
+        <p className="rounded-md border border-status-error/30 bg-status-error/10 p-2 text-xs text-status-error" role="alert">{sandbox.error}</p>
+      )}
+    </li>
+  );
+}

@@ -26,6 +26,11 @@ import type {
   RemotePaneConnectionProfile,
 } from '../../../shared/types/remoteDaemon';
 import type {
+  CloudCredentialsUpdate,
+  CloudSandboxCreateRequest,
+  CloudSandboxesSnapshot,
+} from '../../../shared/types/cloudSandboxes';
+import type {
   PanePermissionResponse,
 } from '../../../shared/types/daemon';
 import type { ProjectDashboardSessionUpdateEvent, ProjectDashboardUpdateEvent } from '../types/projectDashboard';
@@ -691,6 +696,56 @@ export class API {
     onHostStateChanged(callback: (state: RemoteDaemonHostRuntimeState) => void) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.remoteDaemon.onHostStateChanged(callback);
+    },
+
+    async getCloudSandboxes() {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.getCloudSandboxes();
+    },
+
+    async updateCloudCredentials(update: CloudCredentialsUpdate) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.updateCloudCredentials(update);
+    },
+
+    async createCloudSandbox(request: CloudSandboxCreateRequest) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.createCloudSandbox(request);
+    },
+
+    async startCloudSandbox(id: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.startCloudSandbox(id);
+    },
+
+    async stopCloudSandbox(id: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.stopCloudSandbox(id);
+    },
+
+    async updateCloudSandbox(id: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.updateCloudSandbox(id);
+    },
+
+    async removeCloudSandbox(id: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.removeCloudSandbox(id);
+    },
+
+    async retryCloudSandbox(id: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.retryCloudSandbox(id);
+    },
+
+    async dismissCloudSandbox(id: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.dismissCloudSandbox(id);
+    },
+
+    onCloudSandboxesChanged(callback: (snapshot: CloudSandboxesSnapshot) => void) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.onCloudSandboxesChanged(callback);
     },
   };
 

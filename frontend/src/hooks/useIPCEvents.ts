@@ -10,6 +10,7 @@ import { openPaneTarget } from '../components/terminal/openPaneLink';
 import { API } from '../utils/api';
 import { devLog } from '../utils/console';
 import { claimCreatedPane, markAppReady } from '../utils/journeyTimings';
+import { keepRepositoryPanes } from '../utils/repositoryPanes';
 import type { Session, SessionOutput, GitStatus } from '../types/session';
 import { isOrchestrationInternalSessionId } from '../../../shared/types/orchestrationSession';
 
@@ -32,9 +33,16 @@ async function resyncRemoteRuntimeState(loadSessions: (sessions: Session[]) => v
   }
   await useConfigStore.getState().fetchConfig();
 
+  const shownSessions = useSessionStore.getState().sessions;
   const sessionsResponse = await API.sessions.getAll();
   if (sessionsResponse.success && sessionsResponse.data) {
-    const sessionsWithJsonMessages = sessionsResponse.data.map((session: Session) => ({
+    const reloaded: Session[] = hostChanged
+      ? sessionsResponse.data
+      : await keepRepositoryPanes(shownSessions, sessionsResponse.data, async (sessionId) => {
+        const response = await API.sessions.get(sessionId);
+        return response.success && response.data ? response.data : undefined;
+      });
+    const sessionsWithJsonMessages = reloaded.map((session: Session) => ({
       ...session,
       jsonMessages: session.jsonMessages || [],
     }));
@@ -198,6 +206,8 @@ export function useIPCEvents() {
       devLog.debug('[useIPCEvents] Session created:', session.id);
       claimCreatedPane(session.id);
       addSession({...session, output: session.output || [], jsonMessages: session.jsonMessages || []});
+      // addSession makes an activating Pane the active one; leave a repository view so it is also the one shown.
+      if (session.activateOnCreate !== false) useNavigationStore.getState().navigateToSessions();
       // Set git status as loading for new sessions
       useSessionStore.getState().setGitStatusLoading(session.id, true);
     });
