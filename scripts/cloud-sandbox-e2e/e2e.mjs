@@ -142,7 +142,9 @@ log(`secrets loaded (names only): ${secretNames().join(', ')}`);
 
 // ---------------------------------------------------------------- clean environment
 // On SOBECK (and for Windows apps) the app gets the user's environment, minus anything Pane-related.
-const relayEnv = () => Object.fromEntries(Object.entries(env).filter(([name]) => !/^(PANE_|RUNPANE_|ELECTRON_RUN_AS_NODE$|CLAUDE_CODE_OAUTH_TOKEN$|ANTHROPIC_)/i.test(name)));
+// ANTHROPIC_MODEL stays: it is part of the user's default model (D2), not a credential.
+const relayEnv = () => Object.fromEntries(Object.entries(env).filter(([name]) => name.toUpperCase() === 'ANTHROPIC_MODEL'
+  || !/^(PANE_|RUNPANE_|ELECTRON_RUN_AS_NODE$|CLAUDE_CODE_OAUTH_TOKEN$|ANTHROPIC_)/i.test(name)));
 // Nothing is inherited from the Pane session this harness runs in (PANE_*, RUNPANE_*, tokens): an app that
 // saw PANE_DIR or PANE_SESSION_ID could talk to the machine's own Pane daemon.
 const claudeBin = relay || windows || fakeClaude ? '' : (spawnSync('bash', ['-lc', 'command -v claude'], { encoding: 'utf8' }).stdout ?? '').trim();
@@ -186,11 +188,12 @@ const appEnv = relay ? {
 });
 
 // ---------------------------------------------------------------- the user's default model (D2/D3)
-// Where the desktop user's default Claude model lives. Local Pane's "Claude Code" preset runs
-// `claude --dangerously-skip-permissions` with no --model, so it uses Claude Code's own default: `model` in
-// ~/.claude/settings.json. (Source per D2; see iface-cs. On SOBECK this is Red's file, read only.)
+// The desktop user's default Claude model, resolved like the library's readLocalClaudeModel (D2): Pane's Claude
+// panels pass no --model, so it is Claude Code's own default — ANTHROPIC_MODEL, else `model` in
+// ~/.claude/settings.json. The isolated run has no ANTHROPIC_MODEL; on SOBECK both are Red's, read only.
 const userClaudeSettings = path.join(home, '.claude', 'settings.json');
 function localDefaultModel() {
+  if (relay && env.ANTHROPIC_MODEL) return env.ANTHROPIC_MODEL;
   try {
     return JSON.parse(fs.readFileSync(userClaudeSettings, 'utf8')).model;
   } catch {
@@ -1041,7 +1044,12 @@ async function phaseModelFollow() {
   if (/sonnet/i.test(next)) throw new Error(`LOCAL_DEFAULT_MODEL_2 (${next}) is the hosts' fallback model; the check would pass without D2`);
   setLocalDefaultModel(next);
   const changedAt = Date.now();
-  if (!(await isConnected(state.label))) check('connected-for-model-follow', await connectTo(state.label), state.label);
+  // A user's way to bring the change over: switch hosts (This computer, then the sandbox again); the desktop
+  // syncs the default to a running sandbox when it becomes the active host (cs-provision syncAgentDefaults).
+  await openSwitcher();
+  await ui.localItem().click();
+  await page.waitForTimeout(2000);
+  check('switched-back-for-model-follow', await connectTo(state.label, 90_000), `host switch to ${state.label} after the default changed`);
   const paneName = `cs-e2e-follow-${crypto.randomBytes(2).toString('hex')}`;
   await ui.newPaneIn(env.REPO).first().click();
   const dialog = page.getByRole('dialog', { name: /^New Pane/ });
