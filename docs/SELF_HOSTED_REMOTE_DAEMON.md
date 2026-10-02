@@ -261,7 +261,8 @@ Secrets are read from files or stdin (`-`), never from arguments. They stay on t
 host to desktop Pane's saved remote hosts in `~/.pane/config.json` (`$RUNPANE_CLOUD_DESKTOP_DIR` overrides it).
 `runpane help cloud <command>` lists every option.
 
-`new` takes about 1.5 minutes. It:
+`new` takes about 1.5 minutes when the HTTPS certificate comes, and about 3.5 minutes when it falls back to
+plain HTTP (below). It:
 
 1. creates the sandbox in the chosen wallet;
 2. resets its identity: a fresh machine-id and SSH host keys, and no credentials or Pane state left from the image;
@@ -277,7 +278,7 @@ host to desktop Pane's saved remote hosts in `~/.pane/config.json` (`$RUNPANE_CL
 
 Every new tailnet name needs a Let's Encrypt certificate, and Let's Encrypt issues at most 50 a week for a
 tailnet's domain. When the certificate doesn't come, the sandbox is served over plain HTTP inside the tailnet
-instead, at `http://<host>.<tailnet>.ts.net:42137`. WireGuard still encrypts that traffic, but the phone app at
+instead, at `http://<host>.<tailnet>.ts.net:42137`, after about 50 seconds of waiting for it. WireGuard still encrypts that traffic, but the phone app at
 `runpane.com/app` can't use it. `--transport https` or `--transport http` picks one explicitly.
 
 If any step fails, `new` removes the sandbox and its tailnet device before it reports the error.
