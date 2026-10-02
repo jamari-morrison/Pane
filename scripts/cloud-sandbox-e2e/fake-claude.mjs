@@ -5,6 +5,8 @@
 // the app (panel, terminal, resume), never Claude itself.
 //   SUM:  "...compute 123+456..."             -> SUM=579
 //   WORD: "The code word is X." then later "What was the code word..." -> WORD=X (from the transcript)
+// Its model is resolved the way Claude Code resolves it (--model, ANTHROPIC_MODEL, ~/.claude/settings.json
+// `model`, else its own default) and written as `message.model` on each assistant line, like a real transcript.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,10 +22,20 @@ const sessionId = resumed ?? flag('--session-id') ?? `fake-${process.pid}`;
 const transcriptDir = path.join(os.homedir(), '.claude', 'projects', 'fake-claude');
 fs.mkdirSync(transcriptDir, { recursive: true });
 const transcript = path.join(transcriptDir, `${sessionId}.jsonl`);
-const append = (role, text) => fs.appendFileSync(transcript, `${JSON.stringify({ role, text, at: new Date().toISOString() })}\n`);
+const settingsModel = () => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8')).model;
+  } catch {
+    return undefined;
+  }
+};
+const model = flag('--model') ?? process.env.ANTHROPIC_MODEL ?? settingsModel() ?? 'claude-sonnet-5-5';
+const append = (role, text) => fs.appendFileSync(transcript, `${JSON.stringify({
+  type: role, role, text, at: new Date().toISOString(), ...(role === 'assistant' ? { message: { model } } : {}),
+})}\n`);
 
 const footer = () => process.stdout.write('\n> \n  ? for shortcuts\n  >> bypass permissions on\n');
-process.stdout.write(`Claude Code (cs-e2e stand-in)\n${process.cwd()}\n${resumed ? `resumed ${sessionId}\n` : ''}`);
+process.stdout.write(`Claude Code (cs-e2e stand-in) · ${model}\n${process.cwd()}\n${resumed ? `resumed ${sessionId}\n` : ''}`);
 footer();
 
 const input = readline.createInterface({ input: process.stdin });
