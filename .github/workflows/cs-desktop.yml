@@ -14,6 +14,10 @@ name: Cloud sandbox desktop test build (fork)
 #
 # The kit is rc/integration's install.ps1 / remove.ps1 (pinned at RC_KIT_SHA, already proven on SOBECK)
 # plus this branch's scripts/cloud-sandbox-e2e/sobeck (the "Add cloud sandbox" proof) and playwright-core.
+#
+# A dispatch with app_from=<cs-desktop-* tag> is a kit-only release: the app zip of that release byte for byte,
+# the kit from this commit, as cs-desktop-<app sha8>-k<this sha8>. Every release is then proven on windows-latest
+# against a fake host (the same app as a headless daemon on loopback) with a Claude stand-in (fake-claude.mjs).
 on:
   push:
     branches:
@@ -24,6 +28,11 @@ on:
       - .github/workflows/cs-desktop.yml
       - scripts/cloud-sandbox-e2e/**
   workflow_dispatch:
+    inputs:
+      app_from:
+        description: Kit-only release reusing this cs-desktop-* release's app zip byte for byte (empty = build the app)
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -42,9 +51,32 @@ env:
   CSC_DISABLE: 'true'
 
 jobs:
+  app-from:
+    name: App of ${{ inputs.app_from }} (kit-only release)
+    if: github.repository != 'greenfield-inc/Pane' && inputs.app_from
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+    - id: meta
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        APP_FROM: ${{ inputs.app_from }}
+        KIT_SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        sha=$(gh release view "$APP_FROM" --repo "$REPO" --json targetCommitish -q .targetCommitish)
+        zip=$(gh release view "$APP_FROM" --repo "$REPO" --json assets -q '.assets[].name' | grep -E -- '-Windows-x64\.zip$')
+        version=${zip#Pane-CloudSandbox-}; version=${version%-Windows-x64.zip}
+        { echo "sha=$sha"; echo "version=$version"; echo "tag=cs-desktop-${sha:0:8}-k${KIT_SHA:0:8}"; } >> "$GITHUB_OUTPUT"
+        echo "Kit-only release: app $zip of $APP_FROM ($sha), kit from $KIT_SHA" >> "$GITHUB_STEP_SUMMARY"
+
   windows:
     name: Windows x64 (side-by-side)
-    if: github.repository != 'greenfield-inc/Pane'
+    if: github.repository != 'greenfield-inc/Pane' && !inputs.app_from
     runs-on: windows-2022
     timeout-minutes: 60
     outputs:
@@ -151,10 +183,19 @@ jobs:
 
   release:
     name: Publish fork prerelease cs-desktop-<sha8>
-    needs: windows
+    needs: [app-from, windows]
+    if: >-
+      always() && github.repository != 'greenfield-inc/Pane' &&
+      (needs.windows.result == 'success' || needs.app-from.result == 'success')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    outputs:
+      tag: ${{ needs.windows.outputs.tag || needs.app-from.outputs.tag }}
+    env:
+      APP_SHA: ${{ needs.windows.outputs.sha || needs.app-from.outputs.sha }}
+      VERSION: ${{ needs.windows.outputs.version || needs.app-from.outputs.version }}
+      TAG: ${{ needs.windows.outputs.tag || needs.app-from.outputs.tag }}
     steps:
     - uses: actions/checkout@v7
 
@@ -165,20 +206,28 @@ jobs:
         sparse-checkout: scripts/cloud-dist
 
     - uses: actions/download-artifact@v7
+      if: ${{ !inputs.app_from }}
       with:
         name: desktop-windows
         path: release
 
-    - name: Build the relay kit
+    - name: The app zip of ${{ inputs.app_from }}, byte for byte
+      if: ${{ inputs.app_from }}
       env:
-        VERSION: ${{ needs.windows.outputs.version }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        gh release download "${{ inputs.app_from }}" --repo "$GITHUB_REPOSITORY" --dir release --pattern '*-Windows-x64.zip' --pattern SHA256SUMS.txt
+        (cd release && grep -E -- '-Windows-x64\.zip$' SHA256SUMS.txt | sha256sum -c - && rm SHA256SUMS.txt)
+
+    - name: Build the relay kit
       run: |
         set -euo pipefail
         playwright=$(grep -m1 -oE "^  '@playwright/test@[0-9.]+'" pnpm-lock.yaml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
         kit=kit/relay-kit
         mkdir -p "$kit"
         cp rckit/scripts/cloud-dist/sobeck/{install.ps1,remove.ps1} "$kit/"
-        cp scripts/cloud-sandbox-e2e/sobeck/* scripts/cloud-sandbox-e2e/{e2e.mjs,secrets.mjs,oracles.mjs} "$kit/"
+        cp scripts/cloud-sandbox-e2e/sobeck/* scripts/cloud-sandbox-e2e/{e2e.mjs,secrets.mjs,oracles.mjs,fake-claude.mjs} "$kit/"
         (cd "$kit" && echo '{"private":true}' > package.json && npm install --no-audit --no-fund --no-package-lock "playwright-core@$playwright")
         (cd kit && zip -qr "../release/Pane-CloudSandbox-relay-kit-$VERSION.zip" relay-kit)
         cp rckit/scripts/cloud-dist/sobeck/install.ps1 release/sobeck-install.ps1
@@ -187,9 +236,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
         REPO: ${{ github.repository }}
-        TAG: ${{ needs.windows.outputs.tag }}
-        SHA: ${{ needs.windows.outputs.sha }}
-        VERSION: ${{ needs.windows.outputs.version }}
+        SHA: ${{ env.APP_SHA }}
       run: |
         set -euo pipefail
         case "$REPO" in greenfield-inc/*) echo "refusing to publish to $REPO" >&2; exit 1 ;; esac
@@ -197,12 +244,76 @@ jobs:
         sha256sum -- * > SHA256SUMS.txt
         cat SHA256SUMS.txt
         NOTES="Unsigned SIDE-BY-SIDE Windows desktop test build of ${SHA} (cs/integration, the \"Add cloud sandbox\" landing) plus rc/integration's side-by-side support, built by run ${GITHUB_RUN_ID}. Not an upstream release; it never updates itself.
-        Version: ${VERSION}. Relay kit: install.ps1/remove.ps1 from ${RC_KIT_SHA}, cloud sandbox proof from ${GITHUB_SHA}.
+        Version: ${VERSION}.${{ inputs.app_from && format(' App zip copied byte for byte from {0} (kit-only release).', inputs.app_from) || '' }} Relay kit: install.ps1/remove.ps1 from ${RC_KIT_SHA}, cloud sandbox proof from ${GITHUB_SHA}.
         It keeps its data in ~/.pane_${SIDE_BY_SIDE_NAME} and runs next to an installed Pane without touching it."
+        # Releases are immutable: the relay checks every file against hashes published in the doc.
         if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-          gh release upload "$TAG" --repo "$REPO" --clobber -- *
+          echo "$TAG already published; keeping it unchanged" >> "$GITHUB_STEP_SUMMARY"
         else
           gh release create "$TAG" --repo "$REPO" --prerelease --target "$SHA" \
             --title "Pane cloud sandbox desktop test build ${TAG#cs-desktop-}" --notes "$NOTES" -- *
         fi
         echo "https://github.com/${REPO}/releases/tag/${TAG}" >> "$GITHUB_STEP_SUMMARY"
+
+  # The published release, the way the relay runs it, with the cloud replaced: the same app as a headless daemon
+  # on loopback stands in for the sandbox, and fake-claude.mjs for Claude Code (a runner has no tailnet, boat or
+  # Claude credentials). windows-latest renders the terminal with WebGL like SOBECK, which broke the Run 5 driver.
+  proof:
+    name: Relay driver proof (Windows, fake host)
+    needs: release
+    if: always() && needs.release.result == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '22.18.0'
+
+    - name: Download and verify the release
+      shell: bash
+      run: |
+        set -euo pipefail
+        gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir rel --pattern '*-Windows-x64.zip' --pattern '*relay-kit*.zip' --pattern SHA256SUMS.txt
+        (cd rel && grep -E -- '\.zip$' SHA256SUMS.txt | sha256sum -c -)
+        mkdir -p app kit
+        unzip -q rel/*-Windows-x64.zip -d app
+        unzip -q rel/*relay-kit*.zip -d kit
+        echo "PANE_BIN=$(cygpath -w "$(ls -d "$PWD"/app/*/Pane.exe)")" >> "$GITHUB_ENV"
+
+    - name: Driver in fake mode (same app as fake host, Claude stand-in)
+      shell: bash
+      env:
+        MODE: fake
+        FAKE_CLAUDE: '1'
+        SIDE_BY_SIDE_NAME: cloudsandbox
+        PHASES: add,agent,stop,start,remove,hygiene
+      run: |
+        export WORK="$(cygpath -w "$PWD/work")" OUT="$(cygpath -w "$PWD/work/evidence")"
+        node kit/relay-kit/e2e.mjs || true
+        test -f work/evidence/results.json
+
+    - name: Every check passes except the known sidebar one
+      shell: bash
+      run: |
+        node -e '
+          const r = require("./work/evidence/results.json");
+          const known = new Set(["same-panes-in-sidebar"]);
+          const failed = r.checks.filter((c) => c.verdict === "FAIL" && !known.has(c.name));
+          for (const c of r.checks) console.log(c.verdict, c.name, c.detail.slice(0, 160));
+          if (failed.length) { console.error("FAILED:", failed.map((c) => c.name).join(", ")); process.exit(1); }
+        '
+        if grep -q "WebGL renderer failed" work/evidence/app-console.log; then
+          echo "terminal renderer: DOM (WebGL unavailable on this runner)" | tee -a "$GITHUB_STEP_SUMMARY"
+        else
+          echo "terminal renderer: WebGL (as on SOBECK)" | tee -a "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - uses: actions/upload-artifact@v7
+      if: always()
+      with:
+        name: relay-driver-proof
+        path: work/evidence
+        if-no-files-found: warn

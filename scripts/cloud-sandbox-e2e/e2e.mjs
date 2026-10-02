@@ -22,8 +22,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { addSecret, loadSecret, redact, scanForSecrets, secretNames, secretValue } from './secrets.mjs';
-import { boatSandboxes, boatSandbox, health, hostPaneSet, panesWithClaude, sandboxAgentState, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
+import { boatSandboxes, boatSandbox, daemonInvoke, health, hostPaneSet, panesWithClaude, sandboxAgentState, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
 
 const env = process.env;
 const required = (name) => {
@@ -38,8 +39,13 @@ const relay = mode === 'relay';
 const paneBin = path.resolve(required('PANE_BIN'));
 const work = path.resolve(required('WORK'));
 const out = path.resolve(required('OUT'));
+const windows = process.platform === 'win32';
+// FAKE_CLAUDE=1 (fake only): the fake host runs fake-claude.mjs as `claude` instead of Claude Code (CI, no token).
+const fakeClaude = mode === 'fake' && env.FAKE_CLAUDE === '1';
 const home = relay ? realHome : path.join(work, 'home');
-const paneDir = relay ? path.resolve(required('PANE_DATA_DIR')) : path.join(home, '.pane');
+// A side-by-side build (SIDE_BY_SIDE_NAME) keeps its data in ~/.pane_<name> whatever PANE_DIR says.
+const paneDir = relay ? path.resolve(required('PANE_DATA_DIR'))
+  : env.SIDE_BY_SIDE_NAME ? path.join(home, `.pane_${env.SIDE_BY_SIDE_NAME}`) : path.join(home, '.pane');
 for (const forbidden of [path.join(realHome, '.pane'), path.join(realHome, '.pane_remote'), ...(relay ? [] : [realHome])]) {
   if ([relay ? '' : home, paneDir].map((dir) => dir.toLowerCase()).includes(forbidden.toLowerCase())) throw new Error(`e2e: refusing to use ${forbidden}`);
 }
@@ -122,7 +128,7 @@ if (relay) {
   } catch {
     // No saved credentials yet: the credentials phase reports it.
   }
-} else {
+} else if (!fakeClaude) {
   // claude-slot names the secrets file of the Claude token the loop's agents currently use.
   const claudeSlot = fs.readFileSync(path.join(secretsDir, 'claude-slot'), 'utf8').trim();
   if (!claudeSlot) throw new Error('e2e: claude-slot is empty');
@@ -131,11 +137,24 @@ if (relay) {
 log(`secrets loaded (names only): ${secretNames().join(', ')}`);
 
 // ---------------------------------------------------------------- clean environment
+// On SOBECK (and for Windows apps) the app gets the user's environment, minus anything Pane-related.
+const relayEnv = () => Object.fromEntries(Object.entries(env).filter(([name]) => !/^(PANE_|RUNPANE_|ELECTRON_RUN_AS_NODE$|CLAUDE_CODE_OAUTH_TOKEN$|ANTHROPIC_)/i.test(name)));
 // Nothing is inherited from the Pane session this harness runs in (PANE_*, RUNPANE_*, tokens): an app that
 // saw PANE_DIR or PANE_SESSION_ID could talk to the machine's own Pane daemon.
-const claudeBin = relay ? '' : (spawnSync('bash', ['-lc', 'command -v claude'], { encoding: 'utf8' }).stdout ?? '').trim();
+const claudeBin = relay || windows || fakeClaude ? '' : (spawnSync('bash', ['-lc', 'command -v claude'], { encoding: 'utf8' }).stdout ?? '').trim();
 const basePath = [...new Set([path.dirname(process.execPath), claudeBin ? path.dirname(claudeBin) : '', '/usr/local/bin', '/usr/bin', '/bin'].filter(Boolean))].join(':');
 function cleanEnv(extra) {
+  // Windows apps need the system environment; the profile is isolated through the per-user dirs instead.
+  if (windows) {
+    return {
+      ...relayEnv(),
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: path.join(home, 'AppData', 'Roaming'),
+      LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+      ...extra,
+    };
+  }
   return {
     PATH: basePath,
     HOME: home,
@@ -151,8 +170,6 @@ function cleanEnv(extra) {
   };
 }
 fs.mkdirSync(path.join(work, 'run'), { recursive: true, mode: 0o700 });
-// On SOBECK the app gets the user's environment (a Windows app needs it), minus anything Pane-related.
-const relayEnv = () => Object.fromEntries(Object.entries(env).filter(([name]) => !/^(PANE_|RUNPANE_|ELECTRON_RUN_AS_NODE$|CLAUDE_CODE_OAUTH_TOKEN$|ANTHROPIC_)/i.test(name)));
 const appEnv = relay ? {
   ...relayEnv(),
   ...(env.PANE_DEB_URL ? { RUNPANE_CLOUD_PANE_DEB_URL: env.PANE_DEB_URL, RUNPANE_CLOUD_PANE_DEB_SHA256: env.PANE_DEB_SHA256 ?? '' } : {}),
@@ -187,10 +204,37 @@ const fakeHome = path.join(work, 'fake-home');
 const fakeDir = path.join(fakeHome, '.pane');
 const fakePort = Number(env.FAKE_PORT ?? 42199);
 const fakeBaseUrl = `http://127.0.0.1:${fakePort}`;
-const fakeEnv = () => cleanEnv({ HOME: fakeHome, XDG_CONFIG_HOME: path.join(fakeHome, '.config'), XDG_DATA_HOME: path.join(fakeHome, '.local/share'), XDG_CACHE_HOME: path.join(fakeHome, '.cache'), DISPLAY: '', CLAUDE_CODE_OAUTH_TOKEN: secretValue('claudeToken'),
-  // What the sandbox daemon's systemd drop-ins set (rp-bootstrap.sh install_agent_dropins): agent panels resume
-  // when the daemon starts, and Claude Code treats every folder of the disposable host as trusted.
-  PANE_RESUME_AGENTS_ON_START: '1', CLAUDE_CODE_SANDBOXED: '1' });
+const fakeBin = path.join(fakeHome, 'bin');
+const fakeEnv = () => {
+  const base = cleanEnv({
+    HOME: fakeHome,
+    ...(windows
+      ? { USERPROFILE: fakeHome, APPDATA: path.join(fakeHome, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(fakeHome, 'AppData', 'Local') }
+      : { XDG_CONFIG_HOME: path.join(fakeHome, '.config'), XDG_DATA_HOME: path.join(fakeHome, '.local/share'), XDG_CACHE_HOME: path.join(fakeHome, '.cache'), DISPLAY: '' }),
+    ...(fakeClaude ? {} : { CLAUDE_CODE_OAUTH_TOKEN: secretValue('claudeToken') }),
+    // What the sandbox daemon's systemd drop-ins set (rp-bootstrap.sh install_agent_dropins): agent panels resume
+    // when the daemon starts, and Claude Code treats every folder of the disposable host as trusted.
+    PANE_RESUME_AGENTS_ON_START: '1',
+    CLAUDE_CODE_SANDBOXED: '1',
+  });
+  if (fakeClaude) {
+    // One PATH entry whatever its case (Windows spells it Path), with the stand-in first.
+    const key = Object.keys(base).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH';
+    const value = base[key] ?? '';
+    delete base[key];
+    base.PATH = `${fakeBin}${path.delimiter}${value}`;
+  }
+  return base;
+};
+
+// `claude` on the fake host's PATH runs fake-claude.mjs (FAKE_CLAUDE=1), for cmd/PowerShell and for sh shells.
+function installFakeClaude() {
+  fs.mkdirSync(fakeBin, { recursive: true });
+  const script = fileURLToPath(new URL('./fake-claude.mjs', import.meta.url));
+  fs.writeFileSync(path.join(fakeBin, 'claude.cmd'), `@"${process.execPath}" "${script}" %*\r\n`);
+  fs.writeFileSync(path.join(fakeBin, 'claude'), `#!/bin/sh\nexec "${process.execPath.replace(/\\/g, '/')}" "${script.replace(/\\/g, '/')}" "$@"\n`, { mode: 0o755 });
+  finding('FAKE_CLAUDE=1: the fake host runs a Claude stand-in (fake-claude.mjs), not Claude Code');
+}
 
 function fakeSetup() {
   fs.mkdirSync(fakeDir, { recursive: true, mode: 0o700 });
@@ -210,6 +254,7 @@ function fakeSetup() {
   if (env.FAKE_TRUST_PROJECT === '1') finding('FAKE_TRUST_PROJECT=1: the fake host trusts the project folder too (not what the bootstrap does)');
   // Without a git identity the first Pane in a new project fails ("Author identity unknown").
   fs.writeFileSync(path.join(fakeHome, '.gitconfig'), '[user]\n\tname = cs-e2e\n\temail = cs-e2e@localhost\n');
+  if (fakeClaude) installFakeClaude();
   const setup = spawnSync(paneBin, ['--ozone-platform=headless', '--disable-gpu', '--no-sandbox', '--remote-setup', '--label', 'rp-loop-cs-fake', '--pane-dir', fakeDir, '--listen-port', String(fakePort),
     '--prefer-tunnel', 'manual', '--base-url', fakeBaseUrl, '--no-install-service'], { env: fakeEnv(), encoding: 'utf8', timeout: 120_000 });
   const code = (setup.stdout ?? '').match(/pane-remote:\/\/[A-Za-z0-9_-]+/)?.[0];
@@ -222,7 +267,7 @@ function fakeSetup() {
 function fakeDaemonStart() {
   const daemonLog = fs.openSync(path.join(work, 'fake-daemon.log'), 'a');
   const child = spawn(paneBin, ['--ozone-platform=headless', '--disable-gpu', '--no-sandbox', '--daemon-headless', '--pane-dir', fakeDir],
-    { env: fakeEnv(), stdio: ['ignore', daemonLog, daemonLog], detached: true });
+    { env: fakeEnv(), stdio: ['ignore', daemonLog, daemonLog], detached: true, windowsHide: true });
   child.unref();
   state.fakePid = child.pid;
   saveState();
@@ -231,10 +276,15 @@ function fakeDaemonStart() {
 
 function fakeDaemonKill() {
   if (!state.fakePid) return false;
-  try {
-    process.kill(-state.fakePid, 'SIGKILL');
-  } catch {
-    return false;
+  if (windows) {
+    // The whole process tree, forcibly: Windows has no process-group SIGKILL.
+    if (spawnSync('taskkill', ['/PID', String(state.fakePid), '/T', '/F']).status !== 0) return false;
+  } else {
+    try {
+      process.kill(-state.fakePid, 'SIGKILL');
+    } catch {
+      return false;
+    }
   }
   delete state.fakePid;
   saveState();
@@ -402,12 +452,15 @@ async function waitConnected(label, timeoutMs) {
   return Boolean(await until(() => isConnected(label), timeoutMs, 2000));
 }
 
+// Escape closes Settings unless the keystroke lands elsewhere (SOBECK Run 5: the switcher click behind the
+// still-open dialog timed out); then its close button, like a user.
 async function closeSettings() {
   const settings = page.getByRole('dialog', { name: /Pane Settings/ });
-  if (await visible(settings, 500)) {
-    await page.keyboard.press('Escape');
-    await settings.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => undefined);
-  }
+  if (!(await visible(settings, 500))) return;
+  await page.keyboard.press('Escape');
+  if (await settings.waitFor({ state: 'hidden', timeout: 3000 }).then(() => true, () => false)) return;
+  await settings.getByRole('button', { name: /^Close/ }).first().click({ timeout: 5000 }).catch(() => undefined);
+  if (!(await settings.waitFor({ state: 'hidden', timeout: 5000 }).then(() => true, () => false))) throw new Error('Pane Settings does not close');
 }
 
 async function connectTo(label, timeoutMs = 60_000) {
@@ -417,11 +470,15 @@ async function connectTo(label, timeoutMs = 60_000) {
 }
 
 // ---------------------------------------------------------------- terminal (Claude panel) helpers
-// The rows of the terminal on screen (hidden panel tabs keep their own .xterm-rows).
-const terminalLines = () => page.evaluate(() => {
-  const rows = [...document.querySelectorAll('.xterm-rows')].filter((element) => element.offsetParent !== null).at(-1);
-  return rows ? [...rows.children].map((row) => (row.textContent ?? '').replace(/\u00a0/g, ' ')) : [];
-});
+// The Claude panel's screen as the host's own terminal holds it (runpane:panels:screen), by panel id. The
+// desktop's DOM is no source: with a GPU, xterm renders through WebGL and its rows hold no text (SOBECK Run 5).
+async function terminalLines() {
+  if (!state.claudePanelId) return [];
+  const host = savedHosts(paneDir).find((entry) => entry.label === state.label);
+  if (!host) return [];
+  const screen = await daemonInvoke(host.baseUrl, savedHostToken(paneDir, host.id), 'runpane:panels:screen', { panelId: state.claudePanelId, limit: 80 }).catch(() => undefined);
+  return String(screen?.text ?? '').replace(/\u00a0/g, ' ').split('\n');
+}
 const terminalText = async () => (await terminalLines()).join('\n');
 const nonEmpty = (lines) => lines.filter((line) => line.trim() !== '');
 const tail = (lines, count) => nonEmpty(lines).slice(-count).join('\n');
@@ -433,8 +490,9 @@ const lastLine = (lines) => nonEmpty(lines).at(-1) ?? '';
 async function transcriptSize() {
   const name = `${state.claudePanelId}.jsonl`;
   if (mode === 'fake') {
-    const found = spawnSync('find', [path.join(fakeHome, '.claude/projects'), '-name', name, '-printf', '%s\n'], { encoding: 'utf8' }).stdout.trim();
-    return found ? Number(found.split('\n')[0]) : undefined;
+    const root = path.join(fakeHome, '.claude', 'projects');
+    const found = fs.existsSync(root) ? fs.readdirSync(root, { recursive: true }).map(String).find((entry) => path.basename(entry) === name) : undefined;
+    return found ? fs.statSync(path.join(root, found)).size : undefined;
   }
   if (relay) return undefined;
   return (await sandboxAgentState(state.cloud.sandboxId, boatOrg)).transcripts[name];
@@ -684,6 +742,11 @@ async function phaseAgent() {
   await ui.claudeTool().click();
   const claudeStartedAt = Date.now();
   await page.locator('.xterm').last().waitFor({ timeout: 60_000 });
+  // The panel's id first: its screen is read from the host by id.
+  const created = await until(async () => (await hostPanes()).find((pane) => pane.id === state.paneId)?.claudePanels?.[0], 30_000, 1000);
+  state.claudePanelId = created?.id;
+  saveState();
+  if (!state.claudePanelId) throw new Error(`no Claude panel appeared in "${state.paneName}" on the host`);
   await waitClaudeReady(120_000);
   timing('claude-panel-ready', claudeStartedAt);
   // By id, before prompting: exactly one Claude panel, in THIS Pane, and it is the active one.
@@ -906,6 +969,11 @@ async function phaseRemove() {
   }
   const left = savedHosts(paneDir).filter((entry) => entry.label === state.label);
   check('saved-host-removed', left.length === 0, JSON.stringify(left));
+  // Removed as far as the app goes; what follows only checks the switcher.
+  if (left.length === 0) {
+    state.removed = true;
+    saveState();
+  }
   await openSwitcher();
   check('switcher-no-longer-lists', !(await visible(ui.hostItem(state.label), 2000)), state.label);
   await closeMenus();
@@ -959,7 +1027,11 @@ try {
   // Never leave a sandbox behind: a failed live run still removes what it created, through the app.
   if (mode !== 'fake' && state.cloud && !state.removed && page) {
     log('cleanup: removing the sandbox after the failure');
-    await phaseRemove().catch((cleanupError) => check('cleanup-remove', false, `${cleanupError instanceof Error ? cleanupError.message.split('\n')[0] : cleanupError}; remove ${state.cloud.sandboxId} by hand`));
+    await phaseRemove().catch((cleanupError) => {
+      const reason = cleanupError instanceof Error ? cleanupError.message.split('\n')[0] : String(cleanupError);
+      // A failure after the app removed the sandbox is a UI check, not a sandbox left behind.
+      check('cleanup-remove', state.removed === true, state.removed ? `sandbox removed; a later UI check failed: ${reason}` : `${reason}; remove ${state.cloud.sandboxId} by hand`);
+    });
   }
 } finally {
   if (context && !relay) await context.tracing.stopChunk({ path: path.join(out, `trace-${String(++traceChunk).padStart(2, '0')}.zip`) }).catch(() => undefined);
@@ -971,7 +1043,9 @@ try {
   const unzipped = path.join(work, 'trace-unzipped');
   fs.rmSync(unzipped, { recursive: true, force: true });
   for (const trace of fs.readdirSync(out).filter((name) => name.endsWith('.zip'))) {
-    spawnSync('unzip', ['-qo', path.join(out, trace), '-d', path.join(unzipped, trace)]);
+    fs.mkdirSync(path.join(unzipped, trace), { recursive: true });
+    if (windows) spawnSync('tar', ['-xf', path.join(out, trace), '-C', path.join(unzipped, trace)]);
+    else spawnSync('unzip', ['-qo', path.join(out, trace), '-d', path.join(unzipped, trace)]);
   }
   // K6: nothing this run created may be left, whatever happened above (a failed Add removes its own sandbox).
   if (mode === 'live') {
