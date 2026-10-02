@@ -10,7 +10,7 @@ import {
   type CloudTransportMode,
   type ProvisionStepName,
 } from './bootstrap/provision';
-import { readLocalClaudeModel } from './claudeDefaults';
+import { createDefaultClaudeModelSource } from './claudeDefaults';
 import { waitForDaemonHealth, type DaemonHealthResult } from './bootstrap/health';
 import { PERSONAL_ORG, type BoatOrg, type CloudProvider, type CloudSandbox, type CloudSandboxState, type CloudSize, type SandboxHandle } from './provider';
 import { createDesktopConfigHosts, type SavedRemoteHosts } from './savedHosts';
@@ -156,7 +156,10 @@ export interface CloudSandboxesOptions {
    * `RUNPANE_CLOUD_PANE_DEB_SHA256` (the Pane .deb to install) and `RUNPANE_CLOUD_NAME_PREFIX`. Default process.env.
    */
   env?: NodeJS.ProcessEnv;
-  /** The user's Claude Code default model on this machine (default: readLocalClaudeModel); null for Claude's own. */
+  /**
+   * The user's default Claude model on this machine (default: createDefaultClaudeModelSource, explicit setting else
+   * detected); null for Claude Code's own default.
+   */
   localClaudeModel?: () => Promise<string | null>;
 }
 
@@ -194,7 +197,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = options.now ?? Date.now;
   const env = options.env ?? process.env;
-  const localClaudeModel = options.localClaudeModel ?? (() => readLocalClaudeModel(env));
+  const localClaudeModel = options.localClaudeModel ?? createDefaultClaudeModelSource({ env });
 
   /**
    * After a start or an update the sandbox is already usable, so a failure here is reported, not thrown: the

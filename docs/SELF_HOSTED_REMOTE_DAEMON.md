@@ -288,9 +288,15 @@ The sandbox tells Claude Code it is sandboxed (`CLAUDE_CODE_SANDBOXED=1`, set on
 so Claude Code skips its folder-trust prompt there, also for repositories you add later. This computer and remote
 hosts you set up yourself are not affected.
 
-New Claude Code panels in a sandbox start with the same default model as Claude Code on this computer
-(`ANTHROPIC_MODEL`, else `model` in `~/.claude/settings.json`); create, Start and Update apply it again, so a
-change follows. It is not a pin: a model picked inside the sandbox with `/model` is kept.
+New Claude Code panels in a sandbox start with the same default model as Claude Code on this computer. An
+explicit default wins: `ANTHROPIC_MODEL`, else `model` in `~/.claude/settings.json`. With neither, Pane detects the
+model your Claude Code picks for itself (your account's default). It starts your `claude` once with its network
+blocked (every proxy variable points at a closed local port), reads the model from the first line Claude prints, and
+stops it. No message reaches Anthropic, nothing is saved, and Pane reads only that line. The result is cached until
+`claude` or your settings file changes. Create, Start and Update apply the model again, and so does connecting to a
+sandbox, so a change follows. If detection fails (no `claude` on `PATH`, no answer within 15 s), Pane sends no model:
+the sandbox uses Claude Code's own default, and a notice saying why is logged. It is not a pin: a model picked inside
+the sandbox with `/model` is kept.
 
 ### Stop, start, update and remove
 
