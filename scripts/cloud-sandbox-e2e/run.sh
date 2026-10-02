@@ -45,7 +45,7 @@ ln -sfn "$NODE_PATH" "$here/node_modules"
 cleanup() {
   rm -f "$here/node_modules"
   if [ "${KEEP_CREDENTIALS:-0}" != 1 ]; then
-    find "$work/home/.config/runpane-cloud" "$work/home/.pane/config.json" -type f -exec shred -u {} + 2>/dev/null || true
+    find "$work/home/.config/runpane-cloud" "$work/home/.pane/config.json" "$work/home/.claude/.credentials.json" -type f -exec shred -u {} + 2>/dev/null || true
     echo "shredded staged credentials and saved host tokens under $work/home"
   fi
 }

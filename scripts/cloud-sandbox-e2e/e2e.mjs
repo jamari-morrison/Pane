@@ -53,11 +53,14 @@ if (paneBin.startsWith('/opt/') || paneBin === '/usr/bin/pane' || /[\\/]Programs
   throw new Error('e2e: PANE_BIN must be the test build, never the installed Pane');
 }
 // model-follow (D2): after DW2, the user changes their default and the sandbox's next new Claude panel follows.
-const allPhases = ['credentials', 'add', 'agent', 'stop', 'start', 'model-follow', 'remove', 'hygiene'];
+// model-detect (D2 ii): with NO explicit default the sandbox runs what local Claude actually uses.
+const allPhases = ['credentials', 'add', 'agent', 'stop', 'start', 'model-follow', 'model-detect', 'remove', 'hygiene'];
 const phases = (env.PHASES ? env.PHASES.split(',') : allPhases)
   .filter((phase) => mode !== 'fake' || phase !== 'credentials')
   // On SOBECK the user's real default is only read, never changed.
-  .filter((phase) => !relay || phase !== 'model-follow');
+  .filter((phase) => !relay || !['model-follow', 'model-detect'].includes(phase))
+  // A fake host is never provisioned, so D2 can't reach it.
+  .filter((phase) => mode !== 'fake' || phase !== 'model-detect');
 const maxStarts = Number(env.MAX_STARTS ?? (relay ? 2 : 6));
 const startsLog = env.STARTS_LOG ?? (relay ? path.join(out, 'starts.txt') : path.join(realHome, 'rc-loop/evidence/cs-e2e/starts.txt'));
 const secretsDir = env.SECRETS_DIR ?? path.join(realHome, 'rc-loop/secrets');
@@ -185,6 +188,9 @@ const appEnv = relay ? {
   // What the sandbox installs: the same build as this desktop (cs-e2e iface request).
   ...(env.PANE_DEB_URL ? { RUNPANE_CLOUD_PANE_DEB_URL: env.PANE_DEB_URL, RUNPANE_CLOUD_PANE_DEB_SHA256: env.PANE_DEB_SHA256 ?? '' } : {}),
   ...(mode === 'live' ? { RUNPANE_CLOUD_BOAT_ORG: boatOrg, RUNPANE_CLOUD_NAME_PREFIX: 'rp-loop-cs' } : {}),
+  // D2 (ii): the desktop user's local Claude is signed in with the subscription token, so local Claude (and the
+  // desktop's detection probe) has a real default to report. DETECT_LOGIN=1 stages a full login file instead.
+  ...(mode === 'live' && env.DETECT_LOGIN !== '1' ? { CLAUDE_CODE_OAUTH_TOKEN: secretValue('claudeToken') } : {}),
 });
 
 // ---------------------------------------------------------------- the user's default model (D2/D3)
@@ -200,6 +206,19 @@ function localDefaultModel() {
     return undefined;
   }
 }
+function clearLocalDefaultModel() {
+  if (relay) throw new Error('e2e: never changes the SOBECK user\'s default model');
+  let settings = {};
+  try {
+    settings = JSON.parse(fs.readFileSync(userClaudeSettings, 'utf8'));
+  } catch {
+    return;
+  }
+  delete settings.model;
+  fs.writeFileSync(userClaudeSettings, `${JSON.stringify(settings, null, 2)}\n`);
+  log(`local default model cleared (${userClaudeSettings.replace(home, '~')})`);
+}
+
 function setLocalDefaultModel(model) {
   if (relay) throw new Error('e2e: never changes the SOBECK user\'s default model');
   let settings = {};
@@ -1040,6 +1059,44 @@ async function phaseStart() {
   await shot('claude-recalled');
 }
 
+// A new Pane with a Claude panel that has answered once (so its transcript has a model): { paneId, panelId }.
+async function newPaneWithClaude(prefix) {
+  const paneName = `${prefix}-${crypto.randomBytes(2).toString('hex')}`;
+  await ui.newPaneIn(env.REPO).first().click();
+  const dialog = page.getByRole('dialog', { name: /^New Pane/ });
+  const nameField = dialog.getByPlaceholder('Enter a name for your pane');
+  await until(async () => (await nameField.inputValue()) !== '', 10_000, 300);
+  await until(async () => {
+    if ((await nameField.inputValue()) !== paneName) await nameField.fill(paneName);
+    await page.waitForTimeout(700);
+    return (await nameField.inputValue()) === paneName;
+  }, 15_000, 300);
+  await dialog.getByRole('button', { name: /^Create/ }).click();
+  await visible(ui.paneButton(paneName), 60_000);
+  await page.waitForTimeout(1500);
+  await ui.paneButton(paneName).click();
+  await page.waitForTimeout(1500);
+  const pane = (await hostPanes()).find((entry) => entry.name === paneName);
+  check(`${prefix}-pane-id`, Boolean(pane), `Pane "${paneName}" is ${pane?.id} on the host`);
+  await ui.addTool().click();
+  await ui.claudeTool().click();
+  const panel = await until(async () => (await hostPanes()).find((entry) => entry.id === pane.id)?.claudePanels?.[0], 30_000, 1000);
+  // The screen helpers follow state.claudePanelId; point them at this panel meanwhile.
+  const firstPanel = state.claudePanelId;
+  state.claudePanelId = panel?.id;
+  try {
+    await waitClaudeReady(120_000);
+    const a = 100 + crypto.randomInt(800);
+    const b = 100 + crypto.randomInt(800);
+    const reply = await askClaude(`Compute ${a}+${b} and reply with only SUM= followed by the result.`, `SUM=${a + b}`);
+    check(`${prefix}-panel-answers`, reply.answered, reply.answered ? `SUM=${a + b}` : 'no answer');
+  } finally {
+    state.claudePanelId = firstPanel;
+    saveState();
+  }
+  return { paneId: pane?.id, panelId: panel?.id };
+}
+
 // D2 "follows the change": the user changes their default; the sandbox's next new Claude panel runs it.
 // A second Pane, so DW2's one-Claude-panel checks on the first Pane stay as they were.
 async function phaseModelFollow() {
@@ -1056,42 +1113,65 @@ async function phaseModelFollow() {
   await ui.localItem().click();
   await page.waitForTimeout(2000);
   check('switched-back-for-model-follow', await connectTo(state.label, 90_000), `host switch to ${state.label} after the default changed`);
-  const paneName = `cs-e2e-follow-${crypto.randomBytes(2).toString('hex')}`;
-  await ui.newPaneIn(env.REPO).first().click();
-  const dialog = page.getByRole('dialog', { name: /^New Pane/ });
-  const nameField = dialog.getByPlaceholder('Enter a name for your pane');
-  await until(async () => (await nameField.inputValue()) !== '', 10_000, 300);
-  await until(async () => {
-    if ((await nameField.inputValue()) !== paneName) await nameField.fill(paneName);
-    await page.waitForTimeout(700);
-    return (await nameField.inputValue()) === paneName;
-  }, 15_000, 300);
-  await dialog.getByRole('button', { name: /^Create/ }).click();
-  await visible(ui.paneButton(paneName), 60_000);
-  await page.waitForTimeout(1500);
-  await ui.paneButton(paneName).click();
-  await page.waitForTimeout(1500);
-  const pane = (await hostPanes()).find((entry) => entry.name === paneName);
-  check('follow-pane-id', Boolean(pane), `Pane "${paneName}" is ${pane?.id} on the host`);
-  await ui.addTool().click();
-  await ui.claudeTool().click();
-  const panel = await until(async () => (await hostPanes()).find((entry) => entry.id === pane.id)?.claudePanels?.[0], 30_000, 1000);
-  // The screen helpers follow state.claudePanelId; point them at the new panel for this phase.
-  const firstPanel = state.claudePanelId;
-  state.claudePanelId = panel?.id;
-  try {
-    await waitClaudeReady(120_000);
-    const a = 100 + crypto.randomInt(800);
-    const b = 100 + crypto.randomInt(800);
-    const reply = await askClaude(`Compute ${a}+${b} and reply with only SUM= followed by the result.`, `SUM=${a + b}`);
-    check('follow-panel-answers', reply.answered, reply.answered ? `SUM=${a + b}` : 'no answer');
-    await checkPanelModel('model-follows-change', panel?.id, pane.id, next);
-    timing('default-change-to-followed-answer', changedAt);
-  } finally {
-    state.claudePanelId = firstPanel;
-    saveState();
-  }
+  const { panelId, paneId } = await newPaneWithClaude('cs-e2e-follow');
+  await checkPanelModel('model-follows-change', panelId, paneId, next);
+  timing('default-change-to-followed-answer', changedAt);
   await shot('model-follow');
+}
+
+// D2 (ii): no explicit default. Oracle: what local Claude actually uses, asked like the desktop's environment would
+// run it (one small real turn; first non-synthetic message.model). The desktop must detect the same and the
+// sandbox's next new panel must run it.
+function localClaudeActualModel() {
+  const run = spawnSync(claudeBin || 'claude', ['-p', 'Reply with only OK.', '--output-format', 'stream-json', '--verbose'], {
+    env: appEnv, cwd: home, encoding: 'utf8', timeout: 180_000,
+  });
+  const lines = String(run.stdout ?? '').split('\n').filter(Boolean).map((line) => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      return undefined;
+    }
+  }).filter(Boolean);
+  return {
+    reported: lines.find((line) => line.type === 'system' && line.subtype === 'init')?.model,
+    actual: lines.map((line) => line.message?.model).find((model) => model && model !== '<synthetic>'),
+    status: run.status,
+  };
+}
+
+async function phaseModelDetect() {
+  clearLocalDefaultModel();
+  if (env.DETECT_LOGIN === '1') stageClaudeLogin();
+  const local = localClaudeActualModel();
+  state.localClaudeModel = local;
+  saveState();
+  check('local-claude-reports-a-model', Boolean(local.actual), `local Claude (no explicit default): init model ${local.reported ?? '?'}, actual ${local.actual ?? '?'} (exit ${local.status})`);
+  const detected = fs.existsSync(path.join(out, 'app-main.log'))
+    ? (fs.readFileSync(path.join(out, 'app-main.log'), 'utf8').match(/detect[^\n]*?(claude-[a-z0-9.-]+)/gi) ?? []).slice(-3) : [];
+  log(`desktop log lines about detection: ${JSON.stringify(detected)}`);
+  // The same user steps as model-follow: switch hosts, then a new Pane with a Claude panel.
+  await openSwitcher();
+  await ui.localItem().click();
+  await page.waitForTimeout(2000);
+  check('switched-back-for-model-detect', await connectTo(state.label, 90_000), state.label);
+  const { panelId, paneId } = await newPaneWithClaude('cs-e2e-detect');
+  await checkPanelModel('model-detected-default', panelId, paneId, local.actual);
+  await shot('model-detect');
+}
+
+// DETECT_LOGIN=1 (live only, opt-in): a copy of this machine's Claude login in the isolated HOME, so local Claude
+// has an account-tier default. Off by default: a refresh by the copy could rotate the shared login's token.
+function stageClaudeLogin() {
+  const source = path.join(realHome, '.claude', '.credentials.json');
+  const target = path.join(home, '.claude', '.credentials.json');
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.copyFileSync(source, target);
+  fs.chmodSync(target, 0o600);
+  const credentials = JSON.parse(fs.readFileSync(target, 'utf8'));
+  addSecret('claudeLoginAccess', credentials.claudeAiOauth?.accessToken);
+  addSecret('claudeLoginRefresh', credentials.claudeAiOauth?.refreshToken);
+  log('staged a copy of the Claude login in the isolated HOME (values not shown)');
 }
 
 async function phaseRemove() {
@@ -1167,7 +1247,7 @@ try {
   }
   await launch();
   await shot('launched');
-  const run = { credentials: phaseCredentials, add: phaseAdd, agent: phaseAgent, stop: phaseStop, start: phaseStart, 'model-follow': phaseModelFollow, remove: phaseRemove, hygiene: phaseHygiene };
+  const run = { credentials: phaseCredentials, add: phaseAdd, agent: phaseAgent, stop: phaseStop, start: phaseStart, 'model-follow': phaseModelFollow, 'model-detect': phaseModelDetect, remove: phaseRemove, hygiene: phaseHygiene };
   for (const phase of phases) {
     log(`== phase ${phase}`);
     const phaseStartedAt = Date.now();
