@@ -172,7 +172,8 @@ const appEnv = relay
   : cleanEnv({ PANE_DIR: paneDir, ...debEnv, ...(mode === 'live' ? { RUNPANE_CLOUD_BOAT_ORG: boatOrg, RUNPANE_CLOUD_NAME_PREFIX: 'rp-loop-cs' } : {}) });
 
 // ---------------------------------------------------------------- the self-hosted remote (MODE=fake)
-const fakeHome = path.join(work, 'fake-home');
+// A short home like a sandbox's /home/user: a long one wraps every terminal row the checks read (DROP 1 proof).
+const fakeHome = env.FAKE_HOME ?? (windows ? path.join(work, 'fh') : path.join(os.tmpdir(), `cse2e-${path.basename(work).slice(-6)}`));
 const fakeDir = path.join(fakeHome, '.pane');
 const fakePort = Number(env.FAKE_PORT ?? 42198);
 const fakeBaseUrl = `http://127.0.0.1:${fakePort}`;
@@ -344,6 +345,8 @@ async function step(id, title, run, { applies = true, why = '' } = {}) {
     current.error = redact(error instanceof Error ? error.message : String(error));
     log('ERROR', id, current.error);
     await shot('error');
+    // A dialog or menu left open by the failure would hide the rest of the window from the next step.
+    for (let round = 0; round < 3; round++) await closeMenus();
   }
   const failed = current.error || current.checks.some((entry) => entry.verdict === 'FAIL');
   // A7: no screenshot of the result in the window, no MET.
@@ -369,7 +372,9 @@ const ui = {
   hostItem: (label) => page.getByRole('menuitemradio', { name: new RegExp(escapeRegExp(label)) }),
   localItem: () => page.getByRole('menuitemradio', { name: /This computer/ }),
   manageConnections: () => page.getByRole('button', { name: /Manage connections/ }),
-  openTerminal: (label) => page.getByRole('button', { name: `Open terminal on ${label}`, exact: true }),
+  // The switcher's entry is a menu item; the cloud sandbox row's is a button (same name, cs-host-terminal v2 C).
+  switcherTerminal: (label) => page.getByRole('menuitem', { name: `Open terminal on ${label}`, exact: true }),
+  rowOpenTerminal: (label) => ui.row(label).getByRole('button', { name: `Open terminal on ${label}`, exact: true }),
   hostTerminalTab: (label) => page.getByRole('tab', { name: new RegExp(`${escapeRegExp(label)} · Terminal`) }),
   hostTerminalHeading: (label) => page.getByText(`Terminal on ${label}`, { exact: true }),
   hostChip: (scope, label, kind) => scope.getByText(label ? `On: ${label} (${kind})` : 'On: This computer', { exact: true }),
@@ -401,9 +406,12 @@ const ui = {
   viewLog: (label) => page.getByRole('button', { name: `View log for ${label}`, exact: true }),
   startupLog: (label) => page.getByRole('dialog', { name: `Startup log: ${label}` }),
   confirmRemove: (label) => page.getByRole('dialog', { name: `Remove ${label}?` }),
-  openMainWorkspace: (repo) => page.getByRole('button', { name: `Open main workspace for ${repo}` }),
+  // Expanded sidebar: the repository's "<repo> (Main)" row and each Pane's row (a git status badge can precede its name).
+  openMainWorkspace: (repo) => page.getByRole('button', { name: `${repo} (Main)`, exact: true }),
   newPaneIn: (repo) => page.getByRole('button', { name: `New pane in ${repo}` }),
-  openPane: (repo, pane) => page.getByRole('button', { name: `Open pane ${repo}/${pane}` }),
+  openPane: (repo, pane) => page.getByRole('button', { name: new RegExp(`^\\S*${escapeRegExp(pane)}$`) }).first(),
+  // The field's visible label isn't tied to it; its accessible name is the placeholder.
+  projectName: (dialog) => dialog.getByRole('textbox', { name: 'Enter project name' }),
   addTool: () => page.getByRole('button', { name: 'Add tool' }).first(),
   tool: (name) => page.getByRole('menuitem', { name: new RegExp(`^${escapeRegExp(name)}`) }),
   panelTab: (name) => page.getByRole('tab', { name: new RegExp(`^${escapeRegExp(name)}`) }),
@@ -515,6 +523,17 @@ async function typeInVisibleTerminal(text, { enter = true } = {}) {
   await page.keyboard.type(text, { delay: 15 });
   if (enter) await page.keyboard.press('Enter');
 }
+// The last screen row where `command` ends. A long prompt plus command wraps over several rows (DROP 1 D5: the
+// worktree prompt pushed the command past the terminal width), so up to 4 consecutive rows are joined.
+function commandEnd(lines, command) {
+  for (let end = lines.length - 1; end >= 0; end--) {
+    for (let start = end; start >= Math.max(0, end - 3); start--) {
+      // It ends on `end`: the rows up to `end` hold it, the rows before `end` alone don't.
+      if (lines.slice(start, end + 1).join('').includes(command) && !lines.slice(start, end).join('').includes(command)) return end;
+    }
+  }
+  return -1;
+}
 async function runInTerminal(panelId, command, { timeoutMs = 60_000, done } = {}) {
   await typeInVisibleTerminal(command);
   let last = '';
@@ -522,7 +541,7 @@ async function runInTerminal(panelId, command, { timeoutMs = 60_000, done } = {}
   const output = await until(async () => {
     const text = await screenText(panelId);
     const lines = nonEmpty(text);
-    const at = lines.findLastIndex((line) => line.includes(command));
+    const at = commandEnd(lines, command);
     if (at < 0) return undefined;
     const after = lines.slice(at + 1);
     const finished = done ? done(after.join('\n')) : after.length > 0 && promptLine.test(after.at(-1));
@@ -534,7 +553,11 @@ async function runInTerminal(panelId, command, { timeoutMs = 60_000, done } = {}
     }
     return Date.now() - stableSince > 800 ? { lines: after, text } : undefined;
   }, timeoutMs, 400);
-  if (!output) throw new Error(`no output for "${command}" within ${Math.round(timeoutMs / 1000)} s`);
+  if (!output) {
+    const screen = await screenText(panelId).catch(() => '');
+    fs.writeFileSync(path.join(out, `${String(shotIndex + 1).padStart(3, '0')}-${current?.id ?? 'setup'}-terminal-timeout.screen.txt`), redact(screen));
+    throw new Error(`no output for "${command}" within ${Math.round(timeoutMs / 1000)} s`);
+  }
   await sleep(700); // the window draws what the host already holds
   return output;
 }
@@ -545,8 +568,11 @@ async function hostTerminalPanelId() {
 }
 async function openHostTerminalFromSwitcher(label) {
   await openSwitcher();
-  await ui.openTerminal(label).first().click();
-  await ui.hostTerminalTab(label).waitFor({ timeout: 30_000 });
+  await ui.switcherTerminal(label).click();
+  if (!(await visible(ui.hostTerminalTab(label), 30_000))) {
+    await shot('host-terminal-not-shown', { oracle: { hostTerminal: await hostInvoke('host-terminal:get').catch((error) => String(error)) } });
+    throw new Error(`"Open terminal on ${label}" did not show the "${label} · Terminal" tab`);
+  }
   await page.locator('.xterm:visible').last().waitFor({ timeout: 30_000 });
   const panelId = await until(hostTerminalPanelId, 30_000);
   if (!panelId) throw new Error('host-terminal:get returned no panel');
@@ -677,7 +703,7 @@ const original = {};
 async function d1() {
   check('connected', await connectTo(state.label), `switcher → ${state.label}`);
   await openSwitcher();
-  check('switcher-offers-host-terminal', await visible(ui.openTerminal(state.label), 5000), `"Open terminal on ${state.label}" on the active row`);
+  check('switcher-offers-host-terminal', await visible(ui.switcherTerminal(state.label), 5000), `"Open terminal on ${state.label}" on the active row`);
   await shot('switcher-terminal-button');
   await closeMenus();
   const panelId = await openHostTerminalFromSwitcher(state.label);
@@ -834,7 +860,7 @@ async function windowsPathRejected() {
   const add = await openRepositoryDialog();
   check('open-host-chip', await visible(ui.hostChip(add, state.label, hostKind), 3000), `"On: ${state.label} (${hostKind})"`);
   const before = await projectsOnHost();
-  await add.getByLabel('Project Name').fill('montlakev2-windows-path');
+  await ui.projectName(add).fill('montlakev2-windows-path');
   await add.getByLabel('Repository Path').fill(WINDOWS_PATH);
   await add.getByRole('button', { name: 'Open', exact: true }).click().catch(() => undefined);
   const sentence = `That's a path on this computer; ${state.label} is a Linux host. Pick a folder on ${state.label}.`;
@@ -865,7 +891,7 @@ async function d4OpenAndNew() {
   await shot('open-picker-repo');
   await ui.pickerConfirm(openPicker).click();
   await openPicker.waitFor({ state: 'hidden', timeout: 5000 });
-  if (!(await add.getByLabel('Project Name').inputValue())) await add.getByLabel('Project Name').fill(openRepoDir);
+  if (!(await ui.projectName(add).inputValue())) await ui.projectName(add).fill(openRepoDir);
   check('open-path-from-picker', (await add.getByLabel('Repository Path').inputValue()) === hostPath(expected.home, openRepoDir), await add.getByLabel('Repository Path').inputValue());
   await shot('open-filled');
   await add.getByRole('button', { name: 'Open', exact: true }).click();
@@ -880,7 +906,7 @@ async function d4OpenAndNew() {
   const created = ui.dialog(/^New Project/);
   await created.waitFor({ timeout: 10_000 });
   const newName = `e2e-new-${stamp}`;
-  await created.getByLabel('Project Name').fill(newName);
+  await ui.projectName(created).fill(newName);
   await created.getByLabel('Repository Path').fill(`~/${newName}`);
   await created.getByRole('button', { name: 'Create', exact: true }).click();
   const made = await until(async () => (await projectsOnHost()).find((project) => samePath(project.path, hostPath(expected.home, newName))), 60_000, 2000);
@@ -921,7 +947,9 @@ async function d5() {
   saveState();
   check('pane-terminal-in-worktree', cwd === session.worktreePath && top === session.worktreePath, `pwd ${cwd}, toplevel ${top}, worktree ${session.worktreePath}`);
   check('pane-worktree-not-main', session.worktreePath !== hostPath(expected.home, repo), 'the Pane has its own worktree');
-  check('pane-branch', Boolean(branch) && worktrees.some((line) => line.startsWith(session.worktreePath) && line.includes(`[${branch}]`)), `branch ${branch}; worktree list ${JSON.stringify(worktrees)}`);
+  // `git worktree list` rows can wrap: judged on the rows joined.
+  const listed = new RegExp(`${escapeRegExp(session.worktreePath)}\\s+[0-9a-f]{7,}\\s+\\[${escapeRegExp(branch ?? '')}\\]`).test(worktrees.join(''));
+  check('pane-branch', Boolean(branch) && listed, `branch ${branch}; worktree list ${JSON.stringify(worktrees)}`);
   await shot('pane-terminal-worktree', { result: true, oracle: { session: state.pane, lines } });
 }
 
@@ -966,18 +994,18 @@ async function d7() {
   await shot('startup-status-first', { result: true, oracle: first });
   await openCloud();
   check('row-no-chip-after-ok-run', !(await visible(ui.startupChip(state.label), 1000)), 'no ⚠ chip');
-  check('row-open-terminal-while-running', await visible(ui.openTerminal(state.label), 2000), 'Open terminal in the Running row');
+  check('row-open-terminal-while-running', await visible(ui.rowOpenTerminal(state.label), 2000), 'Open terminal in the Running row');
   await shot('row-running');
 
   await ui.rowAction('Stop', state.label).click();
   let sawOpenTerminalWhileNotRunning = false;
   const stopped = await until(async () => {
     const row = await rowText(state.label);
-    if (!rowBadge(row, 'Running') && await visible(ui.openTerminal(state.label), 200)) sawOpenTerminalWhileNotRunning = true;
+    if (!rowBadge(row, 'Running') && await visible(ui.rowOpenTerminal(state.label), 200)) sawOpenTerminalWhileNotRunning = true;
     return rowBadge(row, 'Stopped');
   }, Number(env.STOP_WAIT_MS ?? 1_000_000), 1500);
   check('row-stopped', Boolean(stopped), await rowText(state.label));
-  check('stopped-hides-open-terminal', !sawOpenTerminalWhileNotRunning && !(await visible(ui.openTerminal(state.label), 1000)), 'no Open terminal while stopping/stopped');
+  check('stopped-hides-open-terminal', !sawOpenTerminalWhileNotRunning && !(await visible(ui.rowOpenTerminal(state.label), 1000)), 'no Open terminal while stopping/stopped');
   await shot('row-stopped', { result: true });
 
   countStart('start');
@@ -1142,9 +1170,13 @@ async function restoreStartupScript() {
 
 // The local host is unchanged: Browse on This computer asks for the native dialog, with no in-app browser.
 async function regressionLocalBrowse() {
-  await openSwitcher();
-  await ui.localItem().click();
-  await sleep(2000);
+  // With no remote host left (D9 removed the last one) there is no switcher: the window is already on This computer.
+  await closeSettings();
+  if (await visible(ui.switcherChip(), 2000)) {
+    await openSwitcher();
+    await ui.localItem().click();
+    await sleep(2000);
+  }
   await goHome();
   await ui.homeCard('New Project').click();
   const dialog = ui.dialog(/^New Project/);
@@ -1223,6 +1255,8 @@ async function main() {
     results.regression.push({ name: 'other-hosts-unchanged', verdict: same ? 'PASS' : 'FAIL', detail: `${hostsBefore.map((host) => host.label).join(', ') || 'none'}` });
     await closeApp();
     fakeDaemonKill();
+    // The short fake home outside the work dir goes too (its pairing token in .pane included).
+    if (mode === 'fake' && !env.FAKE_HOME && fakeHome.startsWith(os.tmpdir())) fs.rmSync(fakeHome, { recursive: true, force: true });
     const known = scanForSecrets([out]);
     const shapes = scanForTokenShapes([out]);
     results.secretScan = { files: known.files, knownValueHits: known.hits.map((hit) => ({ file: path.relative(out, hit.file), names: hit.names })), tokenShapeHits: shapes.map((hit) => ({ file: path.relative(out, hit.file), shapes: hit.shapes })) };
