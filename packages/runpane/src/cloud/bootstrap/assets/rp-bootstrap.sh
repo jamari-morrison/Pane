@@ -834,7 +834,9 @@ step_github_auth() {
   shred -u "$file" 2>/dev/null || rm -f "$file"
   if [ "$rc" -ne 0 ]; then
     case "$out" in
-      *"HTTP 401"*|*"Bad credentials"*|*"missing required scope"*) result '{"ok":true,"state":"invalid"}' ;;
+      *"HTTP 401"*|*"Bad credentials"*) result '{"ok":true,"state":"invalid"}' ;;
+      # GitHub accepted the token, but a classic token lacks a scope gh requires: the fix is another kind of token.
+      *"missing required scope"*) result '{"ok":true,"state":"error","reason":"missing-scope"}' ;;
       *) result '{"ok":true,"state":"error","reason":"login-failed"}' ;;
     esac
     return

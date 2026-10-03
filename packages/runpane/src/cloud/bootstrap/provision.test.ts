@@ -327,10 +327,25 @@ test('applyGitHubToken skips quietly without a token and maps every outcome to f
 
   const outcome = async (payload: JsonObject) => applyGitHubToken(recordingSandbox(new Map([['github-auth', answer(payload)]])).handle, GITHUB_TOKEN);
   assert.deepEqual(await outcome({ ok: true, state: 'invalid' }), { state: 'invalid' });
+  assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'missing-scope' }),
+    { state: 'error', message: 'GitHub accepted the token, but it lacks a scope gh needs; use a fine-grained token.' });
   assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'gh-missing' }), { state: 'error', message: "gh isn't installed on the sandbox." });
   assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'login-failed' }),
     { state: 'error', message: "gh couldn't sign in on the sandbox (GitHub may be unreachable from it)." });
   assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'setup-git-failed' }), { state: 'error', message: 'gh signed in, but setting up git failed.' });
   assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'something-new' }), { state: 'error', message: "Couldn't apply the GitHub token on the sandbox." });
   await assert.rejects(outcome({ ok: true, state: 'signed-in' }), /malformed result/u, 'signed-in needs the user');
+});
+
+test('applyGitHubToken removes the uploaded token file when the step never runs', async () => {
+  const sandbox = recordingSandbox(new Map());
+  const runScript = sandbox.handle.runScript;
+  sandbox.handle.runScript = async (script, options) => {
+    if (script.includes("'github-auth'")) throw new Error('boat exec failed');
+    return runScript(script, options);
+  };
+  await assert.rejects(applyGitHubToken(sandbox.handle, GITHUB_TOKEN), /boat exec failed/u);
+  const file = [...sandbox.files.keys()].find((name) => name.includes('/gh-token-')) ?? '';
+  assert.ok(sandbox.scripts.some((script) => script.startsWith('shred -u ') && script.includes(file)), 'the file is removed');
+  for (const script of sandbox.scripts) assert.ok(!script.includes(GITHUB_TOKEN), 'the token is in no command string');
 });

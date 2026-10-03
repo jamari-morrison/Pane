@@ -659,13 +659,16 @@ test('github-auth signs gh and git in with the token on stdin only, then removes
 });
 
 test('github-auth calls a token GitHub refuses invalid, and anything else an error, and always removes the token file', () => {
-  for (const mode of ['bad-credentials', 'missing-scope'] as const) {
+  for (const mode of ['bad-credentials'] as const) {
     const run = runGitHubAuth(mode);
     assert.equal(run.status, 0, run.stdout + run.stderr);
     assert.deepEqual(run.payload, { ok: true, state: 'invalid' }, mode);
     assert.equal(fs.existsSync(run.tokenFile), false, `${mode}: the token file is removed`);
     assert.doesNotMatch(run.stdout + run.stderr, /SECRET|FAKE-GH-TOKEN|Bad credentials/u);
   }
+  const scope = runGitHubAuth('missing-scope');
+  assert.deepEqual(scope.payload, { ok: true, state: 'error', reason: 'missing-scope' });
+  assert.equal(fs.existsSync(scope.tokenFile), false);
   const offline = runGitHubAuth('offline');
   assert.deepEqual(offline.payload, { ok: true, state: 'error', reason: 'login-failed' });
   assert.equal(fs.existsSync(offline.tokenFile), false);
