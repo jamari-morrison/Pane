@@ -309,6 +309,8 @@ the sandbox with `/model` is kept.
 Codex is installed in every sandbox but not signed in. Sign it in yourself: run `codex login --device-auth` in the
 sandbox's terminal (**Terminal on <sandbox>**). Claude Code signs in by itself when a Claude token is saved.
 
+On cloud sandboxes, Pane stores the GitHub token in ~/.config/gh/hosts.yml (owner-only).
+
 Detection is best effort. Known limits:
 
 - When this computer's Claude Code is signed in only with a token (`CLAUDE_CODE_OAUTH_TOKEN`), it prints no
