@@ -14,8 +14,10 @@ describe('createCloudStartupScriptFile', () => {
 
     const scriptPath = join(paneDir, 'cloud-sandboxes', 'startup.sh');
     expect(readFileSync(scriptPath, 'utf8')).toBe('command -v doppler || echo install\n');
-    expect(statSync(scriptPath).mode & 0o777).toBe(0o600);
-    expect(statSync(join(paneDir, 'cloud-sandboxes')).mode & 0o777).toBe(0o700);
+    if (process.platform !== 'win32') {
+      expect(statSync(scriptPath).mode & 0o777).toBe(0o600);
+      expect(statSync(join(paneDir, 'cloud-sandboxes')).mode & 0o777).toBe(0o700);
+    }
     await expect(file.read()).resolves.toBe('command -v doppler || echo install\n');
 
     await file.write('');

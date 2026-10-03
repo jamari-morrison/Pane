@@ -57,6 +57,7 @@ command -v doppler >/dev/null || curl -Ls --tlsv1.2 --proto "=https" https://cli
   process as a systemd user service instead.
 - **No input.** The script has no terminal and its input is empty, so a command that asks a question gets no answer:
   pass its non-interactive flag (for example `apt-get -y`).
-- **Status after Create, Start and edits only.** A row shows the run this app last read. Pane doesn't watch later
-  runs, and a restarted desktop shows nothing until the next start or edit.
+- **The failure chip is kept in memory only.** A row shows the run the desktop read after Create, Start or an edit.
+  Pane doesn't watch later runs, and the chip is not kept across a desktop restart: it comes back at the next Start
+  or edit. The sandbox's `startup-status.json` and logs always have the latest run.
 - **Plain text.** The script is not encrypted on this computer or in the sandbox.

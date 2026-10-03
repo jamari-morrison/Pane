@@ -211,6 +211,12 @@ function repoRoot(): string {
   return dir;
 }
 
+// The tests run the embedded copies: an edit to a source script must reach them, or the tests would pass on the old one.
+test('the embedded assets match their source scripts', () => {
+  const sources = path.join(repoRoot(), 'packages/runpane/src/cloud/bootstrap/assets');
+  for (const name of names) assert.equal(cloudBootstrapAssets[name], fs.readFileSync(path.join(sources, name), 'utf8'), `${name} is stale; run node packages/runpane/scripts/generate-cloud-assets.js`);
+});
+
 // CLAUDE_CODE_SANDBOXED turns off Claude Code's folder-trust check. Only a disposable cloud sandbox may set it, and
 // only for its own daemon: never Local Pane, a manually set up remote host, or any other code path.
 test('CLAUDE_CODE_SANDBOXED is set only by the cloud sandbox daemon drop-in', () => {
