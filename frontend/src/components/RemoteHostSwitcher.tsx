@@ -1,10 +1,12 @@
 import { useState, type ReactElement } from 'react';
-import { Cloud, Laptop, Plug, Radio, Server } from 'lucide-react';
+import { Cloud, Laptop, Plug, Radio, SquareTerminal } from 'lucide-react';
 import { Dropdown, DropdownMenuItem, type DropdownItem, type DropdownProps } from './ui/Dropdown';
 import { API } from '../utils/api';
 import { useConfigStore } from '../stores/configStore';
 import { LOCAL_RUNTIME_ID, type RemoteHostSwitcherModel } from '../utils/remoteRuntimePresentation';
 import { getCloudHostSwitcherEntry } from '../utils/cloudSandboxPresentation';
+import { HOST_ICONS, describeHost } from '../utils/hostKind';
+import { getHostTerminalPresentation, openHostTerminal } from '../utils/hostTerminal';
 import type { RemotePaneConnectionProfile, RemotePaneConnectionState } from '../../../shared/types/remoteDaemon';
 import type { CloudSandboxView } from '../../../shared/types/cloudSandboxes';
 
@@ -79,19 +81,29 @@ export function RemoteHostSwitcher({
     ...profiles.map((profile) => {
       const sandbox = cloudSandboxes.find((candidate) => candidate.profileId === profile.id);
       const cloudEntry = getCloudHostSwitcherEntry(sandbox);
-      const description = cloudEntry?.description ?? (remote && profile.id === model.selectedId
+      const active = remote && profile.id === model.selectedId;
+      const description = cloudEntry?.description ?? (active
         ? `${activeStatusText} · ${profile.baseUrl}`
         : profile.baseUrl);
       return {
         id: profile.id,
         label: profile.label,
         description,
-        icon: profile.cloud ? Cloud : Server,
+        // WIP drop: a saved sandbox without hostKind still draws a cloud until hostKind is backfilled (A1).
+        icon: profile.cloud ? Cloud : HOST_ICONS[describeHost(profile).icon],
         disabled: switching || cloudEntry?.action === 'wait',
         onClick: () => {
           if (sandbox && cloudEntry?.action === 'start') void startAndSwitchTo(sandbox, profile.id);
           else void switchTo(profile.id);
         },
+        // Only the active host's terminal can open: the window talks to one host at a time.
+        action: active ? {
+          label: getHostTerminalPresentation(profile).openLabel,
+          icon: SquareTerminal,
+          onClick: () => {
+            openHostTerminal().catch((error: unknown) => console.error('Failed to open the host terminal:', error));
+          },
+        } : undefined,
       };
     }),
     {
