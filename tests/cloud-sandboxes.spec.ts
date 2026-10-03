@@ -414,3 +414,16 @@ test('the GitHub token is saved masked, shown only as set, and the row shows how
   await expect(page.getByRole('listitem', { name: 'Cloud sandbox delta' })).not.toContainText('GitHub');
   await page.screenshot({ path: testInfo.outputPath('cloud-github-token.png'), fullPage: true });
 });
+
+test('asking for the host\'s GitHub settings focuses the GitHub token field, even when sandboxes load slowly', async ({ page }) => {
+  await installElectronApiMock(page, { cloudSandboxes: { credentials: ALL_CREDENTIALS, sandboxes: [], loadDelayMs: 1500 } });
+  await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await expect(page.locator('[data-testid="sidebar"]').first()).toBeVisible({ timeout: 10_000 });
+
+  // What the clone notice's "Open Settings" does on a cloud sandbox.
+  await page.evaluate(() => window.dispatchEvent(new Event('pane:open-host-github-settings')));
+
+  const field = page.locator('#settings-remote-cloud-github-token');
+  await expect(field).toBeFocused({ timeout: 5_000 });
+  await expect(field).toBeInViewport();
+});

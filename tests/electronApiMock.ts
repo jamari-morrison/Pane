@@ -85,6 +85,8 @@ type ElectronApiMockOptions = {
   cloudSandboxes?: Pick<CloudSandboxesSnapshot, 'credentials' | 'sandboxes'> & {
     /** Saved host profiles for the seeded sandboxes. */
     profiles?: RemotePaneConnectionProfile[];
+    /** How long the first read takes, like main loading the cloud library. */
+    loadDelayMs?: number;
   };
   /**
    * A fake POSIX host filesystem behind fs:browse-directories, fs:create-directory,
@@ -1304,7 +1306,11 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           subscribe('remote-daemon:connection-state-changed', callback),
         onHostStateChanged: (callback: MockEventCallback) =>
           subscribe('remote-daemon:host-state-changed', callback),
-        getCloudSandboxes: () => success(cloudSnapshot()),
+        getCloudSandboxes: async () => {
+          const delay = mockOptions.cloudSandboxes?.loadDelayMs ?? 0;
+          if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+          return success(cloudSnapshot());
+        },
         updateCloudCredentials: (update: CloudCredentialsUpdate) => {
           if (!cloud.available) return cloudUnavailable();
           cloud.credentialUpdates.push(clone(update));
