@@ -70,4 +70,5 @@ cleanup() {
 }
 trap cleanup EXIT
 echo "build $tag ($deb), work $work, mode $MODE"
-xvfb-run -a -s "-screen 0 1440x900x24" node "$here/e2e.mjs"
+# DRIVER=real-user.mjs: the real-user repo flow kit (D0-D9); default: the Add cloud sandbox proof.
+xvfb-run -a -s "-screen 0 1440x900x24" node "$here/${DRIVER:-e2e.mjs}"

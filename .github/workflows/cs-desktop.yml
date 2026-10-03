@@ -33,6 +33,10 @@ on:
         description: Kit-only release reusing this cs-desktop-* release's app zip byte for byte (empty = build the app)
         type: string
         default: ''
+      app_ref:
+        description: Build this ref/sha instead of .github/cs-e2e/app-ref (a drop; empty = the file)
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -90,7 +94,9 @@ jobs:
 
     - id: ref
       shell: bash
-      run: echo "ref=$(tr -d '[:space:]' < harness/.github/cs-e2e/app-ref)" >> "$GITHUB_OUTPUT"
+      env:
+        APP_REF: ${{ inputs.app_ref }}
+      run: echo "ref=${APP_REF:-$(tr -d '[:space:]' < harness/.github/cs-e2e/app-ref)}" >> "$GITHUB_OUTPUT"
 
     - uses: actions/checkout@v7
       with:
@@ -227,7 +233,7 @@ jobs:
         kit=kit/relay-kit
         mkdir -p "$kit"
         cp rckit/scripts/cloud-dist/sobeck/{install.ps1,remove.ps1} "$kit/"
-        cp scripts/cloud-sandbox-e2e/sobeck/* scripts/cloud-sandbox-e2e/{e2e.mjs,secrets.mjs,oracles.mjs,fake-claude.mjs} "$kit/"
+        cp scripts/cloud-sandbox-e2e/sobeck/* scripts/cloud-sandbox-e2e/{e2e.mjs,real-user.mjs,secrets.mjs,oracles.mjs,fake-claude.mjs} "$kit/"
         (cd "$kit" && echo '{"private":true}' > package.json && npm install --no-audit --no-fund --no-package-lock "playwright-core@$playwright")
         (cd kit && zip -qr "../release/Pane-CloudSandbox-relay-kit-$VERSION.zip" relay-kit)
         cp rckit/scripts/cloud-dist/sobeck/install.ps1 release/sobeck-install.ps1
