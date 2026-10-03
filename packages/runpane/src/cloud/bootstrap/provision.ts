@@ -384,7 +384,14 @@ export async function applyGitHubToken(sandbox: SandboxHandle, token: string | u
   await uploadScripts(sandbox, sandboxHome);
   const file = path.posix.join(stateDir(sandboxHome), `gh-token-${crypto.randomBytes(6).toString('hex')}`);
   await sandbox.writeFile(file, `${token.trim()}\n`);
-  const result = await new StepRunner(sandbox, sandboxHome).run('github-auth', [file], githubAuthStepSchema, { timeoutSeconds: 120 });
+  let result: ReturnType<typeof githubAuthStepSchema.decode>;
+  try {
+    result = await new StepRunner(sandbox, sandboxHome).run('github-auth', [file], githubAuthStepSchema, { timeoutSeconds: 120 });
+  } catch (error) {
+    // The step removes the file itself; if it never ran, remove it here (best effort; the path only, never the token).
+    await sandbox.runScript(`shred -u ${shellQuote(file)} 2>/dev/null || rm -f ${shellQuote(file)}`, { timeoutSeconds: 30 }).catch(() => undefined);
+    throw error;
+  }
   if (result.state === 'signed-in') {
     if (!result.user) throw new BootstrapError('github-auth', 'malformed result: signed in without a user');
     return { state: 'signed-in', user: result.user };

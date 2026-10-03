@@ -834,6 +834,8 @@ step_github_auth() {
   shred -u "$file" 2>/dev/null || rm -f "$file"
   if [ "$rc" -ne 0 ]; then
     case "$out" in
+      # A classic token without a scope gh requires can't sign in either. gh skips that check for fine-grained tokens
+      # (no X-OAuth-Scopes header; pkg/cmd/auth/shared/oauth_scopes.go HeaderHasMinimumScopes).
       *"HTTP 401"*|*"Bad credentials"*|*"missing required scope"*) result '{"ok":true,"state":"invalid"}' ;;
       *) result '{"ok":true,"state":"error","reason":"login-failed"}' ;;
     esac
