@@ -327,8 +327,6 @@ test('applyGitHubToken skips quietly without a token and maps every outcome to f
 
   const outcome = async (payload: JsonObject) => applyGitHubToken(recordingSandbox(new Map([['github-auth', answer(payload)]])).handle, GITHUB_TOKEN);
   assert.deepEqual(await outcome({ ok: true, state: 'invalid' }), { state: 'invalid' });
-  assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'missing-scope' }),
-    { state: 'error', message: 'GitHub accepted the token, but it lacks a scope gh needs; use a fine-grained token.' });
   assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'gh-missing' }), { state: 'error', message: "gh isn't installed on the sandbox." });
   assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'login-failed' }),
     { state: 'error', message: "gh couldn't sign in on the sandbox (GitHub may be unreachable from it)." });

@@ -366,7 +366,6 @@ export type GitHubAuthStatus =
 
 const GITHUB_AUTH_ERRORS = new Map<string, string>([
   ['gh-missing', "gh isn't installed on the sandbox."],
-  ['missing-scope', 'GitHub accepted the token, but it lacks a scope gh needs; use a fine-grained token.'],
   ['login-failed', "gh couldn't sign in on the sandbox (GitHub may be unreachable from it)."],
   ['setup-git-failed', 'gh signed in, but setting up git failed.'],
   ['status-failed', "gh signed in, but couldn't confirm it."],
