@@ -71,6 +71,8 @@ const prBranch = `e2e/${stamp}`;
 const WINDOWS_PATH = String.raw`C:\runpane-temp-home\montlakev2`;
 // REAL-2 (Red 12:07 PT): BROWSER=false so gh never opens a browser on the host. GH_PREFILL overrides it for older drops.
 const D3_FOLDER = 'e2e-d3';
+// Obviously fake, and not shaped like any real GitHub token (W4: still in the exact-value scan).
+const DUMMY_GITHUB_TOKEN = 'e2e-dummy-not-a-real-token-0000';
 const GH_PREFILL = env.GH_PREFILL ?? 'BROWSER=false gh auth login --web --git-protocol https && gh auth setup-git';
 const MARKER = 'E2E_MARKER';
 const STARTUP_MARKER_LOG = '~/e2e-startup-marker.log';
@@ -131,18 +133,26 @@ if (mode === 'live') {
   loadSecret('tailscaleClientSecret', path.join(secretsDir, 'TAILSCALE_OAUTH_SECRET'));
   addSecret('tailscaleClientId', env.TAILSCALE_CLIENT_ID ?? 'krreHuCr3M11CNTRL');
 }
-if (relay) {
-  // The credentials Red saved in this build, registered so every log and evidence file is searched for them.
-  const credentialsFile = path.join(env.RUNPANE_CLOUD_DIR ?? path.join(env.XDG_CONFIG_HOME ?? path.join(realHome, '.config'), 'runpane-cloud'), 'credentials.json');
+// The credentials saved in the app (Red's on SOBECK, his GitHub token included once he pastes it), registered so every
+// log and evidence file is searched for them; values stay in memory, reported by name, length and sha256[:12] only.
+function registerSavedCredentials() {
+  const credentialsFile = path.join(env.RUNPANE_CLOUD_DIR ?? path.join(env.XDG_CONFIG_HOME ?? path.join(home, '.config'), 'runpane-cloud'), 'credentials.json');
+  const found = [];
   const register = (value, keyPath) => {
-    if (typeof value === 'string' && value.length >= 16) addSecret(`cloudCredential:${keyPath}`, value);
-    else if (value && typeof value === 'object') for (const [key, child] of Object.entries(value)) register(child, `${keyPath}.${key}`);
+    if (typeof value === 'string' && value.length >= 16) {
+      addSecret(`cloudCredential:${keyPath}`, value);
+      found.push(`${keyPath} (len ${value.length}, sha256 ${crypto.createHash('sha256').update(value).digest('hex').slice(0, 12)})`);
+    } else if (value && typeof value === 'object') for (const [key, child] of Object.entries(value)) register(child, `${keyPath}.${key}`);
   };
   try {
     register(JSON.parse(fs.readFileSync(credentialsFile, 'utf8')), 'credentials');
   } catch {
     // None saved yet: D0 reports it.
   }
+  return found;
+}
+if (relay) {
+  registerSavedCredentials();
 } else if (env.FAKE_CLAUDE !== '1') {
   const claudeSlot = fs.readFileSync(path.join(secretsDir, 'claude-slot'), 'utf8').trim();
   loadSecret('claudeToken', path.join(secretsDir, claudeSlot));
@@ -389,7 +399,8 @@ async function shot(what, { oracle, result = false } = {}) {
     fs.writeFileSync(`${base}.oracle.json`, `${text}\n`);
     entry.oracle = path.basename(`${base}.oracle.json`);
   }
-  const shapes = [...new Set([...tokenShapes(aria), ...(oracle === undefined ? [] : tokenShapes(JSON.stringify(oracle)))])];
+  // What is written is scanned (redacted text): a shape left after redaction would be a leak.
+  const shapes = [...new Set([...tokenShapes(aria), ...(oracle === undefined ? [] : tokenShapes(redact(JSON.stringify(oracle))))])];
   if (shapes.length > 0) check(`no-token-on-screen:${what}`, false, `token shapes in the window or its oracle: ${shapes.join(', ')}`);
   current?.shots.push(entry);
   log('SHOT', entry.file, `video ${entry.videoAt ?? '-'} s`);
@@ -469,6 +480,13 @@ const ui = {
   credentialStatus: () => ui.settingsDialog().getByRole('definition'),
   credential: (label) => ui.settingsDialog().getByLabel(label, { exact: true }),
   saveCredentials: () => page.getByRole('button', { name: /Save credentials/i }),
+  // E6: the GitHub token in the credentials form, its Set/Not set status, the clone error's route there, the row result.
+  githubTokenField: () => ui.settingsDialog().getByLabel(/^GitHub token/),
+  credentialStatusOf: (term) => ui.settingsDialog().getByRole('term').filter({ hasText: term }).first().locator('xpath=following-sibling::*[1]'),
+  addTokenNotice: () => page.getByRole('alert').filter({ hasText: 'Add a GitHub token in Settings' }),
+  openSettingsForToken: () => page.getByRole('button', { name: 'Open Settings', exact: true }),
+  rowGithubSignedIn: (label) => ui.row(label).getByText(/GitHub: signed in as \S+/),
+  rowGithubInvalid: (label) => ui.row(label).getByText(/GitHub token invalid/),
   changeCredentials: () => page.getByRole('button', { name: /Change credentials/i }),
   startupScript: () => ui.settingsDialog().getByRole('textbox', { name: 'Startup script', exact: true }),
   saveStartupScript: () => ui.settingsDialog().getByRole('button', { name: 'Save Startup Script', exact: true }),
@@ -765,6 +783,24 @@ async function d0() {
     return;
   }
 
+  // E6 (D2, Red 12:21): Red pastes his GitHub token into Settings BEFORE Add; the kit takes no screenshot meanwhile.
+  if (relay && env.SKIP_GITHUB_TOKEN !== '1') {
+    await inView('credentials', ui.credentialStatusOf(/^GitHub token/));
+    const saved = await waitForFlag('github-token-saved', 'In the Pane window: Settings > Remote Access > Cloud sandboxes > Change Credentials, paste your GitHub token (fine-grained: montlakev2, Contents + Pull requests Read/Write) into "GitHub token", then Save Credentials. Do not type it anywhere else.');
+    check('github-token-flag', saved, 'Red saved the GitHub token');
+    const registered = registerSavedCredentials().filter((entry) => /github/i.test(entry));
+    log(`GitHub token registered for the exact-value scan: ${registered.join(', ') || 'none found in the saved credentials'}`);
+    check('github-token-registered-for-scan', registered.length > 0, registered.length ? 'by name, length and sha256[:12] only' : 'the saved credentials hold no GitHub token');
+  }
+  if (cloud) {
+    const tokenStatus = ((await ui.credentialStatusOf(/^GitHub token/).innerText().catch(() => '')) || '').trim();
+    results.githubTokenStatusBeforeAdd = tokenStatus;
+    if (relay) check('github-token-set', tokenStatus === 'Set', `GitHub token: ${tokenStatus || 'unread'}`);
+    else check('github-token-not-set', tokenStatus !== 'Set', `GitHub token: ${tokenStatus || 'unread'} (a rehearsal carries no GitHub credential)`);
+    await inView('github-token-status', ui.credentialStatusOf(/^GitHub token/));
+    await shot('github-token-status');
+  }
+
   state.label = env.LABEL ?? (relay ? `e2e-${stamp}` : `rp-loop-cs-e2e-${stamp}`);
   saveState();
   await ui.nameInput().fill(state.label);
@@ -878,6 +914,16 @@ async function d3() {
   await picker.waitFor({ state: 'hidden', timeout: 5000 });
   check('clone-destination-new-folder', samePath(await dialog.getByLabel('Destination').inputValue(), hostPath(expected.home, D3_FOLDER)), await dialog.getByLabel('Destination').inputValue());
   await dialog.getByRole('button', { name: /^Clone/ }).last().click();
+  // E6: with a token the clone simply works; without one a cloud sandbox points to Settings.
+  const outcome = await until(async () => {
+    if ((await projectsOnHost()).some((project) => samePath(project.path, hostPath(expected.home, D3_FOLDER, 'montlakev2')))) return 'cloned';
+    if (await visible(ui.addTokenNotice(), 200)) return 'add-token';
+    if (await visible(ui.signInAlert(page, state.label), 200)) return 'sign-in';
+    return undefined;
+  }, 300_000, 1500);
+  log(`D3 clone outcome: ${outcome ?? 'none'}`);
+  if (outcome === 'cloned') return d3Cloned();
+  if (outcome === 'add-token') return d3AddToken();
   const alert = ui.signInAlert(page, state.label);
   check('sign-in-error-shown', await visible(alert, 60_000), `"${state.label} isn't signed in to GitHub."`);
   check('sign-in-error-buttons', await visible(ui.signInOpenTerminal(state.label), 1000) && await visible(ui.tryAgain(), 1000), 'Open terminal … to sign in + Try again');
@@ -920,6 +966,80 @@ async function d3() {
     return;
   }
   await d3SignIn(again);
+}
+
+// E6 with a token (Run 8): the clone works with no sign-in step at all.
+async function d3Cloned() {
+  check('clone-with-token-works', true, `montlakev2 cloned into ${hostPath(expected.home, D3_FOLDER)}`);
+  check('no-sign-in-step', !(await visible(ui.signInAlert(page, state.label), 300)) && !(await visible(ui.addTokenNotice(), 300))
+    && !(await visible(ui.hostTerminalTab(state.label), 300)) && (await ui.deviceCode().count()) === 0, 'no notice, no terminal, no device code');
+  await visible(ui.openMainWorkspace('montlakev2'), 30_000);
+  await shot('d3-cloned-with-token', { result: true, oracle: { projects: await projectsOnHost() } });
+}
+
+// E6 without a token (rehearsal): "Add a GitHub token in Settings" + Open Settings shows the field; then a DUMMY token is
+// saved through the UI so D7 can prove "⚠ GitHub token invalid" after Start.
+async function d3AddToken() {
+  check('add-token-notice', true, '"Add a GitHub token in Settings"');
+  check('add-token-no-terminal-fallback', !(await visible(ui.signInOpenTerminal(state.label), 300)), 'a cloud sandbox is not sent to the terminal');
+  await inView('add-token-notice', ui.addTokenNotice());
+  await shot('clone-add-token-notice', { result: true });
+  await ui.openSettingsForToken().click();
+  check('open-settings-shows-token-field', await visible(ui.settingsDialog(), 10_000) && await inView('github-token-field', ui.credentialStatusOf(/^GitHub token/).or(ui.githubTokenField())), 'Settings opened at the GitHub token');
+  await shot('settings-github-token', { result: true });
+  if (relay || env.DUMMY_GITHUB_TOKEN === '0') return;
+  addSecret('dummyGithubToken', DUMMY_GITHUB_TOKEN);
+  if (await visible(ui.changeCredentials(), 1000)) await ui.changeCredentials().click();
+  await ui.githubTokenField().fill(DUMMY_GITHUB_TOKEN);
+  await ui.saveCredentials().click();
+  const set = await until(async () => ((await ui.credentialStatusOf(/^GitHub token/).innerText().catch(() => '')) || '').trim() === 'Set', 60_000, 1000);
+  check('dummy-token-saved', Boolean(set), 'GitHub token: Set (a dummy, to prove the invalid-token row)');
+  const shown = (await page.locator('input').evaluateAll((inputs) => inputs.map((input) => input.value))).includes(DUMMY_GITHUB_TOKEN);
+  check('token-not-shown-after-save', !shown, 'no input holds the token after saving');
+  await shot('dummy-token-saved');
+  state.dummyToken = true;
+  saveState();
+  await closeSettings();
+}
+
+// E6 D2 (Run 8): the token Red saved before Add signed the sandbox in; then Red's Codex device login (code masked).
+async function d2Token() {
+  await openCloud();
+  const signedIn = await until(async () => (await visible(ui.rowGithubSignedIn(state.label), 500)) && await ui.rowGithubSignedIn(state.label).innerText(), 120_000, 2000);
+  check('row-github-signed-in', Boolean(signedIn), signedIn || `row: ${await rowText(state.label)}`);
+  await inView('row-github', ui.row(state.label));
+  await shot('row-github-signed-in', { result: Boolean(signedIn) });
+  await closeSettings();
+  const panelId = await openHostTerminalFromSwitcher(state.label);
+  const { lines } = await runInTerminal(panelId, 'gh auth status', { timeoutMs: 60_000 });
+  check('gh-auth-status-logged-in', lines.some((line) => /Logged in to github\.com/i.test(line)), lines.filter((line) => /github\.com|Logged/i.test(line)).join(' | '));
+  const { lines: hostsMode } = await runInTerminal(panelId, 'echo HOSTS_MODE=$(stat -c %a ~/.config/gh/hosts.yml 2>/dev/null || echo none)');
+  check('gh-hosts-file-0600', /HOSTS_MODE=600\b/.test(hostsMode.join(' ')), hostsMode.join(' ').match(/HOSTS_MODE=\S+/)?.[0] ?? 'unread');
+  await shot('gh-auth-status', { result: true, oracle: { lines, hostsMode } });
+  await codexSignIn(panelId);
+}
+
+async function codexSignIn(panelId) {
+  await typeInVisibleTerminal('codex login --device-auth');
+  const codexShown = await until(async () => {
+    const text = nonEmpty(await screenText(panelId)).slice(-12).join('\n');
+    const codexCode = /https:\/\//.test(text) ? deviceCodeIn(text) : undefined;
+    if (codexCode) codeShown('codexDeviceCode', codexCode);
+    return codexCode;
+  }, 60_000, 1000);
+  check('codex-device-code-shown', Boolean(codexShown), codexShown ? 'Codex shows a URL and a one-time code (masked)' : 'no Codex code');
+  await shot('codex-code-and-url', { result: true });
+  const codexFlag = await waitForFlag('codex-signed-in', `In YOUR browser open the URL shown in the "${state.label} · Terminal" tab, enter the code shown there, and approve. Then wait until that terminal is back at its prompt. Do NOT press Ctrl-C.`);
+  check('codex-flag', codexFlag, 'Red finished the Codex sign-in');
+  const codexDone = await until(async () => promptLine.test(nonEmpty(await screenText(panelId)).at(-1) ?? ''), 300_000, 1500);
+  check('codex-completed-without-ctrl-c', Boolean(codexDone), codexDone ? 'the prompt came back' : 'codex login did not finish within 5 min of the flag');
+  if (!codexDone) await page.keyboard.press('Control+C');
+  await codeCleared(panelId);
+  const { lines } = await runInTerminal(panelId, 'codex login status', { timeoutMs: 60_000 });
+  const text = lines.join('\n');
+  check('codex-logged-in', /Logged in using/i.test(text), lines.filter((line) => /^\s*(Logged in using|Not logged in)/i.test(line)).join(' | ') || 'no codex status line');
+  check('no-token-text', tokenShapes(text).length === 0, `token shapes: ${JSON.stringify(tokenShapes(text))}`);
+  await shot('signed-in-status', { result: true, oracle: { panelId, lines } });
 }
 
 // The in-app device flow (E3 v2): code screen (code masked), local link, Red approves (SOBECK; a rehearsal cancels),
@@ -1055,6 +1175,7 @@ function stopBrowserSampler() {
 const deviceCodeIn = (text) => text.match(/\b([A-Z0-9]{4,5}-[A-Z0-9]{4,5})\b/)?.[1];
 
 async function d2() {
+  if (cloud && relay) return d2Token();
   const panelId = state.hostTerminalPanelId ?? await openHostTerminalFromSwitcher(state.label);
   if (!(await visible(ui.hostTerminalTab(state.label), 1000))) await openHostTerminalFromSwitcher(state.label);
   const ghLast = nonEmpty(await screenText(panelId)).at(-1) ?? '';
@@ -1116,27 +1237,7 @@ async function d2() {
   const afterGh = await browserProcesses(panelId, 'after-gh');
   check('no-browser-on-host', afterGh.count === 0, `browser processes on the host after the sign-in: ${afterGh.count} ${afterGh.lines.slice(1, -1).join(' | ')}`);
 
-  await typeInVisibleTerminal('codex login --device-auth');
-  const codexShown = await until(async () => {
-    const text = nonEmpty(await screenText(panelId)).slice(-12).join('\n');
-    const codexCode = /https:\/\//.test(text) ? deviceCodeIn(text) : undefined;
-    if (codexCode) codeShown('codexDeviceCode', codexCode);
-    return codexCode;
-  }, 60_000, 1000);
-  check('codex-device-code-shown', Boolean(codexShown), codexShown ? 'Codex shows a URL and a one-time code (masked)' : 'no Codex code');
-  await shot('codex-code-and-url', { result: true });
-  const codexFlag = await waitForFlag('codex-signed-in', `In YOUR browser open the URL shown in the "${state.label} · Terminal" tab, enter the code shown there, and approve. Then wait until that terminal is back at its prompt. Do NOT press Ctrl-C.`);
-  check('codex-flag', codexFlag, 'Red finished the Codex sign-in');
-  const codexDone = await until(async () => promptLine.test(nonEmpty(await screenText(panelId)).at(-1) ?? ''), 300_000, 1500);
-  check('codex-completed-without-ctrl-c', Boolean(codexDone), codexDone ? 'the prompt came back' : 'codex login did not finish within 5 min of the flag');
-  if (!codexDone) await page.keyboard.press('Control+C');
-  await codeCleared(panelId);
-  const { lines } = await runInTerminal(panelId, 'gh auth status; codex login status', { timeoutMs: 60_000 });
-  const text = lines.join('\n');
-  check('gh-logged-in', /Logged in to github\.com/i.test(text), lines.filter((line) => /github\.com|account|Logged/i.test(line)).join(' | '));
-  check('codex-logged-in', /Logged in using/i.test(text), lines.filter((line) => /^\s*(Logged in using|Not logged in)/i.test(line)).join(' | ') || 'no codex status line');
-  check('no-token-text', tokenShapes(text).length === 0, `token shapes: ${JSON.stringify(tokenShapes(text))}`);
-  await shot('signed-in-status', { result: true, oracle: { panelId, lines } });
+  await codexSignIn(panelId);
 }
 
 // ---------------------------------------------------------------- D4: clone / Windows path / open via the picker / new
@@ -1363,6 +1464,15 @@ async function d7() {
     return rowBadge(row, 'Running');
   }, 900_000, 1500);
   check('row-running-again', Boolean(running), await rowText(state.label));
+  // E6 on Start: the token is applied again; the dummy one shows the warning, Red's real one signs in.
+  if (state.dummyToken) {
+    const invalid = await visible(ui.rowGithubInvalid(state.label), 180_000);
+    check('row-github-token-invalid', invalid, invalid ? '"⚠ GitHub token invalid" on the row after Start' : `row: ${await rowText(state.label)}`);
+    await inView('row-github-invalid', ui.row(state.label));
+    await shot('row-github-token-invalid', { result: invalid });
+  } else if (relay) {
+    check('row-github-signed-in-after-start', await visible(ui.rowGithubSignedIn(state.label), 180_000), await rowText(state.label));
+  }
   check('starting-hides-open-terminal', !sawOpenTerminalWhileStarting, 'no Open terminal until the row is Running again');
   await inView('row-running-again', ui.row(state.label));
   await shot('row-running-again');
