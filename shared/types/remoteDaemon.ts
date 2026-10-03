@@ -566,6 +566,12 @@ export function normalizePaneRemoteConnectionImportPayload<Value>(
   return payload;
 }
 
+/** Sandboxes saved before profiles carried a host kind still read as cloud sandboxes. */
+function withCloudSandboxHostKind(profile: RemotePaneConnectionProfile): RemotePaneConnectionProfile {
+  if (!profile.cloud || profile.hostKind) return profile;
+  return { ...profile, hostKind: { label: 'cloud sandbox', icon: 'cloud' } };
+}
+
 export function normalizeRemoteDaemonConfig<Value>(value: Value): RemoteDaemonConfig {
   const defaults = createDefaultRemoteDaemonConfig();
   const config = readJsonObject(value);
@@ -588,7 +594,7 @@ export function normalizeRemoteDaemonConfig<Value>(value: Value): RemoteDaemonCo
   const client = readJsonObject(config.client) ?? {};
   const profiles = readJsonArray(client.profiles).flatMap((profile) => {
     try {
-      return [decodeBoundary(profile, remoteProfileSchema)];
+      return [withCloudSandboxHostKind(decodeBoundary(profile, remoteProfileSchema))];
     } catch {
       return [];
     }
