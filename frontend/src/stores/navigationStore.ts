@@ -14,8 +14,10 @@ const toProjectIdArray = (projectIds: Set<number>): number[] =>
  * Pane has no router — this enum is the whole navigation model. Adding a value
  * here also requires a branch in `SessionView` and an entry in *both* sidebar
  * components (`Sidebar` compact rail and `ProjectSessionList` expanded tree).
+ * The exception is `host-terminal`: it is opened from the host switcher, never
+ * from a sidebar row, because the host terminal is not a project or a Pane.
  */
-export type ActiveView = 'sessions' | 'project' | 'pane-chat' | 'usage';
+export type ActiveView = 'sessions' | 'project' | 'pane-chat' | 'usage' | 'host-terminal';
 
 interface NavigationState {
   activeView: ActiveView;
@@ -51,6 +53,7 @@ interface NavigationState {
   navigateToProject: (projectId: number) => void;
   navigateToSessions: () => void;
   navigateToPaneChat: () => void;
+  navigateToHostTerminal: () => void;
   navigateToUsage: () => void;
 }
 
@@ -131,6 +134,11 @@ export const useNavigationStore = create<NavigationState>((set, get) => ({
 
   navigateToPaneChat: () => set({
     activeView: 'pane-chat',
+    activeProjectId: null
+  }),
+
+  navigateToHostTerminal: () => set({
+    activeView: 'host-terminal',
     activeProjectId: null
   }),
 
