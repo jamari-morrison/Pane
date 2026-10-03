@@ -50,6 +50,18 @@ describe('saved host kind', () => {
     expect(describeHost(config.client.profiles[1])).toEqual({ name: 'devbox', kindLabel: 'remote host', icon: 'server' });
   });
 
+  it('starts an older cloud sandbox\'s terminal without a browser, and leaves other hosts alone', () => {
+    const cloud = { provider: 'boat' as const, sandboxId: 'bx_1', sessionId: 's1', nodeId: 'n1', hostname: 'rp-s1', version: 1 };
+    const config = normalizeRemoteDaemonConfig({
+      client: { profiles: [profile({ label: 'sandbox-1', cloud }), profile({ id: 'plain', label: 'devbox' })], activeProfileId: null, mode: 'local' },
+    });
+    expect(config.client.profiles[0].hostTerminalEnv).toEqual([
+      { name: 'BROWSER', value: 'false' },
+      { name: 'GH_BROWSER', value: 'false' },
+    ]);
+    expect(config.client.profiles[1].hostTerminalEnv).toBeUndefined();
+  });
+
   it('drops a profile whose host kind has an unknown icon', () => {
     const config = normalizeRemoteDaemonConfig({
       client: { profiles: [{ ...profile(), hostKind: { label: 'x', icon: 'rocket' } }], activeProfileId: null, mode: 'local' },

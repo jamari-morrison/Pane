@@ -35,6 +35,11 @@ test('upsert adds the profile and keeps everything else in config.json', async (
   assert.deepEqual(config.remoteDaemon.client.profiles[0], manual);
   assert.equal(config.remoteDaemon.client.profiles[1].cloud.sessionId, 'abc12345xyz');
   assert.deepEqual(config.remoteDaemon.client.profiles[1].hostKind, { label: 'cloud sandbox', icon: 'cloud' });
+  // Nobody is at a sandbox's screen: its terminal must print sign-in URLs, never open a browser there.
+  assert.deepEqual(config.remoteDaemon.client.profiles[1].hostTerminalEnv, [
+    { name: 'BROWSER', value: 'false' },
+    { name: 'GH_BROWSER', value: 'false' },
+  ]);
   assert.equal(fs.statSync(path.join(dir, 'config.json')).mode & 0o777, 0o600);
 });
 

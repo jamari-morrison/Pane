@@ -579,10 +579,20 @@ export function normalizePaneRemoteConnectionImportPayload<Value>(
   return payload;
 }
 
-/** Sandboxes saved before profiles carried a host kind still read as cloud sandboxes. */
+/** Nobody is at a cloud sandbox's screen, so its host terminal never opens a browser there. */
+const CLOUD_SANDBOX_HOST_TERMINAL_ENV: HostTerminalEnvVar[] = [
+  { name: 'BROWSER', value: 'false' },
+  { name: 'GH_BROWSER', value: 'false' },
+];
+
+/** Sandboxes saved before profiles carried a host kind or terminal environment still read as cloud sandboxes. */
 function withCloudSandboxHostKind(profile: RemotePaneConnectionProfile): RemotePaneConnectionProfile {
-  if (!profile.cloud || profile.hostKind) return profile;
-  return { ...profile, hostKind: { label: 'cloud sandbox', icon: 'cloud' } };
+  if (!profile.cloud) return profile;
+  return {
+    ...profile,
+    hostKind: profile.hostKind ?? { label: 'cloud sandbox', icon: 'cloud' },
+    hostTerminalEnv: profile.hostTerminalEnv ?? CLOUD_SANDBOX_HOST_TERMINAL_ENV,
+  };
 }
 
 export function normalizeRemoteDaemonConfig<Value>(value: Value): RemoteDaemonConfig {
