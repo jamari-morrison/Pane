@@ -279,6 +279,8 @@ function fakeSaveHost(payload) {
 // ---------------------------------------------------------------- app, video, evidence
 let app;
 let page;
+// The startup script editor is masked whenever it may hold the user's own script (before D0's save, after the restore).
+let maskStartupEditor = true;
 let videoStartedAt = 0;
 let shotIndex = 0;
 
@@ -392,7 +394,7 @@ async function shot(what, { oracle, result = false } = {}) {
   // While a device code is on screen the terminal is masked in the shot (Red's rule: never show it in evidence).
   // On EVERY shot, whatever the kit believes: the code element by its frozen names and any text shaped like a device
   // code (backstop); while a code is known to be on screen also the kit's own mask (the terminal, or the code element).
-  const mask = [ui.deviceCode(), page.getByText(DEVICE_CODE_SHAPE), ...(codeOnScreenSince === null ? [] : await codeMask())];
+  const mask = [ui.deviceCode(), page.getByText(DEVICE_CODE_SHAPE), ui.localStartScript(), ...(maskStartupEditor ? [ui.startupScript()] : []), ...(codeOnScreenSince === null ? [] : await codeMask())];
   await page.screenshot({ path: `${base}.png`, mask }).catch(() => undefined);
   if (codeOnScreenSince !== null || (await ui.deviceCode().count().catch(() => 0)) > 0) entry0.masked = 'the device code (on screen at this shot)';
   const aria = redact(await page.locator('body').ariaSnapshot().catch(() => ''));
@@ -829,8 +831,20 @@ async function guardStartupScriptSave(what) {
 // E7: the kit's local start script prints one test variable; its value is a secret of the run (exact-value scan, never
 // printed). Red's own script (local-start.json, beside startup.sh) is saved by sha256 and put back at the end.
 const LOCAL_VAR = 'RP_E2E_LOCAL';
-const localValue = crypto.randomBytes(12).toString('hex');
-addSecret('localStartValue', localValue);
+const LOCAL_RESERVED = 'GH_E2E_RESERVED';
+// K-E7 (auditor): the value never sits in the Settings box. The kit's script reads a kit-written 0600 file at run time
+// (`type` in cmd and PowerShell, `cat` in sh); the box shows only that file's path. A second value is written before
+// Start to prove the env is refreshed (E7-A); a reserved name (GH_ prefix) must be dropped (E7-B).
+const localValueFile = path.join(os.tmpdir(), `rp-e2e-local-${crypto.randomBytes(4).toString('hex')}`);
+const localValues = [crypto.randomBytes(12).toString('hex'), crypto.randomBytes(12).toString('hex')];
+localValues.forEach((value, index) => addSecret(`localStartValue${index + 1}`, value));
+const localScript = windows ? `type "${localValueFile}"` : `cat '${localValueFile}'`;
+function writeLocalValue(index) {
+  fs.writeFileSync(localValueFile, `${LOCAL_VAR}=${localValues[index]}\n${LOCAL_RESERVED}=reserved-name-check\n`, { mode: 0o600 });
+  state.localValueIndex = index;
+  saveState();
+}
+const valueSha = (index) => sha256Of(Buffer.from(localValues[index])).slice(0, 12);
 const localStartFile = path.join(paneDir, 'cloud-sandboxes', 'local-start.json');
 async function setupWarningAndLocalScript() {
   if (env.E7 === '0') return;
@@ -858,11 +872,34 @@ async function setupWarningAndLocalScript() {
     fs.writeFileSync(original.localStart.copy, bytes, { mode: 0o600 });
   }
   results.localStartBefore = bytes ? { length: bytes.length, sha256: original.localStart.sha.slice(0, 12) } : { file: 'none' };
-  // `echo NAME=value` prints the same line in cmd, PowerShell and sh, whatever shell Red chose.
-  await ui.localStartScript().fill(`echo ${LOCAL_VAR}=${localValue}`);
+  if (original.localStart.script.length >= 8) addSecret('redLocalStartScript', original.localStart.script);
+  writeLocalValue(0);
+  await ui.localStartScript().fill(localScript);
   await ui.saveLocalStartScript().click();
   check('local-start-script-saved', await visible(ui.settingsDialog().getByText('Saved', { exact: true }).last(), 10_000), `prints ${LOCAL_VAR}=<value> (value never shown)`);
   await shot('local-start-script-saved');
+  // DUMMY_IN_D0=1 (rehearsal): the token link too, then a dummy token, so "gone when both are set" and the invalid row show.
+  if (!relay && env.DUMMY_IN_D0 === '1') {
+    check('setup-warning-still-for-token', await visible(ui.setupWarning(), 3000), 'the warning stays while the token is missing');
+    await ui.setupLink('Set a GitHub token').click();
+    const focused = Boolean(await until(() => ui.githubTokenField().evaluate((element) => element === document.activeElement), 3000, 200));
+    check('setup-link-focuses-github-token', focused, focused ? 'the GitHub token box has the focus' : 'not focused');
+    await shot('setup-link-github-token');
+    await ui.githubTokenField().fill(DUMMY_GITHUB_TOKEN);
+    await ui.saveGithubToken().click();
+    const set = await until(async () => ((await ui.githubTokenStatus().innerText().catch(() => '')) || '').trim() === 'Set', 60_000, 1000);
+    check('dummy-token-saved', Boolean(set), 'GitHub token: Set (a dummy, for the invalid-token row)');
+    state.dummyToken = true;
+    saveState();
+  }
+}
+
+// Read in the host terminal, values never shown: the file's mode, how many lines set the variable / a reserved name, and
+// the sha256[:12] of the sourced value (compared with the kit's).
+async function localEnvOnSandbox(panelId) {
+  const command = `f=~/.config/runpane-cloud/local-env; echo LOCALENV_MODE=$(stat -c %a $f 2>/dev/null || echo none) LOCALENV_HAS=$(grep -cE '^(export )?${LOCAL_VAR}=' $f 2>/dev/null || echo 0) LOCALENV_RESERVED=$(grep -c '${LOCAL_RESERVED}' $f 2>/dev/null || echo 0) LOCALENV_SHA=$( (. $f 2>/dev/null; printf %s "$${LOCAL_VAR}") | sha256sum | cut -c1-12)`;
+  const { lines } = await runInTerminal(panelId, command);
+  return { lines, text: lines.join(' ') };
 }
 
 // Done-when 7: the variable reached the sandbox (the env file, 0600) and a Pane terminal, checked by NAME only.
@@ -872,11 +909,12 @@ async function dw7() {
   check('row-no-local-start-chip', !(await visible(ui.rowLocalStartChip(state.label), 1000)), 'no ⚠ local start script chip on the row');
   await closeSettings();
   const panelId = await openHostTerminalFromSwitcher(state.label);
-  const { lines } = await runInTerminal(panelId, `f=~/.config/runpane-cloud/local-env; echo LOCALENV_MODE=$(stat -c %a $f 2>/dev/null || echo none) LOCALENV_HAS=$(grep -c '^${LOCAL_VAR}=' $f 2>/dev/null || echo 0)`);
-  const text = lines.join(' ');
+  const { lines, text } = await localEnvOnSandbox(panelId);
   check('local-env-file-0600', /LOCALENV_MODE=600\b/.test(text), text.match(/LOCALENV_MODE=\S+/)?.[0] ?? 'unread');
   check('local-env-has-variable', /LOCALENV_HAS=1\b/.test(text), text.match(/LOCALENV_HAS=\S+/)?.[0] ?? 'unread');
-  check('local-env-value-not-on-screen', !(await screenText(panelId)).includes(localValue), 'the value never appears in the terminal');
+  check('local-env-reserved-dropped', /LOCALENV_RESERVED=0\b/.test(text), `${LOCAL_RESERVED} (a GH_ name) in the file: ${text.match(/LOCALENV_RESERVED=(\S+)/)?.[1] ?? 'unread'}`);
+  check('local-env-value-matches', text.includes(`LOCALENV_SHA=${valueSha(state.localValueIndex ?? 0)}`), `sha256[:12] of the sourced value vs the kit's value ${state.localValueIndex ?? 0}`);
+  check('local-env-value-not-on-screen', !localValues.some((value) => text.includes(value)), 'no value appears in the terminal');
   await shot('local-env-on-sandbox', { result: true, oracle: { lines } });
   await ui.openPane(state.repoName ?? repoName, state.pane.name).click();
   await ui.panelTab('Terminal').click();
@@ -923,12 +961,14 @@ async function d0() {
   await editor.waitFor({ timeout: 10_000 });
   // Whatever the user had there comes back at the end (D9); only its length and hash are recorded.
   original.startupScript = await editor.inputValue();
+  if (original.startupScript.length >= 8) addSecret('redStartupScript', original.startupScript);
   // The user's script exactly as the desktop keeps it (the FILE it pushes from on every Create/Start), saved next to it
   // so it can be put back even if the UI restore can't run. Never printed, never in the evidence: length + sha256 only.
   saveOriginalStartupScript();
   check('startup-warning-shown', await visible(ui.settingsDialog().getByText("Don't put secrets here; it's stored unencrypted."), 2000), 'the editor warns against secrets');
   await editor.fill(startupScript);
   await ui.saveStartupScript().click();
+  maskStartupEditor = false;
   check('startup-script-saved', await visible(ui.settingsDialog().getByText('Saved', { exact: true }), 10_000), 'the editor says Saved');
   await shot('startup-script-saved', { result: true });
   if (cloud) {
@@ -1011,6 +1051,11 @@ async function d0() {
   check('add-showed-startup-script-step', sawStartup, sawStartup ? '"Running your startup script…" shown during Add' : `progress: ${JSON.stringify(progress)}`);
   await inView('row-running', ui.row(state.label));
   await shot('sandbox-running', { result: true, oracle: { progress } });
+  if (state.dummyToken) {
+    const invalid = await visible(ui.rowGithubInvalid(state.label), 180_000);
+    check('row-github-token-invalid-after-create', invalid, invalid ? '"⚠ GitHub token invalid" on the row after Create' : `row: ${await rowText(state.label)}`);
+    await shot('row-github-invalid-after-create', { result: invalid });
+  }
   const host = savedHosts(paneDir).find((entry) => entry.label === state.label);
   check('saved-host-written', Boolean(host?.cloud?.sandboxId), JSON.stringify(host ?? null));
   if (host) {
@@ -1683,6 +1728,8 @@ async function d7() {
   await inView('row-stopped', ui.row(state.label));
   await shot('row-stopped', { result: true });
 
+  // E7-A: a new local value before Start; the Start must deliver it and re-run E5 (the env changed).
+  if (cloud && env.E7 !== '0' && state.localValueIndex !== undefined) writeLocalValue(1);
   countStart('start');
   await ui.rowAction('Start', state.label).click();
   let sawOpenTerminalWhileStarting = false;
@@ -1714,6 +1761,11 @@ async function d7() {
   }, 600_000, 15_000) ?? await startupStatus(panelId);
   check('startup-ran-again-on-start', second.runs >= first.runs + 1 && second.exitCode === 0, `marker lines ${first.runs} → ${second.runs}, exitCode ${second.exitCode}`);
   await shot('startup-status-after-start', { result: true, oracle: second });
+  if (cloud && env.E7 !== '0' && state.localValueIndex === 1) {
+    const { lines: refreshed, text } = await localEnvOnSandbox(panelId);
+    check('local-env-refreshed-on-start', text.includes(`LOCALENV_SHA=${valueSha(1)}`) && /LOCALENV_HAS=1\b/.test(text), `sha256[:12] of the sourced value after Start vs the kit's new value: ${text.match(/LOCALENV_SHA=\S+/)?.[0] ?? 'unread'} (want ${valueSha(1)})`);
+    await shot('local-env-refreshed', { result: true, oracle: { lines: refreshed } });
+  }
   // D1's hostname once more, after a reboot (the first-boot identity unit may only apply it then).
   const { lines: afterBoot } = await runInTerminal(panelId, 'hostname');
   check('hostname-after-start', expected.hostname.test(afterBoot[0]?.trim() ?? ''), `${afterBoot[0]} (want ${expected.hostname})`);
@@ -1937,6 +1989,7 @@ async function restoreStartupScript() {
     how = 'skipped';
     log(`UI restore skipped: ${others.join(', ')} active (a save would run the script there)`);
   } else {
+    maskStartupEditor = true;
     await ui.startupScript().fill(original.startupScript).catch(() => undefined);
     await ui.saveStartupScript().click().catch(() => undefined);
     await visible(ui.settingsDialog().getByText('Saved', { exact: true }), 10_000);
@@ -2056,6 +2109,7 @@ async function main() {
     if (state.label) await step('D9', 'Remove through the UI', d9);
     current = undefined;
     await restoreLocalStartScript().catch((error) => log('restore local start script failed:', error.message));
+    fs.rmSync(localValueFile, { force: true });
     await restoreStartupScript().catch((error) => {
       log('restore startup script failed:', error.message);
       if (original.startupCopy && results.startupScriptRestored === undefined) {
