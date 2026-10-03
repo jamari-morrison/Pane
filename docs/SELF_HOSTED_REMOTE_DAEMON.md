@@ -301,6 +301,16 @@ the desktop sends the new one, so it reaches the sandbox's next new panel within
 Claude Code's own default), and a notice saying why is logged. It is not a pin: a model picked inside
 the sandbox with `/model` is kept.
 
+Detection is best effort. Known limits:
+
+- When this computer's Claude Code is signed in only with a token (`CLAUDE_CODE_OAUTH_TOKEN`), it prints no
+  model before it calls the API, so detection finds nothing: no model is sent, and the sandbox keeps its own
+  default. Set `model` in `~/.claude/settings.json` to choose one; an explicit setting always wins.
+- `ANTHROPIC_MODEL` is read from the desktop app's own environment. An app started from the dock or Start menu
+  doesn't see variables exported in your shell profile; use `model` in `~/.claude/settings.json` instead.
+- Signing Claude Code in to a different account doesn't refresh a detected default by itself. It refreshes when
+  `claude` or `~/.claude/settings.json` changes, or when Pane restarts.
+
 ### Stop, start, update and remove
 
 - **Stop** syncs the disk, then boat snapshots the sandbox and powers it off. Billing stops; the disk and the
