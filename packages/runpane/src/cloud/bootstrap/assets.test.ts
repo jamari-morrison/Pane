@@ -391,6 +391,13 @@ test('startup-install lays down the boot unit: a oneshot system unit run as the 
     'WantedBy=multi-user.target',
     '',
   ].join('\n'));
+  // The design's requirements one by one, so a mutation of any of them names what broke.
+  assert.match(unit, /^Type=oneshot$/mu, 'a oneshot: the boot and startup-run wait for it to finish');
+  assert.match(unit, new RegExp(`^User=${user}$`, 'mu'), 'runs as the login user');
+  assert.match(unit, /^After=network-online\.target$/mu, 'runs after the network is up');
+  assert.match(unit, /^TimeoutStartSec=660$/mu, 'systemd backs up the 10 minute kill');
+  assert.match(unit, /^WantedBy=multi-user\.target$/mu, 'runs on every boot');
+  assert.match(cloudBootstrapAssets['rp-user-startup.sh'], /^LIMIT="\$\{RP_STARTUP_TIMEOUT_SECONDS:-600\}"$/mu, 'the runner kills the script after 10 minutes');
   // Nothing orders the Pane daemon (a user unit) after it, so a slow script never holds the daemon up.
   assert.doesNotMatch(unit, /Before=|pane-remote-daemon|RequiredBy/u);
   assert.equal(fs.readFileSync(path.join(home, 'root/usr/local/sbin/rp-user-startup'), 'utf8'), cloudBootstrapAssets['rp-user-startup.sh']);
