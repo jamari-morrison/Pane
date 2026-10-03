@@ -8,13 +8,14 @@ import { PaneCommandRegistry, type PaneCommandValue } from '../daemon/commandReg
 import { remotePaneClientController } from '../daemon/client/remotePaneClient';
 import { CommandRunner } from '../utils/commandRunner';
 import { isDaemonOwnedChannel } from '../../../shared/types/daemon';
+import { formatWindowsPathOnPosixHostError } from '../../../shared/types/hostPaths';
 import type { AppServices } from './types';
 import { createDaemonBridgeRouter, registerDaemonBridgeHandlers } from './daemon';
 import { registerGitHandlers } from './git';
 import { registerHostFsHandlers } from './hostFs';
 import { registerProjectHandlers } from './project';
 
-const WINDOWS_PATH_MESSAGE = "That's a path on this computer; testina is a Linux host. Pick a folder on testina.";
+const WINDOWS_PATH_MESSAGE = formatWindowsPathOnPosixHostError('testina', process.platform);
 const posixOnly = process.platform === 'win32' ? it.skip : it;
 
 let home: string;
@@ -48,7 +49,10 @@ beforeEach(async () => {
   });
   vi.spyOn(CommandRunner.prototype, 'execFile').mockImplementation(async (_file: string, args: string[], cwd: string) => {
     gitCommands.push(`git ${args.join(' ')}`);
-    return { stdout: existsSync(path.join(cwd, '.git')) ? 'true\n' : 'false\n', stderr: '' };
+    for (let folder = cwd; ; folder = path.dirname(folder)) {
+      if (existsSync(path.join(folder, '.git'))) return { stdout: `${folder}\n`, stderr: '' };
+      if (path.dirname(folder) === folder) throw new Error('not a git repository');
+    }
   });
 });
 
@@ -100,6 +104,17 @@ describe('projects:create on the active host', () => {
     expect(result).toMatchObject({ success: false, code: 'NOT_A_GIT_REPO' });
     expect(await readdir(path.join(home, 'plain'))).toEqual([]);
     expect(gitCommands.some(command => command.startsWith('git init'))).toBe(false);
+    expect(createProject).not.toHaveBeenCalled();
+  });
+
+  it('fails Open on a folder inside a repo instead of registering the subfolder', async () => {
+    await mkdir(path.join(home, 'repo', '.git'), { recursive: true });
+    await mkdir(path.join(home, 'repo', 'src'));
+    const { registry, createProject } = createProjectRegistry();
+
+    const result = await registry.invoke('projects:create', [{ name: 'src', path: '~/repo/src', mode: 'open' }]);
+
+    expect(result).toMatchObject({ success: false, code: 'NOT_A_GIT_REPO' });
     expect(createProject).not.toHaveBeenCalled();
   });
 
