@@ -24,7 +24,7 @@ KEEP=5
 mkdir -p "$STATE"
 chmod 700 "$STATE"
 
-now() { date -u +%FT%TZ; }
+now() { date -u +%FT%T.%3NZ; }
 sha="$(sha256sum "$SCRIPT" | cut -d' ' -f1)"
 started="$(now)"
 write_status() { # exitCode finishedAt timedOut

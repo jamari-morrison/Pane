@@ -14,7 +14,7 @@ const names = Object.keys(cloudBootstrapAssets) as CloudBootstrapAssetName[];
 const PROVISION_STEPS = [
   'identity', 'tailscale-install', 'tailnet-identity', 'check', 'firewall', 'tailscale-up', 'ts-guard', 'agent-env', 'agent-prompts', 'claude-model', 'install-pane',
   'pairing-read', 'health-local', 'cert-status', 'serve-http', 'serve-guard', 'tailscale-reset', 'serve-restore', 'update-pane',
-  'startup-install', 'startup-run', 'startup-log',
+  'startup-install', 'startup-run', 'startup-status', 'startup-log',
 ];
 
 /** Runs one rp-bootstrap.sh step in a temp HOME; `functions` replace commands (exported bash functions win over PATH). */
@@ -287,7 +287,7 @@ test('rp-user-startup records a successful run: status JSON and the script outpu
   assert.equal(status.exitCode, 0);
   assert.equal(status.timedOut, false);
   assert.equal(status.sha256, sha256Of(script));
-  assert.match(status.startedAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/u);
+  assert.match(status.startedAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/u);
   assert.ok(Date.parse(status.finishedAt) >= Date.parse(status.startedAt));
   assert.match(fs.readFileSync(path.join(startupState(home), 'startup.log'), 'utf8'), /MARKER-ONE/u);
   assert.equal(fs.statSync(startupState(home)).mode & 0o777, 0o700);
@@ -412,37 +412,53 @@ test('startup-install with no file removes the script, and is idempotent', () =>
   assert.equal(fs.existsSync(script), false);
 });
 
-test('startup-run runs the unit and returns its status; if-changed skips a script the last run already used', () => {
+test('startup-run starts the unit without waiting; if-changed skips a script the last run used; a run in progress is busy', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
   const script = path.join(home, '.config/runpane-cloud/startup.sh');
   fs.mkdirSync(path.dirname(script), { recursive: true });
   fs.writeFileSync(script, 'echo v1\n');
   const statusFile = path.join(startupState(home), 'startup-status.json');
-  // The fake `systemctl start` writes what the unit would.
-  const fakeRun = `[ "$1" = start ] && { mkdir -p '${startupState(home)}'; `
-    + `printf '{"exitCode":3,"startedAt":"2026-10-03T10:00:00Z","finishedAt":"2026-10-03T10:00:01Z","sha256":"%s","timedOut":false}\\n' `
-    + `"$(sha256sum '${script}' | cut -d' ' -f1)" > '${statusFile}'; return 1; }; [ "$1" = is-active ] && echo inactive; return 0;`;
+  const writeStatus = (sha: string) => {
+    fs.mkdirSync(startupState(home), { recursive: true });
+    fs.writeFileSync(statusFile, JSON.stringify({ exitCode: 3, startedAt: '2026-10-03T10:00:00Z', finishedAt: '2026-10-03T10:00:01Z', sha256: sha, timedOut: false }));
+  };
+  const idle = '[ "$1" = is-active ] && echo inactive; return 0;';
 
-  const first = runStartupStep(home, 'startup-run', ['if-changed'], fakeRun);
+  const first = runStartupStep(home, 'startup-run', ['if-changed'], idle);
   assert.equal(first.status, 0, first.stdout + first.stderr);
-  assert.match(first.calls, /systemctl start rp-user-startup\.service/u);
-  assert.deepEqual(first.payload, {
-    ok: true, ran: true,
-    status: { exitCode: 3, startedAt: '2026-10-03T10:00:00Z', finishedAt: '2026-10-03T10:00:01Z', sha256: sha256Of('echo v1\n'), timedOut: false },
-  });
+  assert.match(first.calls, /systemctl start --no-block rp-user-startup\.service/u);
+  assert.deepEqual(first.payload, { ok: true, state: 'started', status: null });
 
-  const unchanged = runStartupStep(home, 'startup-run', ['if-changed'], fakeRun);
-  assert.equal(unchanged.payload.ran, false);
-  assert.doesNotMatch(unchanged.calls, /systemctl start/u);
+  writeStatus(sha256Of('echo v1\n'));
+  const unchanged = runStartupStep(home, 'startup-run', ['if-changed'], idle);
+  assert.equal(unchanged.payload.state, 'skipped');
   assert.equal(unchanged.payload.status.exitCode, 3);
+  assert.doesNotMatch(unchanged.calls, /systemctl start/u);
 
-  assert.equal(runStartupStep(home, 'startup-run', ['always'], fakeRun).payload.ran, true);
+  assert.equal(runStartupStep(home, 'startup-run', ['always'], idle).payload.state, 'started');
   fs.writeFileSync(script, 'echo v2\n');
-  assert.equal(runStartupStep(home, 'startup-run', ['if-changed'], fakeRun).payload.ran, true);
+  assert.equal(runStartupStep(home, 'startup-run', ['if-changed'], idle).payload.state, 'started');
+
+  // systemd merges a start into a run in progress instead of running again, so the caller waits and asks again.
+  const busy = runStartupStep(home, 'startup-run', ['always'], '[ "$1" = is-active ] && echo activating; return 0;');
+  assert.equal(busy.payload.state, 'busy');
+  assert.doesNotMatch(busy.calls, /systemctl start/u);
 
   fs.rmSync(script);
-  assert.deepEqual(runStartupStep(home, 'startup-run', ['always'], fakeRun).payload, { ok: true, ran: false, status: null });
+  assert.deepEqual(runStartupStep(home, 'startup-run', ['always'], idle).payload, { ok: true, state: 'skipped', status: { exitCode: 3, startedAt: '2026-10-03T10:00:00Z', finishedAt: '2026-10-03T10:00:01Z', sha256: sha256Of('echo v1\n'), timedOut: false } });
   assert.match(runStartupStep(home, 'startup-run', ['sometimes']).stdout, /"error": "startup-run: mode must be always or if-changed"/u);
+});
+
+test('startup-status reports whether the unit runs and the latest status', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  assert.deepEqual(runStartupStep(home, 'startup-status', [], '[ "$1" = is-active ] && echo activating; return 0;').payload,
+    { ok: true, active: true, status: null });
+  fs.mkdirSync(startupState(home), { recursive: true });
+  fs.writeFileSync(path.join(startupState(home), 'startup-status.json'), '{"exitCode":0,"startedAt":"a","finishedAt":"b","sha256":"c","timedOut":false}\n');
+  assert.deepEqual(runStartupStep(home, 'startup-status', [], '[ "$1" = is-active ] && echo failed; return 3;').payload,
+    { ok: true, active: false, status: { exitCode: 0, startedAt: 'a', finishedAt: 'b', sha256: 'c', timedOut: false } });
+  fs.writeFileSync(path.join(startupState(home), 'startup-status.json'), '{ half');
+  assert.deepEqual(runStartupStep(home, 'startup-status', [], 'return 3;').payload, { ok: true, active: false, status: null });
 });
 
 test('startup-log returns the last 200 lines of the latest run', () => {
