@@ -4,6 +4,7 @@ import type { Project } from '../types/project';
 import type { UpdateConfigRequest } from '../types/config';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
 import type { PaneChatAgent, PaneChatState } from '../../../shared/types/paneChat';
+import type { HostTerminalOpenRequest, HostTerminalState } from '../../../shared/types/hostTerminal';
 import type {
   OrchestrationAssociationInput,
   OrchestrationSessionCreateInput,
@@ -67,6 +68,13 @@ const isElectron = () => {
 
 // Wrapper class for API calls that provides error handling and consistent interface
 export class API {
+  static hostTerminal = {
+    async open(request?: HostTerminalOpenRequest): Promise<IPCResponse<HostTerminalState<Session>>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.hostTerminal.open(request);
+    },
+  };
+
   static paneChat = {
     async getOrCreate(): Promise<IPCResponse<PaneChatState<Session>>> {
       if (!isElectron()) throw new Error('Electron API not available');
