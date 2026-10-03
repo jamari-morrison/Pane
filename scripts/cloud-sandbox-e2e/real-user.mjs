@@ -522,6 +522,12 @@ const ui = {
   openSettingsForToken: () => page.getByRole('button', { name: 'Open Settings', exact: true }),
   rowGithubSignedIn: (label) => ui.row(label).getByText(/GitHub: signed in as \S+/),
   rowGithubInvalid: (label) => ui.row(label).getByText(/GitHub token invalid/),
+  // E7 local start script + E8 setup warning (cs-startup-script / cs-host-terminal contracts).
+  localStartScript: () => ui.settingsDialog().getByRole('textbox', { name: 'Local start script', exact: true }),
+  saveLocalStartScript: () => ui.settingsDialog().getByRole('button', { name: 'Save Local Start Script', exact: true }),
+  setupWarning: () => page.getByRole('status').filter({ has: page.getByRole('button', { name: /^Set a (GitHub token|local start script)$/ }) }).or(page.getByRole('status').filter({ has: page.getByRole('link', { name: /^Set a (GitHub token|local start script)$/ }) })).first(),
+  setupLink: (name) => page.getByRole('button', { name, exact: true }).or(page.getByRole('link', { name, exact: true })).first(),
+  rowLocalStartChip: (label) => ui.row(label).getByText(/Local start script (failed|timed out|didn't run)/),
   changeCredentials: () => page.getByRole('button', { name: /Change credentials/i }),
   startupScript: () => ui.settingsDialog().getByRole('textbox', { name: 'Startup script', exact: true }),
   saveStartupScript: () => ui.settingsDialog().getByRole('button', { name: 'Save Startup Script', exact: true }),
@@ -820,6 +826,91 @@ async function guardStartupScriptSave(what) {
   if (others.length) throw new Error(`another sandbox is active (${others.join(', ')}); the startup script was NOT saved (stop it first)`);
 }
 
+// E7: the kit's local start script prints one test variable; its value is a secret of the run (exact-value scan, never
+// printed). Red's own script (local-start.json, beside startup.sh) is saved by sha256 and put back at the end.
+const LOCAL_VAR = 'RP_E2E_LOCAL';
+const localValue = crypto.randomBytes(12).toString('hex');
+addSecret('localStartValue', localValue);
+const localStartFile = path.join(paneDir, 'cloud-sandboxes', 'local-start.json');
+async function setupWarningAndLocalScript() {
+  if (env.E7 === '0') return;
+  // Done-when 8: shown while the GitHub token and/or the local start script is unset; each link opens its field.
+  const shownWarning = await visible(ui.setupWarning(), 5000);
+  const warningText = shownWarning ? ((await ui.setupWarning().innerText().catch(() => '')) || '').replace(/\s+/g, ' ') : '';
+  const localSet = Boolean((await ui.localStartScript().inputValue().catch(() => '')).trim());
+  const tokenSet = ((await ui.githubTokenStatus().innerText().catch(() => '')) || '').trim() === 'Set';
+  check('setup-warning-shown', !(localSet && tokenSet) ? shownWarning : null, `warning: ${warningText || 'none'}; token set ${tokenSet}, local start script set ${localSet}`);
+  if (shownWarning) {
+    await inView('setup-warning', ui.setupWarning());
+    await shot('setup-warning', { result: true });
+    if (!localSet) {
+      await ui.setupLink('Set a local start script').click();
+      const focused = Boolean(await until(() => ui.localStartScript().evaluate((element) => element === document.activeElement), 3000, 200));
+      check('setup-link-focuses-local-start-script', focused, focused ? 'the Local start script box has the focus' : 'not focused');
+      await shot('setup-link-local-start-script');
+    }
+  }
+  // Red's own local start script: a copy beside the file (sha256 only), restored at the end like the startup script.
+  const bytes = fs.existsSync(localStartFile) ? fs.readFileSync(localStartFile) : null;
+  original.localStart = { bytes, sha: bytes ? sha256Of(bytes) : null, script: await ui.localStartScript().inputValue().catch(() => '') };
+  if (bytes) {
+    original.localStart.copy = `${localStartFile}.e2e-original-${original.localStart.sha.slice(0, 12)}`;
+    fs.writeFileSync(original.localStart.copy, bytes, { mode: 0o600 });
+  }
+  results.localStartBefore = bytes ? { length: bytes.length, sha256: original.localStart.sha.slice(0, 12) } : { file: 'none' };
+  // `echo NAME=value` prints the same line in cmd, PowerShell and sh, whatever shell Red chose.
+  await ui.localStartScript().fill(`echo ${LOCAL_VAR}=${localValue}`);
+  await ui.saveLocalStartScript().click();
+  check('local-start-script-saved', await visible(ui.settingsDialog().getByText('Saved', { exact: true }).last(), 10_000), `prints ${LOCAL_VAR}=<value> (value never shown)`);
+  await shot('local-start-script-saved');
+}
+
+// Done-when 7: the variable reached the sandbox (the env file, 0600) and a Pane terminal, checked by NAME only.
+async function dw7() {
+  if (!state.pane?.terminalPanelId) throw new Error('no Pane terminal from D5');
+  await openCloud();
+  check('row-no-local-start-chip', !(await visible(ui.rowLocalStartChip(state.label), 1000)), 'no ⚠ local start script chip on the row');
+  await closeSettings();
+  const panelId = await openHostTerminalFromSwitcher(state.label);
+  const { lines } = await runInTerminal(panelId, `f=~/.config/runpane-cloud/local-env; echo LOCALENV_MODE=$(stat -c %a $f 2>/dev/null || echo none) LOCALENV_HAS=$(grep -c '^${LOCAL_VAR}=' $f 2>/dev/null || echo 0)`);
+  const text = lines.join(' ');
+  check('local-env-file-0600', /LOCALENV_MODE=600\b/.test(text), text.match(/LOCALENV_MODE=\S+/)?.[0] ?? 'unread');
+  check('local-env-has-variable', /LOCALENV_HAS=1\b/.test(text), text.match(/LOCALENV_HAS=\S+/)?.[0] ?? 'unread');
+  check('local-env-value-not-on-screen', !(await screenText(panelId)).includes(localValue), 'the value never appears in the terminal');
+  await shot('local-env-on-sandbox', { result: true, oracle: { lines } });
+  await ui.openPane(state.repoName ?? repoName, state.pane.name).click();
+  await ui.panelTab('Terminal').click();
+  const { lines: paneLines } = await runInTerminal(state.pane.terminalPanelId, `test -n "$${LOCAL_VAR}" && echo ${LOCAL_VAR}_present || echo ${LOCAL_VAR}_missing`);
+  check('local-env-in-pane-terminal', paneLines.some((line) => line.trim() === `${LOCAL_VAR}_present`), paneLines.join(' | '));
+  await shot('local-env-in-pane', { result: true, oracle: { lines: paneLines } });
+}
+
+async function restoreLocalStartScript() {
+  if (!original.localStart) return;
+  const wanted = original.localStart.sha;
+  await openCloud().catch(() => undefined);
+  await ui.localStartScript().fill(original.localStart.script).catch(() => undefined);
+  await ui.saveLocalStartScript().click().catch(() => undefined);
+  await sleep(1500);
+  await closeSettings().catch(() => undefined);
+  const now = () => (fs.existsSync(localStartFile) ? sha256Of(fs.readFileSync(localStartFile)) : null);
+  let how = 'ui';
+  // Saving no script may leave no file or an empty one; a file that had no script before counts as restored when the
+  // saved script is blank again. Otherwise the file decides, with the saved copy as the fallback.
+  const blankNow = () => !fs.existsSync(localStartFile) || !String(JSON.parse(fs.readFileSync(localStartFile, 'utf8') || '{}').script ?? '').trim();
+  let restored = wanted === null ? blankNow() : now() === wanted;
+  if (!restored && original.localStart.copy && fs.existsSync(original.localStart.copy)) {
+    fs.writeFileSync(`${localStartFile}.e2e-restore.tmp`, fs.readFileSync(original.localStart.copy), { mode: 0o600 });
+    fs.renameSync(`${localStartFile}.e2e-restore.tmp`, localStartFile);
+    how = 'local';
+    restored = now() === wanted;
+  }
+  results.localStartScriptRestored = restored;
+  results.regression.push({ name: 'local-start-script-restored', verdict: restored && how === 'ui' ? 'PASS' : 'FAIL', detail: `localStartScriptRestored: ${restored}; sha256 before ${wanted?.slice(0, 12) ?? 'none'} after ${now()?.slice(0, 12) ?? 'none'}; by ${how}` });
+  log(`localStartScriptRestored: ${restored} (by ${how})`);
+  if (restored && original.localStart.copy) fs.rmSync(original.localStart.copy, { force: true });
+}
+
 async function d0() {
   await openCloud();
   await guardStartupScriptSave('d0');
@@ -848,6 +939,13 @@ async function d0() {
     await inView('github-token-status', ui.githubTokenStatus());
     await shot('github-token-status');
   }
+  // Done-when 8: with both set the warning is gone.
+  if (env.E7 !== '0') {
+    const gone = !(await visible(ui.setupWarning(), 3000));
+    const tokenSet = ((await ui.githubTokenStatus().innerText().catch(() => '')) || '').trim() === 'Set';
+    check('setup-warning-gone-when-both-set', tokenSet ? gone : null, tokenSet ? (gone ? 'no warning with a token and a local start script' : 'the warning is still shown') : 'no GitHub token in this run, so the warning stays (expected)');
+    await shot('setup-warning-after', { result: true });
+  }
   // D0_DRY=1: everything up to the Add click (0 starts), to prove the editor and the credentials before spending one.
   if (env.D0_DRY === '1') {
     await ui.nameInput().fill('rp-loop-cs-e2e-dry');
@@ -866,6 +964,9 @@ async function d0() {
     await ui.nameInput().fill('');
     return;
   }
+
+  // Done-when 8 (E8) and 7 (E7): the setup warning while something is missing, then the kit's local start script.
+  await setupWarningAndLocalScript();
 
   // E6 (D2, Red 12:21): Red pastes his GitHub token into Settings BEFORE Add; the kit takes no screenshot meanwhile.
   if (relay && env.SKIP_GITHUB_TOKEN !== '1') {
@@ -1942,6 +2043,7 @@ async function main() {
     await step('D2', 'Red signs the host in to GitHub and Codex (device codes)', d2, { applies: relay || env.D2 === '1', why: 'needs Red (SOBECK only)' });
     await step('D4', 'Clone via Home > GitHub; Windows path rejected; Open via the remote picker', d4);
     await step('D5', 'New Pane: its terminal is in the Pane\'s worktree', d5);
+    await step('DW7', 'Done-when 7: the local start script\'s variable on the sandbox and in a Pane terminal (by name)', dw7, { applies: cloud && env.E7 !== '0', why: 'cloud sandboxes with E7 only' });
     await step('D6', 'Claude Code (and Codex) print pwd and branch = D5', d6);
     await step('D7', 'Startup status, Stop/Start re-runs it, a failing script shows the chip', d7, { applies: cloud, why: 'cloud sandboxes only' });
     // STEPS=D7LOG: only the row's View log, read again on a running sandbox (no edit, no start).
@@ -1953,6 +2055,7 @@ async function main() {
     stopBrowserSampler();
     if (state.label) await step('D9', 'Remove through the UI', d9);
     current = undefined;
+    await restoreLocalStartScript().catch((error) => log('restore local start script failed:', error.message));
     await restoreStartupScript().catch((error) => {
       log('restore startup script failed:', error.message);
       if (original.startupCopy && results.startupScriptRestored === undefined) {
