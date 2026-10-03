@@ -368,6 +368,9 @@ interface ElectronAPI {
     removeCloudSandbox: (id: string) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
     retryCloudSandbox: (id: string) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
     dismissCloudSandbox: (id: string) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
+    getCloudStartupScript: () => Promise<IPCResponse<{ script: string }>>;
+    saveCloudStartupScript: (script: string) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
+    readCloudSandboxStartupLog: (id: string) => Promise<IPCResponse<{ log: string }>>;
     onCloudSandboxesChanged: (callback: (snapshot: CloudSandboxesSnapshot) => void) => () => void;
   };
 

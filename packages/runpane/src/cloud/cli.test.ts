@@ -43,6 +43,8 @@ function harness(env: NodeJS.ProcessEnv = {}) {
       calls.push(`remove ${host}`);
     },
     syncAgentDefaults: async () => INFO,
+    runStartupScript: async () => null,
+    readStartupLog: async () => '',
   };
   const io = {
     stdout: (line: string) => out.push(line),

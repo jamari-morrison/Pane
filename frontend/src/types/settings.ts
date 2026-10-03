@@ -57,6 +57,7 @@ export type SettingsSettingId =
   | 'remote-existing-profile'
   | 'remote-cloud-credentials'
   | 'remote-cloud-sandboxes'
+  | 'remote-cloud-startup-script'
   | 'voice-transcription'
   | 'keyboard-shortcuts'
   | 'command-palette-shortcut'

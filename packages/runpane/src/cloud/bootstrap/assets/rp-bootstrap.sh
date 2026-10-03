@@ -16,6 +16,9 @@ mkdir -p "$RP_STATE"
 chmod 700 "$RP_STATE"
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+# Where the startup script's runner and boot unit go (tests point these at a temp dir).
+RP_UNIT_DIR="${RP_UNIT_DIR:-/etc/systemd/system}"
+RP_SBIN="${RP_SBIN:-/usr/local/sbin}"
 
 result() { printf 'RP_RESULT %s\n' "$1"; }
 fail() { result "$(python3 -c 'import json,sys;print(json.dumps({"ok":False,"error":sys.argv[1]}))' "$1")"; exit 1; }
@@ -684,6 +687,95 @@ UNIT
   result "$(python3 -c 'import json,sys;print(json.dumps({"ok":True,"allowedTcp":[int(p) for p in sys.argv[1].split(",") if p]}))' "$ports")"
 }
 
+# The user's startup script (one per user, set in desktop Pane): ~/.config/runpane-cloud/startup.sh, run by
+# rp-user-startup.service on every boot. It is a system unit run as the login user that nothing else waits for, so a
+# slow or failing script never holds up the Pane daemon (a user unit). rp-user-startup.sh records its status and logs.
+STARTUP_SCRIPT="$HOME/.config/runpane-cloud/startup.sh"
+STARTUP_STATUS="$HOME/.local/state/runpane-cloud/startup-status.json"
+STARTUP_UNIT=rp-user-startup.service
+
+install_startup_unit() {
+  sudo install -m 755 "$RP_SCRIPTS/rp-user-startup.sh" "$RP_SBIN/rp-user-startup"
+  sudo tee "$RP_UNIT_DIR/$STARTUP_UNIT" >/dev/null <<UNIT
+[Unit]
+Description=Pane cloud sandbox: run the user's startup script (~/.config/runpane-cloud/startup.sh)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=$(id -un)
+WorkingDirectory=$HOME
+Environment=PATH=$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$RP_SBIN/rp-user-startup
+TimeoutStartSec=660
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo systemctl daemon-reload
+  sudo systemctl enable "$STARTUP_UNIT" >/dev/null 2>&1 || fail "could not enable $STARTUP_UNIT"
+}
+
+# startup-install <uploaded script file | "">: install the boot unit, then make the uploaded file the startup script
+# (0700, the login user's), or remove the script when no file is given. Never runs it. Idempotent.
+step_startup_install() {
+  local upload="${1:-}"
+  install_startup_unit
+  if [ -z "$upload" ]; then
+    rm -f "$STARTUP_SCRIPT"
+    result '{"ok":true,"sha256":null}'
+    return
+  fi
+  [ -f "$upload" ] || fail "startup-install: no uploaded script"
+  mkdir -p "$(dirname "$STARTUP_SCRIPT")"
+  cat "$upload" >"$STARTUP_SCRIPT"
+  rm -f "$upload"
+  chmod 700 "$STARTUP_SCRIPT"
+  chown "$(id -un):" "$STARTUP_SCRIPT"
+  result "$(printf '{"ok":true,"sha256":"%s"}' "$(sha256sum "$STARTUP_SCRIPT" | cut -d' ' -f1)")"
+}
+
+# startup-run <always|if-changed>: wait for a run in progress (a boot run), then run the script once more and wait for
+# it; if-changed runs only when the last run used another script. Returns the latest status (null: never ran).
+step_startup_run() {
+  local mode="${1:-}" ran=false i=0
+  case "$mode" in always|if-changed) ;; *) fail "startup-run: mode must be always or if-changed" ;; esac
+  while [ "$(systemctl is-active "$STARTUP_UNIT" 2>/dev/null)" = activating ]; do
+    i=$((i+1)); [ "$i" -ge 700 ] && fail "startup-run: the startup script is still running after 700 s"
+    sleep 1
+  done
+  if [ -s "$STARTUP_SCRIPT" ]; then
+    if [ "$mode" = always ] || ! python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); sys.exit(0 if s.get("sha256")==sys.argv[2] and s.get("finishedAt") else 1)' \
+        "$STARTUP_STATUS" "$(sha256sum "$STARTUP_SCRIPT" | cut -d' ' -f1)" 2>/dev/null; then
+      # The unit fails when the script does; the status says how.
+      sudo systemctl start "$STARTUP_UNIT" || true
+      ran=true
+    fi
+  fi
+  result "$(python3 -c '
+import json, sys
+status = None
+if sys.argv[3] == "1":
+    try:
+        status = json.load(open(sys.argv[1]))
+    except (OSError, ValueError):
+        pass
+print(json.dumps({"ok": True, "ran": sys.argv[2] == "true", "status": status}))' "$STARTUP_STATUS" "$ran" "$([ -s "$STARTUP_SCRIPT" ] && echo 1 || echo 0)")"
+}
+
+# startup-log: the last 200 lines of the latest run's log. Only the desktop's View log shows it; it may hold
+# anything the user's script printed.
+step_startup_log() {
+  python3 -c '
+import json, sys
+try:
+    lines = open(sys.argv[1], errors="replace").read().splitlines(True)[-200:]
+except OSError:
+    lines = []
+print("RP_RESULT " + json.dumps({"ok": True, "log": "".join(lines)}))' "$HOME/.local/state/runpane-cloud/startup.log"
+}
+
 step="${1:-}"; shift || true
 case "$step" in
   identity) step_identity "$@" ;;
@@ -705,5 +797,8 @@ case "$step" in
   cert-status) step_cert_status "$@" ;;
   serve-http) step_serve_http ;;
   serve-guard) step_serve_guard "$@" ;;
+  startup-install) step_startup_install "$@" ;;
+  startup-run) step_startup_run "$@" ;;
+  startup-log) step_startup_log ;;
   *) fail "unknown step '$step'" ;;
 esac

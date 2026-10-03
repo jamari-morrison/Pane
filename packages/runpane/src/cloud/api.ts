@@ -4,11 +4,15 @@ import {
   applyClaudeModel,
   cloudHostname,
   provisionSandbox,
+  pushStartupScript,
+  readStartupLog,
   repairSandboxTailnet,
+  runStartupScript,
   updateSandboxPane,
   type ClaudeModelOutcome,
   type CloudTransportMode,
   type ProvisionStepName,
+  type StartupScriptStatus,
 } from './bootstrap/provision';
 import { createDefaultClaudeModelSource } from './claudeDefaults';
 import { waitForDaemonHealth, type DaemonHealthResult } from './bootstrap/health';
@@ -53,6 +57,14 @@ export interface CloudSandboxes {
    * change. create, start and update do this too; call it after the user's default changes, e.g. on connect.
    */
   syncAgentDefaults(host: string): Promise<CloudSandboxInfo>;
+  /**
+   * Gives a running sandbox the user's current startup script and runs it once, waiting for it (up to its 10 minute
+   * limit). `onlyIfChanged` skips the run when the last one used this script, e.g. the boot run of a start. Resolves
+   * the latest run's status; null when no script has run.
+   */
+  runStartupScript(host: string, options?: { onlyIfChanged?: boolean }): Promise<StartupScriptStatus | null>;
+  /** The last 200 lines of a running sandbox's startup log. It holds whatever the script printed: show it, never log it. */
+  readStartupLog(host: string): Promise<string>;
 }
 
 /** Fields left undefined or empty keep what is saved. */
@@ -97,6 +109,7 @@ export type CloudProgressStep =
   | 'pairing'
   | 'health'
   | 'saved-host'
+  | 'startup'
   | 'stopping'
   | 'starting'
   | 'repair'
@@ -138,6 +151,8 @@ export interface CloudSandboxInfo {
    * detection): then nothing is sent and the sandbox keeps the model it had.
    */
   claudeModel?: { model: string | null; outcome: ClaudeModelOutcome };
+  /** The user's startup script's run on create; absent when no script ran. */
+  startupScript?: StartupScriptStatus;
 }
 
 /** The outside world, swappable in tests. */
@@ -162,6 +177,11 @@ export interface CloudSandboxesOptions {
    * detected); null when it is unknown (detection failed), and then nothing is sent to the sandbox.
    */
   localClaudeModel?: () => Promise<string | null>;
+  /**
+   * The user's startup script, which create and start push to every sandbox (blank: none, so the sandbox's is removed).
+   * Unset (the CLI), nothing is pushed and each sandbox keeps the script it has.
+   */
+  readStartupScript?: () => Promise<string>;
 }
 
 export interface CloudBootstrap {
@@ -169,6 +189,9 @@ export interface CloudBootstrap {
   repair: typeof repairSandboxTailnet;
   update: typeof updateSandboxPane;
   applyClaudeModel: typeof applyClaudeModel;
+  pushStartupScript: typeof pushStartupScript;
+  runStartupScript: typeof runStartupScript;
+  readStartupLog: typeof readStartupLog;
   waitForHealth: (baseUrl: string, options: { timeoutMs: number; intervalMs?: number }) => Promise<DaemonHealthResult>;
 }
 
@@ -199,6 +222,9 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
     repair: repairSandboxTailnet,
     update: updateSandboxPane,
     applyClaudeModel,
+    pushStartupScript,
+    runStartupScript,
+    readStartupLog,
     waitForHealth: (baseUrl, healthOptions) => waitForDaemonHealth(baseUrl, healthOptions),
   };
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -230,6 +256,28 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
     }
     report(`Using your Claude Code default model (${model})...`);
     return bootstrap.applyClaudeModel(handle, model);
+  }
+
+  /**
+   * Pushes the user's startup script; false when there is no reader or the push failed (reported, never thrown: a
+   * script must never cost the user a sandbox or a start). Resolves whether a script is now in place.
+   */
+  async function pushStartupScriptBestEffort(handle: SandboxHandle, report: (message: string) => void, failure: string): Promise<boolean> {
+    if (!options.readStartupScript) return false;
+    try {
+      const pushed = await bootstrap.pushStartupScript(handle, await options.readStartupScript());
+      return pushed.sha256 !== null;
+    } catch (error) {
+      report(`${failure}: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
+  async function loadRunningHost(host: string, stoppedMessage: string) {
+    const loaded = await loadHost(host);
+    const sandbox = await loaded.provider.get(loaded.record.profile.cloud.sandboxId);
+    if (sandbox.state !== 'running') throw new Error(`${loaded.record.profile.label} is ${sandbox.state}; ${stoppedMessage}.`);
+    return { ...loaded, handle: loaded.provider.handle(sandbox.id) };
   }
 
   async function credentialsStatus(): Promise<CloudCredentialsStatus> {
@@ -440,8 +488,20 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
         }
         throw new Error(`Creating ${hostname} failed: ${reason}`);
       }
+      // The sandbox is ready and saved; the user's script runs last, and its failure is shown, never thrown.
+      let startupScript: StartupScriptStatus | null = null;
+      const handle = provider.handle(sandbox.id);
+      const couldNotRun = 'Your startup script could not run';
+      if (await pushStartupScriptBestEffort(handle, (message) => progress('startup', message), couldNotRun)) {
+        progress('startup', 'Running your startup script…');
+        try {
+          startupScript = (await bootstrap.runStartupScript(handle, 'always')).status;
+        } catch (error) {
+          progress('startup', `${couldNotRun}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
       progress('done', `${label} is ready at ${record.profile.baseUrl}.`);
-      return sandboxInfo(record, await provider.get(sandbox.id), health, claudeModel);
+      return sandboxInfo(record, await provider.get(sandbox.id), health, claudeModel, startupScript);
     },
 
     async list() {
@@ -498,6 +558,9 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
         await store.writeHost(record);
       }
       sandbox = await waitForSandbox(provider, sandboxId, 'running', SANDBOX_READY_TIMEOUT_MS);
+      // The boot already ran the script the sandbox had; an edit since then runs through runStartupScript.
+      await pushStartupScriptBestEffort(provider.handle(sandboxId), (message) => onProgress?.({ step: 'starting', message }),
+        'Your startup script could not be updated');
       // A healthy start answers in about 10 s; after that, check the node before waiting longer.
       let health = await bootstrap.waitForHealth(record.profile.baseUrl, { timeoutMs: START_HEALTH_CHECK_MS, intervalMs: 500 });
       if (!health.ok) {
@@ -547,6 +610,18 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       return sandboxInfo(record, sandbox, undefined, await syncClaudeModel(provider.handle(sandbox.id), () => undefined));
     },
 
+    async runStartupScript(host, runOptions = {}) {
+      const { handle } = await loadRunningHost(host, 'it runs your startup script when it starts');
+      // Running the old script after a failed push would report on the wrong script: let the push fail the run.
+      if (options.readStartupScript) await bootstrap.pushStartupScript(handle, await options.readStartupScript());
+      return (await bootstrap.runStartupScript(handle, runOptions.onlyIfChanged ? 'if-changed' : 'always')).status;
+    },
+
+    async readStartupLog(host) {
+      const { handle } = await loadRunningHost(host, 'start it to read its startup log');
+      return bootstrap.readStartupLog(handle);
+    },
+
     async remove(host, onProgress) {
       const { record, provider, tailscale } = await loadHost(host);
       onProgress?.({ step: 'removing', message: `Removing ${record.profile.label}...` });
@@ -563,6 +638,7 @@ function sandboxInfo(
   sandbox?: CloudSandbox,
   health?: DaemonHealthResult,
   claudeModel?: CloudSandboxInfo['claudeModel'],
+  startupScript?: StartupScriptStatus | null,
 ): CloudSandboxInfo {
   const info: CloudSandboxInfo = {
     hostname: record.profile.cloud.hostname,
@@ -583,6 +659,7 @@ function sandboxInfo(
   if (org) info.org = org;
   if (health) info.health = health.version ? { ok: health.ok, version: health.version } : { ok: health.ok };
   if (claudeModel) info.claudeModel = claudeModel;
+  if (startupScript) info.startupScript = startupScript;
   return info;
 }
 

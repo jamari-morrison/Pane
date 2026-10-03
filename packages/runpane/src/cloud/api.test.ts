@@ -5,7 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { createCloudSandboxes, type CloudBootstrap, type CloudProgress } from './api';
 import type { DaemonHealthResult } from './bootstrap/health';
-import type { ProvisionResult, RepairResult } from './bootstrap/provision';
+import type { ProvisionResult, RepairResult, StartupScriptStatus } from './bootstrap/provision';
 import type { CloudProvider, CloudSandbox, CreateSandboxRequest, ListedBoatOrg } from './provider';
 import type { CloudHostProfile, PaneSource } from './store';
 import type { TailscaleApi, TailscaleDevice } from './tailscale';
@@ -122,7 +122,13 @@ interface BootstrapScript {
   repair?: RepairResult;
   /** applyClaudeModel fails, e.g. the sandbox's settings.json is not JSON. */
   claudeModelFails?: boolean;
+  /** What the sandbox reports after a startup script run (default: exit 0). */
+  startupStatus?: StartupScriptStatus | null;
+  startupPushFails?: boolean;
+  startupRunFails?: boolean;
 }
+
+const STARTUP_OK: StartupScriptStatus = { exitCode: 0, startedAt: '2026-10-03T10:00:00Z', finishedAt: '2026-10-03T10:00:01Z', sha256: 'ab'.repeat(32), timedOut: false };
 
 function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: BootstrapScript = {}) {
   const agentEnvs: Array<string | undefined> = [];
@@ -131,6 +137,8 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
   const updates: string[] = [];
   const claudeModels: string[] = [];
   const health = [...(script.health ?? [])];
+  /** Startup script pushes and runs, and health checks, in call order. */
+  const events: string[] = [];
   const bootstrap: CloudBootstrap = {
     async provision(_sandbox, options): Promise<ProvisionResult> {
       agentEnvs.push(options.agentEnv);
@@ -160,12 +168,27 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
       claudeModels.push(model);
       return { outcome: 'set', model };
     },
+    async pushStartupScript(_sandbox, startupScript) {
+      events.push(`push ${JSON.stringify(startupScript)}`);
+      if (script.startupPushFails) throw new Error('cloud bootstrap step "startup-install" failed: no space left');
+      return { sha256: startupScript.trim() ? 'ab'.repeat(32) : null };
+    },
+    async runStartupScript(_sandbox, mode) {
+      events.push(`run ${mode}`);
+      if (script.startupRunFails) throw new Error('cloud bootstrap step "startup-run" failed: boat exec timed out');
+      return { ran: true, status: script.startupStatus === undefined ? STARTUP_OK : script.startupStatus };
+    },
+    async readStartupLog() {
+      events.push('log');
+      return 'MARKER\n';
+    },
     async waitForHealth(): Promise<DaemonHealthResult> {
+      events.push('health');
       const ok = health.length > 0 ? health.shift() === true : true;
       return { ok, elapsedMs: 1, version: ok ? '2.4.146' : undefined };
     },
   };
-  return { bootstrap, agentEnvs, paneSources, repairs, updates, claudeModels };
+  return { bootstrap, agentEnvs, paneSources, repairs, updates, claudeModels, events };
 }
 
 /** The user's Claude Code default model on "this machine"; tests change it. */
@@ -173,7 +196,13 @@ class LocalClaudeDefault {
   constructor(public model: string | null) {}
 }
 
-function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}) {
+/** The user's startup script on "this machine"; undefined: the caller has no reader (the CLI). */
+class LocalStartupScript {
+  constructor(public script: string | undefined) {}
+}
+
+function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}, startupScript?: string) {
+  const startup = new LocalStartupScript(startupScript);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-cloud-'));
   const clock = new FakeClock();
   const provider = fakeProvider(clock);
@@ -199,9 +228,10 @@ function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}) {
     now: clock.now,
     env,
     localClaudeModel: async () => local.model,
+    readStartupScript: startupScript === undefined ? undefined : async () => startup.script ?? '',
   });
   const onProgress = (update: CloudProgress) => progress.push(update);
-  return { dir, cloud, provider, tailnet, boot, saved, progress, onProgress, local, clock };
+  return { dir, cloud, provider, tailnet, boot, saved, progress, onProgress, local, clock, startup };
 }
 
 async function withCredentials(h: ReturnType<typeof harness>) {
@@ -472,4 +502,102 @@ test('Start waits through a Stop that boat is still archiving, then resumes', as
   const started = await h.cloud.start(hostname);
   assert.equal(started.state, 'running');
   assert.equal(h.provider.calls.at(-1), `resume ${sandboxId}`);
+});
+
+test('create pushes the startup script and runs it once, showing "Running your startup script…"', async () => {
+  const h = harness({}, {}, 'echo MARKER\n');
+  await withCredentials(h);
+  const info = await h.cloud.create({}, h.onProgress);
+  assert.deepEqual(h.boot.events.filter((event) => event !== 'health'), ['push "echo MARKER\\n"', 'run always']);
+  assert.deepEqual(h.progress.find((update) => update.step === 'startup'), { step: 'startup', message: 'Running your startup script…' });
+  assert.deepEqual(h.progress.map((update) => update.step).slice(-3), ['saved-host', 'startup', 'done']);
+  assert.deepEqual(info.startupScript, STARTUP_OK);
+});
+
+test('create with an empty startup script installs the unit but runs nothing; without a reader it pushes nothing', async () => {
+  const empty = harness({}, {}, '');
+  await withCredentials(empty);
+  const info = await empty.cloud.create({}, empty.onProgress);
+  assert.deepEqual(empty.boot.events.filter((event) => event !== 'health'), ['push ""']);
+  assert.ok(!empty.progress.some((update) => update.step === 'startup'));
+  assert.equal(info.startupScript, undefined);
+
+  const cli = harness();
+  await withCredentials(cli);
+  await cli.cloud.create();
+  assert.deepEqual(cli.boot.events.filter((event) => event !== 'health'), [], 'the CLI never replaces the script desktop Pane pushed');
+});
+
+test('a failing startup script never fails create: the sandbox is kept and the status reports the failure', async () => {
+  const failed = { ...STARTUP_OK, exitCode: 1 };
+  const h = harness({ startupStatus: failed }, {}, 'exit 1\n');
+  await withCredentials(h);
+  const info = await h.cloud.create({}, h.onProgress);
+  assert.equal(info.state, 'running');
+  assert.deepEqual(info.startupScript, failed);
+  assert.equal(h.saved.size, 1);
+
+  const broken = harness({ startupRunFails: true }, {}, 'echo hi\n');
+  await withCredentials(broken);
+  const kept = await broken.cloud.create({}, broken.onProgress);
+  assert.equal(kept.state, 'running');
+  assert.equal(kept.startupScript, undefined);
+  assert.equal(broken.provider.sandboxes.size, 1, 'the sandbox stays');
+  assert.match(broken.progress.at(-2)?.message ?? '', /^Your startup script could not run: cloud bootstrap step "startup-run" failed/u);
+});
+
+test('start pushes the current startup script before the health check, and a failed push never fails the start', async () => {
+  const h = harness({}, {}, 'echo v1\n');
+  await withCredentials(h);
+  const { hostname } = await h.cloud.create();
+  await h.cloud.stop(hostname);
+  h.startup.script = 'echo v2\n';
+  h.boot.events.length = 0;
+  await h.cloud.start(hostname, h.onProgress);
+  assert.deepEqual(h.boot.events, ['push "echo v2\\n"', 'health'], 'pushed before the health check, and not run (the boot ran it)');
+
+  const script: BootstrapScript = {};
+  const failing = harness(script, {}, 'echo v1\n');
+  await withCredentials(failing);
+  const created = await failing.cloud.create();
+  await failing.cloud.stop(created.hostname);
+  script.startupPushFails = true;
+  const progress: CloudProgress[] = [];
+  const started = await failing.cloud.start(created.hostname, (update) => progress.push(update));
+  assert.equal(started.state, 'running');
+  assert.ok(progress.some((update) => /^Your startup script could not be updated: cloud bootstrap step "startup-install" failed/u.test(update.message)));
+});
+
+test('a failed push never fails create either: the sandbox is kept', async () => {
+  const h = harness({ startupPushFails: true }, {}, 'echo v1\n');
+  await withCredentials(h);
+  const info = await h.cloud.create({}, h.onProgress);
+  assert.equal(info.state, 'running');
+  assert.equal(info.startupScript, undefined);
+  assert.deepEqual(h.boot.events.filter((event) => event !== 'health'), ['push "echo v1\\n"'], 'nothing runs without the pushed script');
+  assert.ok(h.progress.some((update) => /^Your startup script could not run: cloud bootstrap step "startup-install" failed/u.test(update.message)));
+});
+
+test('runStartupScript pushes the current script and runs it on a running sandbox; readStartupLog reads its log', async () => {
+  const h = harness({}, {}, 'echo v1\n');
+  await withCredentials(h);
+  const { hostname } = await h.cloud.create();
+  h.startup.script = 'echo v2\n';
+  h.boot.events.length = 0;
+  assert.deepEqual(await h.cloud.runStartupScript(hostname, { onlyIfChanged: true }), STARTUP_OK);
+  assert.deepEqual(await h.cloud.runStartupScript(hostname), STARTUP_OK);
+  assert.deepEqual(h.boot.events, ['push "echo v2\\n"', 'run if-changed', 'push "echo v2\\n"', 'run always']);
+  assert.equal(await h.cloud.readStartupLog(hostname), 'MARKER\n');
+
+  const script: BootstrapScript = { startupPushFails: true };
+  const failing = harness(script, {}, 'echo v1\n');
+  await withCredentials(failing);
+  const created = await failing.cloud.create();
+  failing.boot.events.length = 0;
+  await assert.rejects(failing.cloud.runStartupScript(created.hostname), /startup-install/u);
+  assert.deepEqual(failing.boot.events, ['push "echo v1\\n"'], 'the old script is not run after a failed push');
+
+  await h.cloud.stop(hostname);
+  await assert.rejects(h.cloud.runStartupScript(hostname), /is stopped; it runs your startup script when it starts/u);
+  await assert.rejects(h.cloud.readStartupLog(hostname), /is stopped; start it to read its startup log/u);
 });
