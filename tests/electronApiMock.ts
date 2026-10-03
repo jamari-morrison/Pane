@@ -77,6 +77,8 @@ type ElectronApiMockOptions = {
   mainRepoSessionErrorByProjectId?: Record<number, string>;
   activeProjectId?: number | null;
   paneChatAgentChangeDelayMs?: number;
+  /** host-terminal:open fails with this message. */
+  hostTerminalOpenError?: string;
   feedbackOutcome?: 'success' | 'failure';
   openExternalOutcome?: 'success' | 'failure';
   /** Seeds the mocked cloud provisioning library; absent means this build has none. */
@@ -805,6 +807,7 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           const calls = invokeCalls.get('host-terminal:open') ?? [];
           calls.push({ channel: 'host-terminal:open', args: [request] });
           invokeCalls.set('host-terminal:open', calls);
+          if (mockOptions.hostTerminalOpenError) return Promise.resolve({ success: false, error: mockOptions.hostTerminalOpenError });
           return success(createHostTerminalState());
         },
       }),
