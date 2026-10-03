@@ -848,7 +848,9 @@ async function windowsPathRejected() {
 async function d4OpenAndNew() {
   // (c) An existing repo on the host (put there from the host terminal) opened through the remote picker.
   const panelId = await openHostTerminalFromSwitcher(state.label);
-  await runInTerminal(panelId, `git clone -q ${OPEN_REPO_URL} ~/${openRepoDir} && echo CLONED-OK`, { timeoutMs: 180_000, done: (text) => /CLONED-OK|fatal:/.test(text) });
+  // `"$HOME/…"` and `;` mean the same in bash and PowerShell (a Windows self-hosted host).
+  const { lines: cloneLines } = await runInTerminal(panelId, `git clone -q ${OPEN_REPO_URL} "$HOME/${openRepoDir}"; echo CLONE-EXIT-$?`, { timeoutMs: 180_000, done: (text) => /CLONE-EXIT-/.test(text) });
+  check('open-repo-cloned-on-host', cloneLines.some((line) => /CLONE-EXIT-(0|True)\b/.test(line)), cloneLines.join(' | '));
   await shot('open-repo-on-host');
   const add = await openRepositoryDialog();
   await add.getByRole('button', { name: /^Browse/ }).click();

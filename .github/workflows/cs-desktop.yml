@@ -317,6 +317,34 @@ jobs:
           echo "terminal renderer: WebGL (as on SOBECK)" | tee -a "$GITHUB_STEP_SUMMARY"
         fi
 
+    # Proof (3) of the real-user kit: it attaches to the released app on a Windows runner (WebGL terminal like SOBECK)
+    # and drives D1 (host terminal), D3 (clone sign-in error -> prefilled terminal) and D4 (clone, remote picker,
+    # Open via the picker, New) on a self-hosted host = the same app as a headless daemon on loopback, with a video.
+    - name: Real-user kit on the fake host (D1, D3, D4, D9)
+      shell: bash
+      env:
+        MODE: fake
+        FAKE_CLAUDE: '1'
+        SIDE_BY_SIDE_NAME: cloudsandbox
+        STEPS: D1,D3,D4
+      run: |
+        export WORK="$(cygpath -w "$PWD/work-real")" OUT="$(cygpath -w "$PWD/work-real/evidence")"
+        node kit/relay-kit/real-user.mjs || true
+        test -f work-real/evidence/results.json
+        node -e '
+          const r = require("./work-real/evidence/results.json");
+          for (const s of r.steps) console.log(s.id, s.verdict, s.error ?? "", (s.checks ?? []).filter((c) => c.verdict === "FAIL").map((c) => c.name).join(","));
+          console.log("video:", r.video.join(", "));
+          console.log("secret scan:", JSON.stringify(r.secretScan));
+        ' | tee -a "$GITHUB_STEP_SUMMARY"
+
+    - uses: actions/upload-artifact@v7
+      if: always()
+      with:
+        name: real-user-kit-proof
+        path: work-real/evidence
+        if-no-files-found: warn
+
     - uses: actions/upload-artifact@v7
       if: always()
       with:
