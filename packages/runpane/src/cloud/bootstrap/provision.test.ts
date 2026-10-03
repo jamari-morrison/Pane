@@ -3,7 +3,16 @@ import { test } from 'node:test';
 import type { JsonObject } from '../../boundaryDecoder';
 import type { SandboxCommandResult, SandboxHandle } from '../provider';
 import type { TailscaleApi, TailscaleDevice } from '../tailscale';
-import { provisionSandbox, redact, repairSandboxTailnet, updateSandboxPane, type ProvisionStep } from './provision';
+import {
+  provisionSandbox,
+  pushStartupScript,
+  readStartupLog,
+  redact,
+  repairSandboxTailnet,
+  runStartupScript,
+  updateSandboxPane,
+  type ProvisionStep,
+} from './provision';
 
 const FQDN = 'rp-abc12345.tail1234.ts.net';
 const PAIRING = `pane-remote://${Buffer.from(JSON.stringify({
@@ -200,4 +209,43 @@ test('update needs an https .deb and its sha256, then runs update-pane', async (
   await assert.rejects(updateSandboxPane(sandbox.handle, { debUrl: 'https://example.com/pane.deb', sha256: 'nope' }), /sha256/u);
   assert.deepEqual(await updateSandboxPane(sandbox.handle, { debUrl: 'https://example.com/pane.deb', sha256: 'b'.repeat(64) }), { version: '2.4.147' });
   assert.deepEqual(sandbox.steps, [{ name: 'update-pane', args: ['https://example.com/pane.deb', 'b'.repeat(64)] }]);
+});
+
+test('pushStartupScript uploads the runner, then installs the script through a private upload; an empty script removes it', async () => {
+  const sandbox = fakeSandbox(new Map([['startup-install', (args: string[]) => ({ ok: true, sha256: args[0] ? 'ab'.repeat(32) : null })]]));
+  assert.deepEqual(await pushStartupScript(sandbox.handle, 'echo hi\n'), { sha256: 'ab'.repeat(32) });
+  const upload = '/home/user/.runpane-cloud/startup.sh.new';
+  assert.equal(sandbox.files.get(upload), 'echo hi\n');
+  assert.ok(sandbox.files.has('/home/user/.runpane-cloud/bin/rp-user-startup.sh'), 'the runner is uploaded with the other scripts');
+  assert.deepEqual(sandbox.steps, [{ name: 'startup-install', args: [upload] }]);
+
+  assert.deepEqual(await pushStartupScript(sandbox.handle, '  \n'), { sha256: null });
+  assert.deepEqual(sandbox.steps[1], { name: 'startup-install', args: [''] });
+});
+
+test('runStartupScript parses the status the sandbox reports', async () => {
+  const status = { exitCode: 1, startedAt: '2026-10-03T10:00:00Z', finishedAt: '2026-10-03T10:00:02Z', sha256: 'ab'.repeat(32), timedOut: false };
+  const sandbox = fakeSandbox(new Map([['startup-run', (args: string[]) => ({ ok: true, ran: args[0] === 'always', status })]]));
+  assert.deepEqual(await runStartupScript(sandbox.handle, 'always'), { ran: true, status });
+  assert.deepEqual(await runStartupScript(sandbox.handle, 'if-changed'), { ran: false, status });
+
+  const none = fakeSandbox(new Map([['startup-run', answer({ ok: true, ran: false, status: null })]]));
+  assert.deepEqual(await runStartupScript(none.handle, 'always'), { ran: false, status: null });
+
+  const timedOut = { ...status, exitCode: 124, timedOut: true };
+  const slow = fakeSandbox(new Map([['startup-run', answer({ ok: true, ran: true, status: timedOut })]]));
+  assert.deepEqual(await runStartupScript(slow.handle, 'always'), { ran: true, status: timedOut });
+
+  // A run still in progress has no exit code or finish time yet.
+  const running = { ...status, exitCode: null, finishedAt: null };
+  const busy = fakeSandbox(new Map([['startup-run', answer({ ok: true, ran: false, status: running })]]));
+  assert.deepEqual(await runStartupScript(busy.handle, 'if-changed'), { ran: false, status: running });
+
+  const broken = fakeSandbox(new Map([['startup-run', answer({ ok: true, ran: true, status: { exitCode: 'one' } })]]));
+  await assert.rejects(runStartupScript(broken.handle, 'always'), /cloud bootstrap step "startup-run" failed: malformed result/u);
+});
+
+test('readStartupLog returns the log text the sandbox reports', async () => {
+  const sandbox = fakeSandbox(new Map([['startup-log', answer({ ok: true, log: 'line 1\nline 2\n' })]]));
+  assert.equal(await readStartupLog(sandbox.handle), 'line 1\nline 2\n');
 });
