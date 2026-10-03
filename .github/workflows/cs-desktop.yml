@@ -335,6 +335,9 @@ jobs:
         FAKE_CLAUDE: '1'
         SIDE_BY_SIDE_NAME: cloudsandbox
         STEPS: D1,D3,D4
+        # The Windows runner as a self-hosted host shows no device code in the in-app sign-in (a generic E3 v2 finding,
+        # reported); Run 8 signs in with E6's token instead, so this proof stops D3 at the terminal fallback.
+        D3V2: '0'
       run: |
         export WORK="$(cygpath -w "$PWD/work-real")" OUT="$(cygpath -w "$PWD/work-real/evidence")"
         node kit/relay-kit/real-user.mjs || true

@@ -852,6 +852,8 @@ async function d0() {
     const saved = await waitForFlag('github-token-saved', 'In the Pane window (Settings > Remote Access, already open): paste your GitHub token (fine-grained: montlakev2, Contents + Pull requests Read and write) into the "GitHub token" box, then click "Save GitHub Token". "Saved token" then reads Set. Do not type it anywhere else.');
     check('github-token-flag', saved, 'Red saved the GitHub token');
     const registered = registerSavedCredentials().filter((entry) => /github/i.test(entry));
+    // For the auditor's exact-value scan: length and sha256[:12] only, computed here on SOBECK.
+    results.githubToken = registered.map((entry) => ({ entry: entry.replace(/^.*?\(/, '(') }));
     log(`GitHub token registered for the exact-value scan: ${registered.join(', ') || 'none found in the saved credentials'}`);
     check('github-token-registered-for-scan', registered.length > 0, registered.length ? 'by name, length and sha256[:12] only' : 'the saved credentials hold no GitHub token');
   }
@@ -1015,11 +1017,11 @@ async function d3() {
 
   // E3 v2: back to Home > GitHub (the draft and the notice are kept), then the in-app sign-in.
   const again = await openCloneDialog();
-  const urlKept = (await again.getByLabel('Repository URL').inputValue()) === PRIVATE_REPO;
+  const urlKept = Boolean(await until(async () => (await again.getByLabel('Repository URL').inputValue()) === PRIVATE_REPO, 5000, 250));
   const noticeKept = await visible(ui.signInAlert(page, state.label), 15_000);
   check('draft-kept-after-terminal', urlKept && noticeKept, `URL kept ${urlKept}, notice back ${noticeKept}`);
   if (!(urlKept && noticeKept)) await shot('draft-after-terminal');
-  if (!(await visible(ui.signInGitHub(), 3000))) {
+  if (env.D3V2 === '0' || !(await visible(ui.signInGitHub(), 3000))) {
     // Before E3 v2 (drop 6): only the fallback exists. Run 8 needs it.
     check('sign-in-to-github-offered', relay ? false : null, 'no "Sign in to GitHub" in this build');
     await closeMenus();
@@ -1112,8 +1114,8 @@ async function d3SignIn(dialog) {
   startBrowserSampler('in-app-sign-in');
   await ui.signInGitHub().click();
   const code = await until(async () => (await ui.deviceCode().first().innerText().catch(() => '')).trim() || undefined, 60_000, 500);
-  // Exactly one code element: mask it; anything else: mask the whole dialog.
-  codeShown('ghDeviceCode', code, async () => ((await ui.deviceCode().count().catch(() => 0)) === 1 ? [ui.deviceCode()] : [dialog]));
+  // Exactly one code element: mask it; anything else: mask the whole dialog. Marked only when a code really appeared.
+  if (code) codeShown('ghDeviceCode', code, async () => ((await ui.deviceCode().count().catch(() => 0)) === 1 ? [ui.deviceCode()] : [dialog]));
   check('in-app-device-code', Boolean(code), code ? 'a device code is shown in Pane (masked in all evidence)' : 'no code');
   check('in-app-copy-and-link', await visible(ui.copyCode(), 2000) && await visible(ui.openDeviceLink(), 2000), '"Copy" + "Open github.com/login/device" next to the code');
   check('in-app-waiting', await visible(page.getByText('Waiting for you to approve on GitHub…'), 5000), '"Waiting for you to approve on GitHub…"');
@@ -1617,6 +1619,8 @@ async function d7FailingVariant() {
   }, 60_000, 500) ?? '';
   check('view-log-shows-run', logText.includes(MARKER), `${logText.split('\n').length} lines, marker ${logText.includes(MARKER)}`);
   check('view-log-no-token', tokenShapes(logText).length === 0, `token shapes in the shown log: ${JSON.stringify(tokenShapes(logText))}`);
+  // The sandbox's startup log as the product shows it (last 200 lines), kept for the audit; redacted and scanned like all text.
+  fs.writeFileSync(path.join(out, 'startup-log.txt'), `${redact(logText)}\n`);
   await shot('startup-log', { result: true });
   await page.keyboard.press('Escape');
 }
