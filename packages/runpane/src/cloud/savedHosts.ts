@@ -117,6 +117,9 @@ function profileJson(profile: CloudHostProfile, id: string): JsonObject {
     cloud: { ...profile.cloud },
     // The desktop names and draws saved hosts from this (shared/types/remoteDaemon.ts RemoteHostKind).
     hostKind: { label: 'cloud sandbox', icon: 'cloud' },
+    // Nobody is at a sandbox's screen: tools in its host terminal (gh, codex login) print their
+    // sign-in URL instead of opening a browser on the sandbox. Same list as shared/types/remoteDaemon.ts.
+    hostTerminalEnv: [{ name: 'BROWSER', value: 'false' }, { name: 'GH_BROWSER', value: 'false' }],
   };
   if (profile.tunnel) {
     const tunnel: JsonObject = { kind: profile.tunnel.kind, selected: profile.tunnel.selected };

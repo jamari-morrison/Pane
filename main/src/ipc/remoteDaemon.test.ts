@@ -1247,8 +1247,12 @@ describe('cloud sandbox IPC', () => {
     },
   };
 
-  // What the desktop keeps: a sandbox profile always reads with the cloud host kind.
-  const savedCloudProfile = { ...cloudProfile, hostKind: { label: 'cloud sandbox', icon: 'cloud' as const } };
+  // What the desktop keeps: a sandbox profile always reads with the cloud host kind and a no-browser terminal.
+  const savedCloudProfile = {
+    ...cloudProfile,
+    hostKind: { label: 'cloud sandbox', icon: 'cloud' as const },
+    hostTerminalEnv: [{ name: 'BROWSER', value: 'false' }, { name: 'GH_BROWSER', value: 'false' }],
+  };
 
   const alpha: CloudSandboxInfo = {
     hostname: 'rp-alpha',
