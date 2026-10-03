@@ -301,7 +301,9 @@ jobs:
         node kit/relay-kit/e2e.mjs || true
         test -f work/evidence/results.json
 
+    # The previous landing's proof (e2e.mjs) is kept for comparison; the real-user kit below is what gates.
     - name: Every check passes except the known sidebar one
+      continue-on-error: true
       shell: bash
       run: |
         node -e '
@@ -321,6 +323,7 @@ jobs:
     # and drives D1 (host terminal), D3 (clone sign-in error -> prefilled terminal) and D4 (clone, remote picker,
     # Open via the picker, New) on a self-hosted host = the same app as a headless daemon on loopback, with a video.
     - name: Real-user kit on the fake host (D1, D3, D4, D9)
+      if: always()
       shell: bash
       env:
         MODE: fake
@@ -337,6 +340,12 @@ jobs:
           console.log("video:", r.video.join(", "));
           console.log("secret scan:", JSON.stringify(r.secretScan));
         ' | tee -a "$GITHUB_STEP_SUMMARY"
+        node -e '
+          const r = require("./work-real/evidence/results.json");
+          const bad = r.steps.filter((s) => s.verdict !== "PASS").map((s) => s.id);
+          const leaks = (r.secretScan?.knownValueHits?.length ?? 1) + (r.secretScan?.tokenShapeHits?.length ?? 1);
+          if (bad.length || leaks || !r.video.length) { console.error("real-user kit proof FAILED:", bad.join(","), "leaks", leaks, "video", r.video.length); process.exit(1); }
+        '
 
     - uses: actions/upload-artifact@v7
       if: always()
