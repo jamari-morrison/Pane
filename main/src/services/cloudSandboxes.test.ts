@@ -802,3 +802,26 @@ describe('CloudSandboxManager GitHub token', () => {
     expect(rowOf(await manager.start('rp-alpha'))?.github).toBeUndefined();
   });
 });
+
+describe('CloudSandboxManager create row', () => {
+  it('shows a sandbox being created once, as its progress, even when a refresh already lists it', async () => {
+    let finish: ((value: CloudSandboxInfo) => void) | undefined;
+    const list = vi.fn(async () => [] as CloudSandboxInfo[]);
+    const library = createLibrary({
+      list,
+      create: vi.fn(() => new Promise<CloudSandboxInfo>((resolve) => { finish = resolve; })),
+    });
+    const { manager } = createManager(library);
+    const created = manager.create({ name: 'alpha', size: 'default' });
+    await vi.waitFor(() => expect(finish).toBeDefined());
+
+    // The library saved the host part-way through the create (before the startup script ran), so a refresh lists it.
+    list.mockResolvedValue([summary()]);
+    const during = await manager.refresh();
+
+    expect(during.sandboxes.map((row) => [row.id, row.state])).toEqual([['create:alpha', 'creating']]);
+    finish?.(summary());
+    const after = await created;
+    expect(after.sandboxes.map((row) => [row.id, row.state])).toEqual([['rp-alpha', 'running']]);
+  });
+});
