@@ -319,6 +319,12 @@ function fakeSetup() {
   // Without a git identity the first Pane in a new project fails ("Author identity unknown").
   fs.writeFileSync(path.join(fakeHome, '.gitconfig'), '[user]\n\tname = cs-e2e\n\temail = cs-e2e@localhost\n');
   if (fakeClaude) installFakeClaude();
+  // FAKE_SYNC_MARKER=<model> (fake only): the library's sync marker as a provisioned sandbox has it, to prove the
+  // harness reads it back through a real terminal (a fake host is never provisioned).
+  if (env.FAKE_SYNC_MARKER) {
+    fs.mkdirSync(path.join(fakeHome, '.runpane-cloud'), { recursive: true });
+    fs.writeFileSync(path.join(fakeHome, '.runpane-cloud', 'claude-model'), env.FAKE_SYNC_MARKER);
+  }
   const setup = spawnSync(paneBin, ['--ozone-platform=headless', '--disable-gpu', '--no-sandbox', '--remote-setup', '--label', 'rp-loop-cs-fake', '--pane-dir', fakeDir, '--listen-port', String(fakePort),
     '--prefer-tunnel', 'manual', '--base-url', fakeBaseUrl, '--no-install-service'], { env: fakeEnv(), encoding: 'utf8', timeout: 120_000 });
   const code = (setup.stdout ?? '').match(/pane-remote:\/\/[A-Za-z0-9_-]+/)?.[0];
@@ -1359,8 +1365,10 @@ async function syncedModelOnSandbox() {
   const probe = created?.panelId ?? created?.panel?.id;
   return until(async () => {
     const screen = await daemonInvoke(host.baseUrl, token, 'runpane:panels:screen', { panelId: probe, limit: 40 });
-    // The panel also shows the typed command (`…=$(cat …`); only a model id, or nothing, at a line's end is the output.
-    const value = String(screen?.text ?? '').match(new RegExp(`${marker}=(claude-[A-Za-z0-9._\\[\\]-]+|)[ \\t]*$`, 'm'))?.[1];
+    fs.writeFileSync(path.join(out, 'synced-marker-screen.txt'), redact(String(screen?.text ?? '')));
+    // The panel also shows the typed command, after the prompt and possibly wrapped right after `…=`; the output is
+    // the line that STARTS with the marker.
+    const value = String(screen?.text ?? '').match(new RegExp(`^${marker}=(claude-[A-Za-z0-9._\\[\\]-]+|)[ \\t]*$`, 'm'))?.[1];
     return value === undefined ? undefined : value || null;
   }, 20_000, 1000);
 }
