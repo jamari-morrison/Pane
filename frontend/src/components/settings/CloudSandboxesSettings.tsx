@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
-import { Check, Cloud, Loader2, Plus, X } from 'lucide-react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
+import { AlertTriangle, Check, Cloud, Loader2, Plus, X } from 'lucide-react';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
+import { Modal, ModalBody, ModalHeader } from '../ui/Modal';
+import { Textarea } from '../ui/Textarea';
 import { SettingsSection } from '../ui/SettingsSection';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { SettingRow } from './SettingRow';
@@ -13,7 +15,9 @@ import {
   formatCloudUptime,
   getCloudSandboxActions,
   getCloudSandboxBadge,
+  getCloudStartupScriptNotice,
   getCloudStepLabel,
+  STARTUP_SCRIPT_WARNING,
   type CloudSandboxRowAction,
 } from '../../utils/cloudSandboxPresentation';
 import {
@@ -40,6 +44,7 @@ const ACTION_LABELS = new Map<CloudSandboxRowAction, string>([
   ['start', 'Start'],
   ['stop', 'Stop'],
   ['update', 'Update Pane'],
+  ['startup-script', 'Startup script'],
   ['remove', 'Remove'],
 ]);
 
@@ -48,6 +53,8 @@ export function CloudSandboxesSettings() {
   const { snapshot, loaded, request } = useCloudSandboxes();
   const [requestError, setRequestError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<CloudSandboxView | null>(null);
+  const [viewingLog, setViewingLog] = useState<CloudSandboxView | null>(null);
+  const startupScriptRef = useRef<HTMLTextAreaElement>(null);
   const now = useMinuteClock();
 
   const send: SendCloudRequest = async (call) => {
@@ -60,6 +67,11 @@ export function CloudSandboxesSettings() {
   const runAction = (sandbox: CloudSandboxView, action: CloudSandboxRowAction) => {
     if (action === 'remove') {
       setRemoving(sandbox);
+      return;
+    }
+    if (action === 'startup-script') {
+      startupScriptRef.current?.scrollIntoView({ block: 'center' });
+      startupScriptRef.current?.focus();
       return;
     }
     void send(() => {
@@ -103,10 +115,11 @@ export function CloudSandboxesSettings() {
               onCreate={(createRequest) => void send(() => API.remoteDaemon.createCloudSandbox(createRequest))}
             />
           </SettingRow>
+          <StartupScriptRow textareaRef={startupScriptRef} send={send} />
           {snapshot.sandboxes.length > 0 && (
             <ul className="divide-y divide-border-secondary" aria-label="Cloud sandboxes">
               {snapshot.sandboxes.map((sandbox) => (
-                <CloudSandboxRow key={sandbox.id} sandbox={sandbox} now={now} onAction={runAction} />
+                <CloudSandboxRow key={sandbox.id} sandbox={sandbox} now={now} onAction={runAction} onViewLog={setViewingLog} />
               ))}
             </ul>
           )}
@@ -125,6 +138,7 @@ export function CloudSandboxesSettings() {
         message="This destroys the sandbox and its tailnet device and forgets the saved host. Anything on it that you haven't pushed is lost."
         confirmText="Remove"
       />
+      {viewingLog && <StartupLogDialog sandbox={viewingLog} onClose={() => setViewingLog(null)} />}
     </SettingsSection>
   );
 }
@@ -230,6 +244,112 @@ function CloudCredentialsRow({ credentials, send }: { credentials: CloudCredenti
   );
 }
 
+/** One startup script for every sandbox, kept on this computer; saving runs it on the running ones. */
+function StartupScriptRow({ textareaRef, send }: { textareaRef: RefObject<HTMLTextAreaElement | null>; send: SendCloudRequest }) {
+  const [script, setScript] = useState('');
+  const [savedScript, setSavedScript] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void API.remoteDaemon.getCloudStartupScript().then((response) => {
+      if (cancelled) return;
+      if (!response.success || !response.data) {
+        setLoadError(response.error || 'Could not read the startup script');
+        return;
+      }
+      setScript(response.data.script);
+      setSavedScript(response.data.script);
+    }).catch((error) => {
+      if (!cancelled) setLoadError(error instanceof Error ? error.message : 'Could not read the startup script');
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      if (await send(() => API.remoteDaemon.saveCloudStartupScript(script))) setSavedScript(script);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <SettingRow
+      settingId="remote-cloud-startup-script"
+      label="Startup script"
+      description="One script for every sandbox. It runs each time a sandbox starts, so make it safe to run again: guard installs with command -v tool || install."
+      align="start"
+    >
+      <div className="w-full space-y-3 sm:w-[460px]">
+        <p className="flex items-center gap-2 text-sm text-status-warning">
+          <AlertTriangle className="h-4 w-4 flex-none" aria-hidden="true" />
+          {STARTUP_SCRIPT_WARNING}
+        </p>
+        <Textarea
+          ref={textareaRef}
+          aria-label="Startup script"
+          className="font-mono text-xs"
+          rows={8}
+          spellCheck={false}
+          value={script}
+          onChange={(event) => setScript(event.target.value)}
+          placeholder={'command -v doppler >/dev/null || curl -Ls https://cli.doppler.com/install.sh | sudo sh'}
+          disabled={savedScript === null && !loadError}
+          error={loadError}
+          fullWidth
+        />
+        <div className="flex items-center justify-end gap-2">
+          {savedScript !== null && script === savedScript && <span className="text-xs text-text-tertiary" role="status">Saved</span>}
+          <Button type="button" size="sm" loading={saving} disabled={savedScript === null || script === savedScript} onClick={() => void save()}>
+            Save Startup Script
+          </Button>
+        </div>
+      </div>
+    </SettingRow>
+  );
+}
+
+/** The last 200 lines of a sandbox's startup log, read when the dialog opens. */
+function StartupLogDialog({ sandbox, onClose }: { sandbox: CloudSandboxView; onClose: () => void }) {
+  const [log, setLog] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void API.remoteDaemon.readCloudSandboxStartupLog(sandbox.id).then((response) => {
+      if (cancelled) return;
+      if (response.success && response.data) setLog(response.data.log);
+      else setError(response.error || 'Could not read the startup log');
+    }).catch((readError) => {
+      if (!cancelled) setError(readError instanceof Error ? readError.message : 'Could not read the startup log');
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [sandbox.id]);
+
+  const title = `Startup log: ${sandbox.label}`;
+  return (
+    <Modal isOpen onClose={onClose} size="lg" ariaLabel={title}>
+      <ModalHeader title={title} description="The last 200 lines of the latest run." onClose={onClose} />
+      <ModalBody>
+        {error && <p className="text-sm text-status-error" role="alert">{error}</p>}
+        {!error && log === null && <p className="text-sm text-text-tertiary" aria-live="polite">Loading the log...</p>}
+        {log !== null && (
+          <pre className="ph-no-capture max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-md bg-surface-secondary p-3 font-mono text-xs text-text-primary">
+            {log || 'The log is empty.'}
+          </pre>
+        )}
+      </ModalBody>
+    </Modal>
+  );
+}
+
 function CredentialStatus({ label, set }: { label: string; set: boolean }) {
   return (
     <>
@@ -277,12 +397,14 @@ function AddCloudSandboxForm({ disabled, takenNames, onCreate }: {
   );
 }
 
-function CloudSandboxRow({ sandbox, now, onAction }: {
+function CloudSandboxRow({ sandbox, now, onAction, onViewLog }: {
   sandbox: CloudSandboxView;
   now: number;
   onAction: (sandbox: CloudSandboxView, action: CloudSandboxRowAction) => void;
+  onViewLog: (sandbox: CloudSandboxView) => void;
 }) {
   const badge = getCloudSandboxBadge(sandbox);
+  const startupNotice = getCloudStartupScriptNotice(sandbox);
   const details = [
     sandbox.hostname,
     sandbox.size,
@@ -338,6 +460,30 @@ function CloudSandboxRow({ sandbox, now, onAction }: {
       )}
       {sandbox.error && (
         <p className="rounded-md border border-status-error/30 bg-status-error/10 p-2 text-xs text-status-error" role="alert">{sandbox.error}</p>
+      )}
+      {startupNotice?.kind === 'running' && (
+        <p className="flex items-center gap-2 text-xs text-text-secondary" role="status">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+          {startupNotice.text}
+        </p>
+      )}
+      {startupNotice?.kind === 'failed' && (
+        <p className="flex flex-wrap items-center gap-x-1 rounded-md border border-status-warning/30 bg-status-warning/10 p-2 text-xs text-status-warning" role="alert">
+          <span>{startupNotice.text}</span>
+          {startupNotice.viewLog && (
+            <>
+              <span aria-hidden="true">·</span>
+              <button
+                type="button"
+                className="underline hover:text-text-primary"
+                aria-label={`View log for ${sandbox.label}`}
+                onClick={() => onViewLog(sandbox)}
+              >
+                View log
+              </button>
+            </>
+          )}
+        </p>
       )}
     </li>
   );

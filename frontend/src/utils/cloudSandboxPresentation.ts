@@ -26,6 +26,7 @@ const STEP_LABELS = new Map<string, string>([
   ['pairing', 'Pairing with this app'],
   ['health', 'Waiting for Pane to start'],
   ['saved-host', 'Saving the host'],
+  ['startup', 'Running your startup script…'],
 ]);
 
 /** A provisioning step's name as a sentence; unknown steps show as reported. */
@@ -48,7 +49,7 @@ export function formatCloudUptime(startedAt: string | undefined, now: number): s
   return `running for ${Math.floor(hours / 24)}d`;
 }
 
-export type CloudSandboxRowAction = 'retry' | 'dismiss' | 'start' | 'stop' | 'update' | 'remove';
+export type CloudSandboxRowAction = 'retry' | 'dismiss' | 'start' | 'stop' | 'update' | 'startup-script' | 'remove';
 
 /** The buttons a row offers, in display order. A row with work in flight offers none. */
 export function getCloudSandboxActions(sandbox: CloudSandboxView): CloudSandboxRowAction[] {
@@ -61,8 +62,30 @@ export function getCloudSandboxActions(sandbox: CloudSandboxView): CloudSandboxR
     if (sandbox.updateAvailable) actions.push('update');
     actions.push('stop');
   }
+  // One script for every sandbox: the row button leads to the shared editor.
+  if (sandbox.state === 'running' || sandbox.state === 'stopped') actions.push('startup-script');
   actions.push('remove');
   return actions;
+}
+
+/** Shown above the startup script editor, word for word: the script is kept as plain text on this computer. */
+export const STARTUP_SCRIPT_WARNING = "Don't put secrets here; it's stored unencrypted.";
+
+interface CloudStartupScriptNotice {
+  kind: 'running' | 'failed';
+  text: string;
+  /** The run left a log worth reading. */
+  viewLog: boolean;
+}
+
+/** The line under a sandbox row about its startup script's latest run; null when there is nothing to say. */
+export function getCloudStartupScriptNotice(sandbox: CloudSandboxView): CloudStartupScriptNotice | null {
+  const run = sandbox.startupScript;
+  if (!run || run.state === 'succeeded') return null;
+  if (run.state === 'running') return { kind: 'running', text: 'Running your startup script…', viewLog: false };
+  if (run.state === 'error') return { kind: 'failed', text: `⚠ Startup script could not run: ${run.error ?? 'unknown error'}`, viewLog: false };
+  const reason = run.timedOut ? 'timed out after 10 min' : `exit ${run.exitCode ?? 'unknown'}`;
+  return { kind: 'failed', text: `⚠ Startup script failed (${reason})`, viewLog: true };
 }
 
 export interface CloudHostSwitcherEntry {

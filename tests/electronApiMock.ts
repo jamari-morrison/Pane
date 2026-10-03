@@ -321,6 +321,10 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       failNext: Map<CloudSandboxAction, string>;
       pendingCreates: Map<string, (failure?: string) => void>;
       calls: Array<{ action: CloudSandboxAction; id: string }>;
+      startupScript: string;
+      /** Every script the settings saved, in order. */
+      startupScriptSaves: string[];
+      startupLogs: Map<string, string>;
     }
     const cloud: CloudMockState = {
       available: mockOptions.cloudSandboxes !== undefined,
@@ -330,6 +334,9 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       failNext: new Map(),
       pendingCreates: new Map(),
       calls: [],
+      startupScript: '',
+      startupScriptSaves: [],
+      startupLogs: new Map(),
     };
     const cloudSnapshot = (): CloudSandboxesSnapshot => clone({
       available: cloud.available,
@@ -1213,6 +1220,18 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           else updateCloudSandbox(id, { error: undefined, failedAction: undefined });
           return emitCloud();
         },
+        getCloudStartupScript: () => (cloud.available ? success({ script: cloud.startupScript }) : cloudUnavailable()),
+        saveCloudStartupScript: (script: string) => {
+          if (!cloud.available) return cloudUnavailable();
+          cloud.startupScript = script;
+          cloud.startupScriptSaves.push(script);
+          // Like main: running sandboxes run the saved script; the test reports how each run ends.
+          for (const sandbox of cloud.sandboxes) {
+            if (sandbox.state === 'running' && !sandbox.pending) updateCloudSandbox(sandbox.id, { startupScript: { state: 'running' } });
+          }
+          return emitCloud();
+        },
+        readCloudSandboxStartupLog: (id: string) => success({ log: cloud.startupLogs.get(id) ?? '' }),
         onCloudSandboxesChanged: (callback: MockEventCallback) =>
           subscribe('remote-daemon:cloud-sandboxes-changed', callback),
       }),
@@ -1277,6 +1296,12 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         },
         getCloudCalls() {
           return clone(cloud.calls);
+        },
+        getCloudStartupScriptSaves() {
+          return clone(cloud.startupScriptSaves);
+        },
+        setCloudStartupLog(id: string, log: string) {
+          cloud.startupLogs.set(id, log);
         },
         getCloudCredentialUpdateKeys() {
           return cloud.credentialUpdates.map((update) => Object.keys(update).sort());

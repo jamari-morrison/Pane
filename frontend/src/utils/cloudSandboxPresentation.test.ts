@@ -5,7 +5,9 @@ import {
   getCloudHostSwitcherEntry,
   getCloudSandboxActions,
   getCloudSandboxBadge,
+  getCloudStartupScriptNotice,
   getCloudStepLabel,
+  STARTUP_SCRIPT_WARNING,
 } from './cloudSandboxPresentation';
 
 function sandbox(overrides: Partial<CloudSandboxView> = {}): CloudSandboxView {
@@ -60,12 +62,12 @@ describe('formatCloudUptime', () => {
 
 describe('getCloudSandboxActions', () => {
   it('offers Stop and Remove while running, and Update Pane first when versions differ', () => {
-    expect(getCloudSandboxActions(sandbox())).toEqual(['stop', 'remove']);
-    expect(getCloudSandboxActions(sandbox({ updateAvailable: true }))).toEqual(['update', 'stop', 'remove']);
+    expect(getCloudSandboxActions(sandbox())).toEqual(['stop', 'startup-script', 'remove']);
+    expect(getCloudSandboxActions(sandbox({ updateAvailable: true }))).toEqual(['update', 'stop', 'startup-script', 'remove']);
   });
 
   it('offers Start and Remove while stopped', () => {
-    expect(getCloudSandboxActions(sandbox({ state: 'stopped' }))).toEqual(['start', 'remove']);
+    expect(getCloudSandboxActions(sandbox({ state: 'stopped' }))).toEqual(['start', 'startup-script', 'remove']);
   });
 
   it('offers nothing while work is in flight', () => {
@@ -78,7 +80,7 @@ describe('getCloudSandboxActions', () => {
     expect(getCloudSandboxActions(sandbox({ id: 'create:alpha', hostname: undefined, state: 'error', failedAction: 'create', error: 'quota' })))
       .toEqual(['retry', 'dismiss']);
     expect(getCloudSandboxActions(sandbox({ state: 'stopped', failedAction: 'start', error: 'timeout' })))
-      .toEqual(['retry', 'dismiss', 'start', 'remove']);
+      .toEqual(['retry', 'dismiss', 'start', 'startup-script', 'remove']);
   });
 
   it('still lets an errored sandbox be removed', () => {
@@ -115,7 +117,7 @@ describe('a sandbox the provider is still stopping (D4)', () => {
   it('shows a failed action on a running sandbox as Running with the error', () => {
     const failed = sandbox({ state: 'running', failedAction: 'stop', error: 'boat refused the stop' });
     expect(getCloudSandboxBadge(failed).label).toBe('Running');
-    expect(getCloudSandboxActions(failed)).toEqual(['retry', 'dismiss', 'stop', 'remove']);
+    expect(getCloudSandboxActions(failed)).toEqual(['retry', 'dismiss', 'stop', 'startup-script', 'remove']);
   });
 });
 
@@ -139,5 +141,27 @@ describe('getCloudHostSwitcherEntry', () => {
       description: 'Start failed: resume timed out · Select to retry',
       action: 'start',
     });
+  });
+});
+
+describe('getCloudStartupScriptNotice', () => {
+  it.each([
+    ['no run', undefined, null],
+    ['running', { state: 'running' }, { kind: 'running', text: 'Running your startup script…', viewLog: false }],
+    ['exit 0', { state: 'succeeded', exitCode: 0 }, null],
+    ['exit 1', { state: 'failed', exitCode: 1 }, { kind: 'failed', text: '⚠ Startup script failed (exit 1)', viewLog: true }],
+    ['exit 127', { state: 'failed', exitCode: 127 }, { kind: 'failed', text: '⚠ Startup script failed (exit 127)', viewLog: true }],
+    ['timed out', { state: 'failed', exitCode: 124, timedOut: true }, { kind: 'failed', text: '⚠ Startup script failed (timed out after 10 min)', viewLog: true }],
+    ['could not run', { state: 'error', error: 'boat did not answer' }, { kind: 'failed', text: '⚠ Startup script could not run: boat did not answer', viewLog: false }],
+  ] as const)('%s', (_name, startupScript, notice) => {
+    expect(getCloudStartupScriptNotice(sandbox({ startupScript }))).toEqual(notice);
+  });
+
+  it('warns, word for word, that the script is stored unencrypted', () => {
+    expect(STARTUP_SCRIPT_WARNING).toBe("Don't put secrets here; it's stored unencrypted.");
+  });
+
+  it('labels the create step that runs the script', () => {
+    expect(getCloudStepLabel('startup')).toBe('Running your startup script…');
   });
 });

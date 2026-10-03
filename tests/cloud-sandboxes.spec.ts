@@ -10,6 +10,8 @@ type CloudMockControls = {
   setCloudSandbox(id: string, updates: Partial<CloudSandboxView>): void;
   getCloudCalls(): Array<{ action: CloudSandboxAction; id: string }>;
   getCloudCredentialUpdateKeys(): string[][];
+  getCloudStartupScriptSaves(): string[];
+  setCloudStartupLog(id: string, log: string): void;
 };
 
 const ALL_CREDENTIALS = { boat: true, tailscale: true, claude: true };
@@ -147,16 +149,16 @@ test('cloud rows stop, start, update Pane and remove after confirmation', async 
   const alpha = page.getByRole('listitem', { name: 'Cloud sandbox alpha' });
   const beta = page.getByRole('listitem', { name: 'Cloud sandbox beta' });
   await expect(alpha.getByText('rp-alpha · default · running for 5h · Pane 2.4.140 (differs from this app)')).toBeVisible();
-  await expect(alpha.getByRole('button')).toHaveText(['Update Pane', 'Stop', 'Remove']);
+  await expect(alpha.getByRole('button')).toHaveText(['Update Pane', 'Stop', 'Startup script', 'Remove']);
   await expect(beta.getByText('Stopped', { exact: true })).toBeVisible();
-  await expect(beta.getByRole('button')).toHaveText(['Start', 'Remove']);
+  await expect(beta.getByRole('button')).toHaveText(['Start', 'Startup script', 'Remove']);
   await alpha.scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('cloud-rows.png') });
 
   await alpha.getByRole('button', { name: 'Update Pane alpha' }).click();
   await expect(alpha.getByText('Updating', { exact: true })).toBeVisible();
   await expect(alpha.getByText('Running', { exact: true })).toBeVisible();
-  await expect(alpha.getByRole('button')).toHaveText(['Stop', 'Remove']);
+  await expect(alpha.getByRole('button')).toHaveText(['Stop', 'Startup script', 'Remove']);
 
   await alpha.getByRole('button', { name: 'Stop alpha' }).click();
   await expect(alpha.getByText('Stopping', { exact: true })).toBeVisible();
@@ -261,4 +263,51 @@ test('without the cloud library the section explains itself and remote hosts are
   await expect(page.getByRole('button', { name: 'Add Cloud Sandbox' })).toHaveCount(0);
   await expect(page.getByText('Using local runtime')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Set Up Host' })).toBeVisible();
+});
+
+test('the startup script is edited once for every sandbox, with no sandbox yet, and saved on this computer', async ({ page }, testInfo) => {
+  await installElectronApiMock(page, { cloudSandboxes: { credentials: ALL_CREDENTIALS, sandboxes: [] } });
+  await openRemoteAccess(page);
+
+  await expect(page.getByText("Don't put secrets here; it's stored unencrypted.")).toBeVisible();
+  const editor = page.getByRole('textbox', { name: 'Startup script' });
+  const save = page.getByRole('button', { name: 'Save Startup Script' });
+  await expect(save).toBeDisabled();
+  await editor.fill('echo "E2E_MARKER $(date -Is)" >> ~/e2e-startup-marker.log\n');
+  await save.click();
+
+  await expect(page.getByText('Saved', { exact: true })).toBeVisible();
+  await expect(save).toBeDisabled();
+  expect(await cloudMock(page, (mock) => mock.getCloudStartupScriptSaves())).toEqual(['echo "E2E_MARKER $(date -Is)" >> ~/e2e-startup-marker.log\n']);
+  await page.screenshot({ path: testInfo.outputPath('cloud-startup-script-editor.png'), fullPage: true });
+});
+
+test('a sandbox row shows a running script, then a failure chip whose View log shows the log', async ({ page }, testInfo) => {
+  await installElectronApiMock(page, {
+    cloudSandboxes: { credentials: ALL_CREDENTIALS, sandboxes: [cloudSandbox('beta')], profiles: [cloudProfile('beta')] },
+  });
+  await openRemoteAccess(page);
+  const row = page.getByRole('listitem', { name: 'Cloud sandbox beta' });
+
+  await page.getByRole('textbox', { name: 'Startup script' }).fill('exit 1\n');
+  await page.getByRole('button', { name: 'Save Startup Script' }).click();
+  await expect(row.getByRole('status').filter({ hasText: 'Running your startup script…' })).toBeVisible();
+  await expect(row.getByRole('button', { name: 'Stop beta' })).toBeVisible();
+
+  await cloudMock(page, (mock) => {
+    mock.setCloudStartupLog('rp-beta', '== startup script run ==\nboom\n== exit 1 after 0 s ==\n');
+    mock.setCloudSandbox('rp-beta', { startupScript: { state: 'failed', exitCode: 1 } });
+  });
+  await expect(row.getByRole('alert')).toContainText('⚠ Startup script failed (exit 1)');
+  await row.getByRole('button', { name: 'View log for beta' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Startup log: beta' });
+  await expect(dialog).toContainText('boom');
+  await page.screenshot({ path: testInfo.outputPath('cloud-startup-script-log.png'), fullPage: true });
+  await page.keyboard.press('Escape');
+
+  await cloudMock(page, (mock) => mock.setCloudSandbox('rp-beta', { startupScript: { state: 'failed', exitCode: 124, timedOut: true } }));
+  await expect(row.getByRole('alert')).toContainText('⚠ Startup script failed (timed out after 10 min)');
+
+  await row.getByRole('button', { name: 'Startup script beta' }).click();
+  await expect(page.getByRole('textbox', { name: 'Startup script' })).toBeFocused();
 });

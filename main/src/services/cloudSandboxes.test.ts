@@ -6,6 +6,7 @@ import {
   CloudSandboxesUnavailableError,
   comparePaneVersions,
   getCloudErrorMessage,
+  getStartupScriptView,
   resolvePaneReleaseDeb,
   type CloudSandboxLibrary,
 } from './cloudSandboxes';
@@ -28,6 +29,19 @@ function summary(overrides: Partial<CloudSandboxInfo> = {}): CloudSandboxInfo {
   };
 }
 
+const STARTUP_OK = { exitCode: 0, startedAt: '2026-10-03T10:00:00Z', finishedAt: '2026-10-03T10:00:01Z', sha256: 'ab'.repeat(32), timedOut: false };
+
+/** The user's startup script file on this computer, in memory. */
+function createStartupScriptFile(initial = '') {
+  let script = initial;
+  return {
+    read: vi.fn(async () => script),
+    write: vi.fn(async (next: string) => {
+      script = next;
+    }),
+  };
+}
+
 const CONFIGURED = { boat: { configured: true, org: { id: 'team_test', name: 'test' } }, tailscale: { configured: true }, claude: { configured: false }, ready: true };
 
 function createLibrary(overrides: Partial<CloudSandboxLibrary> = {}): CloudSandboxLibrary {
@@ -42,6 +56,8 @@ function createLibrary(overrides: Partial<CloudSandboxLibrary> = {}): CloudSandb
     remove: vi.fn(async () => undefined),
     syncAgentDefaults: vi.fn(async (host: string) => summary({ hostname: host })),
     status: vi.fn(async (host: string) => summary({ hostname: host })),
+    runStartupScript: vi.fn(async () => STARTUP_OK),
+    readStartupLog: vi.fn(async () => 'MARKER\n'),
     ...overrides,
   };
 }
@@ -51,7 +67,9 @@ function createManager(library: CloudSandboxLibrary | Error, options: {
   readDaemonVersion?: (profileId: string) => Promise<string | undefined>;
   readDefaultClaudeModel?: () => Promise<string | null>;
   pollIntervalMs?: number;
+  startupScriptFile?: ReturnType<typeof createStartupScriptFile>;
 } = {}) {
+  const startupScriptFile = options.startupScriptFile ?? createStartupScriptFile();
   const snapshots: CloudSandboxesSnapshot[] = [];
   const resolvePaneDeb = vi.fn(async (version: string) => ({
     debUrl: `https://example.test/Pane-${version}-linux-amd64.deb`,
@@ -65,8 +83,9 @@ function createManager(library: CloudSandboxLibrary | Error, options: {
     resolvePaneDeb,
     readDefaultClaudeModel: options.readDefaultClaudeModel ?? (async () => null),
     pollIntervalMs: options.pollIntervalMs ?? 10,
+    startupScriptFile,
   });
-  return { manager, snapshots, resolvePaneDeb };
+  return { manager, snapshots, resolvePaneDeb, startupScriptFile };
 }
 
 describe('CloudSandboxManager', () => {
@@ -654,5 +673,101 @@ describe('resolvePaneReleaseDeb', () => {
   it('refuses a release without a checksum for the .deb', async () => {
     await expect(resolvePaneReleaseDeb('2.4.146', async () => 'nothing here'))
       .rejects.toThrow('no published checksum');
+  });
+});
+
+describe('CloudSandboxManager startup script', () => {
+  const rowOf = (snapshot: CloudSandboxesSnapshot, id = 'rp-alpha') => snapshot.sandboxes.find((row) => row.id === id);
+
+  it('shows the status of the run on create, and a failed run on the row', async () => {
+    const failed = { ...STARTUP_OK, exitCode: 2 };
+    const { manager } = createManager(createLibrary({ create: vi.fn(async () => summary({ startupScript: failed })) }));
+
+    const snapshot = await manager.create({ name: 'alpha', size: 'default' });
+
+    expect(rowOf(snapshot)?.startupScript).toEqual({ state: 'failed', exitCode: 2 });
+  });
+
+  it('after a start, runs the script again only if the boot run used an older one, showing it as running meanwhile', async () => {
+    let finish: ((status: typeof STARTUP_OK) => void) | undefined;
+    const runStartupScript = vi.fn(() => new Promise<typeof STARTUP_OK>((resolve) => { finish = resolve; }));
+    const library = createLibrary({ list: vi.fn(async () => [summary({ state: 'stopped' })]), runStartupScript });
+    const { manager } = createManager(library);
+    await manager.refresh();
+
+    const started = await manager.start('rp-alpha');
+
+    expect(rowOf(started)?.startupScript).toEqual({ state: 'running' });
+    await vi.waitFor(() => expect(runStartupScript).toHaveBeenCalledWith('rp-alpha', { onlyIfChanged: true }));
+    expect(rowOf(started)?.pending).toBeUndefined();
+    finish?.({ ...STARTUP_OK, timedOut: true, exitCode: 124 });
+    await vi.waitFor(() => expect(rowOf(manager.getSnapshot())?.startupScript).toEqual({ state: 'failed', exitCode: 124, timedOut: true }));
+  });
+
+  it('saves an edit to the local file only, then pushes and runs it on running sandboxes that are not busy', async () => {
+    const runStartupScript = vi.fn(async () => STARTUP_OK);
+    const library = createLibrary({
+      list: vi.fn(async () => [summary(), summary({ hostname: 'rp-beta', label: 'beta', state: 'stopped' })]),
+      runStartupScript,
+    });
+    const { manager, startupScriptFile } = createManager(library);
+    await manager.refresh();
+
+    await manager.saveStartupScript('echo MARKER\n');
+
+    expect(startupScriptFile.write).toHaveBeenCalledWith('echo MARKER\n');
+    await expect(manager.getStartupScript()).resolves.toBe('echo MARKER\n');
+    await vi.waitFor(() => expect(rowOf(manager.getSnapshot())?.startupScript).toEqual({ state: 'succeeded', exitCode: 0 }));
+    expect(runStartupScript).toHaveBeenCalledTimes(1);
+    expect(runStartupScript).toHaveBeenCalledWith('rp-alpha', { onlyIfChanged: false });
+    expect(rowOf(manager.getSnapshot(), 'rp-beta')?.startupScript).toBeUndefined();
+    expect(library.setup).not.toHaveBeenCalled();
+  });
+
+  it('shows why a run could not start, and keeps only the latest run\'s result', async () => {
+    const results: Array<(status: typeof STARTUP_OK | Error) => void> = [];
+    const runStartupScript = vi.fn(() => new Promise<typeof STARTUP_OK>((resolve, reject) => {
+      results.push((value) => (value instanceof Error ? reject(value) : resolve(value)));
+    }));
+    const { manager } = createManager(createLibrary({ list: vi.fn(async () => [summary()]), runStartupScript }));
+    await manager.refresh();
+
+    await manager.saveStartupScript('echo one\n');
+    await manager.saveStartupScript('echo two\n');
+    await vi.waitFor(() => expect(results).toHaveLength(2));
+    results[1](new Error('cloud bootstrap step "startup-install" failed: no space left'));
+    await vi.waitFor(() => expect(rowOf(manager.getSnapshot())?.startupScript?.state).toBe('error'));
+    results[0]({ ...STARTUP_OK, exitCode: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(rowOf(manager.getSnapshot())?.startupScript).toEqual({
+      state: 'error', error: 'cloud bootstrap step "startup-install" failed: no space left',
+    });
+  });
+
+  it('reads the log of a listed sandbox and forgets the status when it stops', async () => {
+    const library = createLibrary({ list: vi.fn(async () => [summary()]) });
+    const { manager } = createManager(library);
+    await manager.refresh();
+    await manager.saveStartupScript('exit 1\n');
+    await vi.waitFor(() => expect(rowOf(manager.getSnapshot())?.startupScript?.state).toBe('succeeded'));
+
+    await expect(manager.readStartupLog('rp-alpha')).resolves.toBe('MARKER\n');
+    await expect(manager.readStartupLog('rp-nope')).rejects.toThrow('Unknown cloud sandbox');
+
+    const stopped = await manager.stop('rp-alpha');
+    expect(rowOf(stopped)?.startupScript).toBeUndefined();
+  });
+});
+
+describe('getStartupScriptView', () => {
+  it.each([
+    ['no run', null, undefined],
+    ['running', { ...STARTUP_OK, exitCode: null, finishedAt: null }, { state: 'running' }],
+    ['exit 0', STARTUP_OK, { state: 'succeeded', exitCode: 0 }],
+    ['exit 3', { ...STARTUP_OK, exitCode: 3 }, { state: 'failed', exitCode: 3 }],
+    ['timed out', { ...STARTUP_OK, exitCode: 124, timedOut: true }, { state: 'failed', exitCode: 124, timedOut: true }],
+  ])('%s', (_name, status, view) => {
+    expect(getStartupScriptView(status)).toEqual(view);
   });
 });

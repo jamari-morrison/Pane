@@ -46,6 +46,18 @@ export interface CloudSandboxProgressStep {
   message?: string;
 }
 
+/**
+ * The user's startup script's latest run on a sandbox, as read after a create, a start or an edit. `error`: it could
+ * not be run at all (for example, the sandbox did not answer); `error` then says why.
+ */
+export interface CloudSandboxStartupScriptView {
+  state: 'running' | 'succeeded' | 'failed' | 'error';
+  exitCode?: number;
+  /** Killed at the 10 minute limit. */
+  timedOut?: boolean;
+  error?: string;
+}
+
 export interface CloudSandboxView {
   /** The tailnet hostname once known; a create in flight uses `create:<name>`. */
   id: string;
@@ -70,6 +82,8 @@ export interface CloudSandboxView {
   steps?: CloudSandboxProgressStep[];
   error?: string;
   failedAction?: CloudSandboxAction;
+  /** The startup script's latest run; absent when none ran since this app created or started the sandbox. */
+  startupScript?: CloudSandboxStartupScriptView;
 }
 
 export interface CloudSandboxesSnapshot {
