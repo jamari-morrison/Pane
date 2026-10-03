@@ -239,6 +239,9 @@ The **Cloud sandboxes (experimental)** section there:
   which asks for confirmation first. A running sandbox shows how long it has been running.
 - offers **Update Pane** when the sandbox's daemon reports a different Pane version than the desktop. It installs
   the desktop's own release `.deb`, checked against that release's `SHA256SUMS.txt`.
+- has a **Startup script** editor: one script, kept on this computer, that every sandbox runs each time it starts.
+  A failed run shows on the sandbox's row with **View log**. See
+  [Cloud sandbox startup script](CLOUD_SANDBOX_STARTUP_SCRIPT.md).
 
 Stopping or removing the host the desktop is connected to switches the desktop back to **This computer**
 first. In the host switcher, a stopped sandbox reads **Stopped · Select to start**: choosing it starts the
@@ -300,6 +303,9 @@ the desktop sends the new one, so it reaches the sandbox's next new panel within
 `claude` on `PATH`, no answer within 15 s), Pane sends no model: the sandbox keeps the model it has (a new one uses
 Claude Code's own default), and a notice saying why is logged. It is not a pin: a model picked inside
 the sandbox with `/model` is kept.
+
+Codex is installed in every sandbox but not signed in. Sign it in yourself: run `codex login --device-auth` in the
+sandbox's terminal (**Terminal on <sandbox>**). Claude Code signs in by itself when a Claude token is saved.
 
 Detection is best effort. Known limits:
 
