@@ -47,6 +47,8 @@ interface SettingsProps {
 
 /** How long an opened Settings link waits for its row to render. */
 const SETTING_FOCUS_WAIT_MS = 5000;
+/** Where the user types in a settings row: a text box, not its buttons, toggles or choices. */
+const SETTING_TEXT_FIELD = 'textarea, input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"])';
 
 export function Settings({ isOpen, onClose, category, onCategoryChange, openRequest, onOpenRequestHandled, onShowKeyboardShortcuts, onUpdate, onSendFeedback }: SettingsProps) {
   const persistence = useSettingsPersistence(isOpen);
@@ -112,17 +114,24 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
     stopFocusWaitRef.current?.();
     stopFocusWaitRef.current = null;
     if (!setting) return;
-    const focus = () => {
-      const element = document.getElementById(settingDomId(setting));
-      if (!element) return false;
-      element.scrollIntoView({ block: 'center' });
-      element.focus({ preventScroll: true });
+    // The field the user came to fill in gets focus; a row without one is focused itself. A field that
+    // is still disabled (its value loading) is waited for.
+    const focus = (settle: boolean) => {
+      const row = document.getElementById(settingDomId(setting));
+      if (!row) return false;
+      const field = row.querySelector<HTMLElement>(SETTING_TEXT_FIELD);
+      if (field?.matches(':disabled') && !settle) return false;
+      row.scrollIntoView({ block: 'center' });
+      (field && !field.matches(':disabled') ? field : row).focus({ preventScroll: true });
       return true;
     };
     const observer = new MutationObserver(() => {
-      if (focus()) stop();
+      if (focus(false)) stop();
     });
-    const timeout = window.setTimeout(() => stop(), SETTING_FOCUS_WAIT_MS);
+    const timeout = window.setTimeout(() => {
+      focus(true);
+      stop();
+    }, SETTING_FOCUS_WAIT_MS);
     const stop = () => {
       observer.disconnect();
       window.clearTimeout(timeout);
@@ -132,8 +141,8 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
     // The category switch renders first; a row already there is focused on the next frame.
     window.requestAnimationFrame(() => {
       if (stopFocusWaitRef.current !== stop) return;
-      if (focus()) stop();
-      else observer.observe(document.body, { childList: true, subtree: true });
+      if (focus(false)) stop();
+      else observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
     });
   }, []);
 
