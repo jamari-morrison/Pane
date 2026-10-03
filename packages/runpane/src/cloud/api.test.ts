@@ -768,3 +768,14 @@ test('a failed or timed-out local start script leaves the sandbox env alone and 
   await cleared.cloud.start(created.hostname);
   assert.deepEqual(cleared.boot.localEnvWrites.map((write) => write.envFile), [''], 'no script: the start removes the old file');
 });
+
+test('saving the GitHub token or any other credential keeps the saved boat wallet', async () => {
+  const h = harness();
+  await h.cloud.setup({ boatApiKey: SECRETS[0], boatOrg: 'test', tailscaleClientId: 'client-id', tailscaleClientSecret: SECRETS[1] });
+  assert.deepEqual((await h.cloud.getCredentialsStatus()).boat.org, { id: 'team_test', name: 'test' });
+  for (const update of [{ githubToken: 'FAKE-GH-TOKEN-wallet-SECRET' }, { claudeToken: SECRETS[2] }, { tailscaleClientId: 'client-2', tailscaleClientSecret: SECRETS[1] }, { boatApiKey: SECRETS[0] }]) {
+    await h.cloud.setup(update);
+    assert.deepEqual((await h.cloud.getCredentialsStatus()).boat.org, { id: 'team_test', name: 'test' }, `after saving ${Object.keys(update).join(', ')}`);
+  }
+  assert.equal(JSON.parse(fs.readFileSync(path.join(h.dir, 'settings.json'), 'utf8')).boatOrg.name, 'test');
+});
