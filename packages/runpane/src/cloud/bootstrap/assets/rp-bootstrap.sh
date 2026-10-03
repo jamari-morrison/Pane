@@ -19,6 +19,7 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # Where the startup script's runner and boot unit go (tests point these at a temp dir).
 RP_UNIT_DIR="${RP_UNIT_DIR:-/etc/systemd/system}"
 RP_SBIN="${RP_SBIN:-/usr/local/sbin}"
+RP_ETC="${RP_ETC:-/etc}"
 
 result() { printf 'RP_RESULT %s\n' "$1"; }
 fail() { result "$(python3 -c 'import json,sys;print(json.dumps({"ok":False,"error":sys.argv[1]}))' "$1")"; exit 1; }
@@ -787,6 +788,33 @@ except OSError:
 print("RP_RESULT " + json.dumps({"ok": True, "log": "".join(lines)}))' "$HOME/.local/state/runpane-cloud/startup.log"
 }
 
+# os-hostname <name>: give the OS the sandbox's tailnet name (rp-…) now and at every boot. A boat resume brings back
+# the pool machine's name (box-node-…); rp-hostname.sh puts this one back. Idempotent. Never touches Tailscale.
+step_os_hostname() {
+  local name="${1:-}"
+  [[ "$name" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || fail "os-hostname: not a hostname"
+  sudo mkdir -p "$RP_ETC/rp-cloud"
+  printf '%s\n' "$name" | sudo tee "$RP_ETC/rp-cloud/hostname" >/dev/null
+  sudo install -m 755 "$RP_SCRIPTS/rp-hostname.sh" "$RP_SBIN/rp-hostname"
+  sudo tee "$RP_UNIT_DIR/rp-hostname.service" >/dev/null <<UNIT
+[Unit]
+Description=Pane cloud sandbox: give the OS the sandbox's tailnet name after a resume reset it
+Wants=network-online.target
+After=network-online.target cloud-config.service
+
+[Service]
+Type=oneshot
+ExecStart=$RP_SBIN/rp-hostname
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo systemctl daemon-reload
+  sudo systemctl enable rp-hostname.service >/dev/null 2>&1 || fail "could not enable rp-hostname.service"
+  sudo env RP_HOSTNAME_ETC="$RP_ETC" "$RP_SBIN/rp-hostname" >/dev/null || fail "os-hostname: rp-hostname failed"
+  result "$(printf '{"ok":true,"hostname":"%s"}' "$(hostname)")"
+}
+
 step="${1:-}"; shift || true
 case "$step" in
   identity) step_identity "$@" ;;
@@ -812,5 +840,6 @@ case "$step" in
   startup-run) step_startup_run "$@" ;;
   startup-status) step_startup_status ;;
   startup-log) step_startup_log ;;
+  os-hostname) step_os_hostname "$@" ;;
   *) fail "unknown step '$step'" ;;
 esac

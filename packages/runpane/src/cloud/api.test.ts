@@ -125,6 +125,7 @@ interface BootstrapScript {
   /** What the sandbox reports after a startup script run (default: exit 0). */
   startupStatus?: StartupScriptStatus | null;
   startupPushFails?: boolean;
+  hostnameFails?: boolean;
   startupRunFails?: boolean;
 }
 
@@ -167,6 +168,11 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
       if (script.claudeModelFails) throw new Error('cloud bootstrap step "claude-model" failed: settings.json is not a JSON object');
       claudeModels.push(model);
       return { outcome: 'set', model };
+    },
+    async setHostname(_sandbox, hostname) {
+      events.push(`hostname ${hostname}`);
+      if (script.hostnameFails) throw new Error('cloud bootstrap step "os-hostname" failed: hostname exited 1');
+      return { hostname };
     },
     async pushStartupScript(_sandbox, startupScript) {
       events.push(`push ${JSON.stringify(startupScript)}`);
@@ -554,7 +560,7 @@ test('start pushes the current startup script before the health check, and a fai
   h.startup.script = 'echo v2\n';
   h.boot.events.length = 0;
   await h.cloud.start(hostname, h.onProgress);
-  assert.deepEqual(h.boot.events, ['push "echo v2\\n"', 'health'], 'pushed before the health check, and not run (the boot ran it)');
+  assert.deepEqual(h.boot.events, [`hostname ${hostname}`, 'push "echo v2\\n"', 'health'], 'pushed before the health check, and not run (the boot ran it)');
 
   const script: BootstrapScript = {};
   const failing = harness(script, {}, 'echo v1\n');
@@ -600,4 +606,26 @@ test('runStartupScript pushes the current script and runs it on a running sandbo
   await h.cloud.stop(hostname);
   await assert.rejects(h.cloud.runStartupScript(hostname), /is stopped; it runs your startup script when it starts/u);
   await assert.rejects(h.cloud.readStartupLog(hostname), /is stopped; start it to read its startup log/u);
+});
+
+test('start and update give the OS its tailnet name again (a resume brings back the pool machine\'s), before the health check', async () => {
+  const script: BootstrapScript = {};
+  const h = harness(script);
+  await withCredentials(h);
+  const { hostname } = await h.cloud.create();
+  await h.cloud.stop(hostname);
+  h.boot.events.length = 0;
+  await h.cloud.start(hostname, h.onProgress);
+  assert.deepEqual(h.boot.events, [`hostname ${hostname}`, 'health']);
+
+  h.boot.events.length = 0;
+  await h.cloud.update(hostname, { debUrl: 'https://example.com/pane_2.4.147_amd64.deb', sha256: 'c'.repeat(64) });
+  assert.deepEqual(h.boot.events, ['health', `hostname ${hostname}`]);
+
+  // A failure is reported, never thrown: the sandbox works under any OS name.
+  await h.cloud.stop(hostname);
+  script.hostnameFails = true;
+  const progress: CloudProgress[] = [];
+  assert.equal((await h.cloud.start(hostname, (update) => progress.push(update))).state, 'running');
+  assert.ok(progress.some((update) => /^.+ kept the OS name it came back with: cloud bootstrap step "os-hostname" failed/u.test(update.message)));
 });
