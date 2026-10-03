@@ -8,6 +8,7 @@ import { Textarea } from '../ui/Textarea';
 import { SettingsSection } from '../ui/SettingsSection';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { SettingRow } from './SettingRow';
+import { CloudSandboxSetupWarning } from './CloudSandboxSetupWarning';
 import { SegmentedControl } from './SettingsControls';
 import { API, type IPCResponse } from '../../utils/api';
 import { useCloudSandboxes } from '../../hooks/useCloudSandboxes';
@@ -133,6 +134,7 @@ export function CloudSandboxesSettings({ onTerminalOpened }: { onTerminalOpened:
             description={canCreate ? 'Each sandbox shows up in the host switcher like any other remote host.' : 'Save the boat API key and Tailscale OAuth client first.'}
             align="start"
           >
+            <CloudSandboxSetupWarning githubTokenSet={snapshot.credentials.github} localStartScriptSet={false} />
             <AddCloudSandboxForm
               disabled={!canCreate}
               takenNames={snapshot.sandboxes.map((sandbox) => sandbox.label)}

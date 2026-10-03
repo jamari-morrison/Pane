@@ -452,3 +452,28 @@ test('a sandbox being created shows once, with its startup script step visible, 
   await expect(step).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('cloud-create-once.png'), fullPage: true });
 });
+
+test('adding a sandbox warns about missing setup, and each link focuses its field', async ({ page }, testInfo) => {
+  await installElectronApiMock(page, { cloudSandboxes: { credentials: { ...ALL_CREDENTIALS, github: false }, sandboxes: [] } });
+  await openRemoteAccess(page);
+
+  const warning = page.getByRole('status', { name: 'Setup a new sandbox would miss' });
+  await expect(warning).toContainText('No GitHub token is set.');
+  // Non-blocking: the sandbox can still be added.
+  await page.getByLabel('Name', { exact: true }).fill('alpha');
+  await expect(page.getByRole('button', { name: 'Add Cloud Sandbox' })).toBeEnabled();
+  await warning.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('setup-warning.png') });
+
+  await warning.getByRole('button', { name: 'Set a GitHub token' }).click();
+  await expect(page.locator('#settings-remote-cloud-github-token')).toBeFocused();
+});
+
+test('the setup warning leaves out a GitHub token that is already set', async ({ page }) => {
+  await installElectronApiMock(page, { cloudSandboxes: { credentials: { ...ALL_CREDENTIALS, github: true }, sandboxes: [] } });
+  await openRemoteAccess(page);
+
+  const warning = page.getByRole('status', { name: 'Setup a new sandbox would miss' });
+  await expect(warning.getByRole('button', { name: 'Set a local start script' })).toBeVisible();
+  await expect(warning.getByRole('button', { name: 'Set a GitHub token' })).toHaveCount(0);
+});
