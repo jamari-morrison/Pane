@@ -1,0 +1,95 @@
+/**
+ * Cloud sandboxes (experimental): remote hosts that runpane's cloud library creates on a provider
+ * sandbox, joins to the user's tailnet, and saves as a remote host profile. The desktop main process
+ * drives the library and pushes a CloudSandboxesSnapshot to the renderer whenever anything changes.
+ */
+
+export const CLOUD_SANDBOX_SIZES = ['small', 'default', 'large'] as const;
+export type CloudSandboxSize = typeof CLOUD_SANDBOX_SIZES[number];
+
+/** What the provider says, as the badge shows it. */
+export type CloudSandboxState = 'creating' | 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
+
+/** An action this app started and is still waiting on. */
+export type CloudSandboxPendingAction = 'starting' | 'stopping' | 'removing' | 'updating';
+
+/** The action a failed row's Retry runs again. */
+export type CloudSandboxAction = 'create' | 'start' | 'stop' | 'remove' | 'update';
+
+/** Which credentials are saved. Values never leave the main process. */
+export interface CloudCredentialStatus {
+  boat: boolean;
+  tailscale: boolean;
+  claude: boolean;
+  /** The boat wallet new sandboxes bill, by name (not a secret). */
+  boatOrg?: string;
+}
+
+/** A partial credentials update; omitted fields keep their saved value. */
+export interface CloudCredentialsUpdate {
+  boatApiKey?: string;
+  /** A boat wallet id or name, or `personal`. */
+  boatOrg?: string;
+  tailscale?: { clientId: string; clientSecret: string };
+  claudeToken?: string;
+}
+
+export interface CloudSandboxCreateRequest {
+  name: string;
+  size: CloudSandboxSize;
+}
+
+/** One provisioning step as the library reports it; `message` is user-facing and never secret. */
+export interface CloudSandboxProgressStep {
+  step: string;
+  state: 'start' | 'done';
+  message?: string;
+}
+
+export interface CloudSandboxView {
+  /** The tailnet hostname once known; a create in flight uses `create:<name>`. */
+  id: string;
+  label: string;
+  hostname?: string;
+  /** The saved remote host profile this sandbox connects through. */
+  profileId?: string;
+  state: CloudSandboxState;
+  size: CloudSandboxSize;
+  /** When the sandbox last started (ISO), for the "running for" hint. */
+  startedAt?: string;
+  /** The Pane version its daemon reports to this app's paired client, once read. */
+  daemonVersion?: string;
+  /** The daemon runs a different Pane version than this app; Update Pane installs this app's. */
+  updateAvailable?: boolean;
+  pending?: CloudSandboxPendingAction;
+  /** Provisioning steps so far, while creating or after a failed create. */
+  steps?: CloudSandboxProgressStep[];
+  error?: string;
+  failedAction?: CloudSandboxAction;
+}
+
+export interface CloudSandboxesSnapshot {
+  /** False when this build has no cloud library; the section explains instead of offering actions. */
+  available: boolean;
+  credentials: CloudCredentialStatus;
+  sandboxes: CloudSandboxView[];
+  /** Listing failed (for example, the provider is unreachable); the last known rows are kept. */
+  loadError?: string;
+}
+
+export function createDefaultCloudSandboxesSnapshot(): CloudSandboxesSnapshot {
+  return {
+    available: false,
+    credentials: { boat: false, tailscale: false, claude: false },
+    sandboxes: [],
+  };
+}
+
+/** Lowercase letters, digits and dashes: the name becomes part of the tailnet hostname. */
+export function getCloudSandboxNameError(name: string): string | null {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return 'Enter a name';
+  if (trimmed.length > 40) return 'Use at most 40 characters';
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(trimmed)) return 'Use lowercase letters, digits and dashes';
+  return null;
+}

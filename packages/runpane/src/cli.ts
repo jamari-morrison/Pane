@@ -116,6 +116,12 @@ async function dispatchParsedCommand(parsed: ParsedArgs, telemetryContext: Wrapp
     return printVersion(parsed.panePath);
   }
 
+  if (parsed.cloudArgv) {
+    // Loaded lazily so the rest of the CLI never pays for the cloud modules.
+    const { runCloud } = await import('./cloud/cli');
+    return runCloud(parsed.cloudArgv);
+  }
+
   if (parsed.command === 'doctor') {
     return runDoctor(parsed, SOURCE);
   }

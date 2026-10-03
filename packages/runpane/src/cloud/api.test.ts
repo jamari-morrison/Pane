@@ -1,0 +1,475 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { test } from 'node:test';
+import { createCloudSandboxes, type CloudBootstrap, type CloudProgress } from './api';
+import type { DaemonHealthResult } from './bootstrap/health';
+import type { ProvisionResult, RepairResult } from './bootstrap/provision';
+import type { CloudProvider, CloudSandbox, CreateSandboxRequest, ListedBoatOrg } from './provider';
+import type { CloudHostProfile, PaneSource } from './store';
+import type { TailscaleApi, TailscaleDevice } from './tailscale';
+
+const FQDN = 'rp-test.tail1234.ts.net';
+const SECRETS = ['boat-key-SECRET', 'ts-client-SECRET', 'claude-token-SECRET', 'paired-token-SECRET'];
+
+/** An in-memory boat: sandboxes start, stop and resume instantly; calls are logged. */
+/** Time that passes only when the code under test sleeps, so a 15 min wait runs instantly. */
+class FakeClock {
+  time = Date.now();
+  now = () => this.time;
+  sleep = async (ms: number) => {
+    this.time += ms;
+  };
+}
+
+/** How boat handles an accepted Stop: archiving for a while, then stopped, its error state, gone, or never done. */
+interface SlowStop {
+  archivingMs: number;
+  then: 'stopped' | 'error' | 'gone' | 'stuck';
+}
+
+/** Set `stop` to make the fake boat archive slowly after it accepts a Stop. */
+class SlowBoat {
+  stop?: SlowStop;
+  acceptedAt?: number;
+}
+
+function fakeProvider(clock: FakeClock, orgs: ListedBoatOrg[] = [{ id: 'team_test', name: 'test', active: false }]) {
+  const sandboxes = new Map<string, CloudSandbox>();
+  const slow = new SlowBoat();
+  const calls: string[] = [];
+  const creates: CreateSandboxRequest[] = [];
+  const keys: Array<{ apiKey: string; org?: string }> = [];
+  const factory = (apiKey: string, org?: string): CloudProvider => {
+    keys.push({ apiKey, org });
+    const set = (id: string, state: CloudSandbox['state'], providerState: string) => {
+      const current = sandboxes.get(id);
+      if (current) sandboxes.set(id, { ...current, state, providerState });
+    };
+    return {
+      name: 'boat',
+      verifyCredentials: async () => ({ account: 'me@example.com' }),
+      listOrgs: async () => orgs,
+      async create(request) {
+        creates.push(request);
+        calls.push('create');
+        const id = `bx_${sandboxes.size + 1}`;
+        const created: CloudSandbox = { id, name: request.name, state: 'running', providerState: 'idle', size: request.size, org: { id: 'team_test', name: 'test' } };
+        sandboxes.set(id, created);
+        return { ...created, state: 'starting', providerState: 'provisioning' };
+      },
+      async get(id) {
+        const current = sandboxes.get(id);
+        if (current?.state === 'stopping' && slow.stop && slow.acceptedAt !== undefined && clock.now() - slow.acceptedAt >= slow.stop.archivingMs) {
+          if (slow.stop.then === 'stopped') set(id, 'stopped', 'archived');
+          if (slow.stop.then === 'error') sandboxes.set(id, { ...current, state: 'error', providerState: 'failed', error: 'snapshot failed' });
+          if (slow.stop.then === 'gone') sandboxes.delete(id);
+        }
+        return sandboxes.get(id) ?? { id, name: '', state: 'gone', providerState: 'not_found' };
+      },
+      list: async () => [...sandboxes.values()],
+      rename: async () => undefined,
+      async stop(id) {
+        calls.push(`stop ${id}`);
+        if (slow.stop) {
+          slow.acceptedAt = clock.now();
+          set(id, 'stopping', 'archiving');
+        } else {
+          set(id, 'stopped', 'archived');
+        }
+      },
+      async resume(id) {
+        calls.push(`resume ${id}`);
+        set(id, 'running', 'idle');
+      },
+      async destroy(id) {
+        calls.push(`destroy ${id}`);
+        sandboxes.delete(id);
+      },
+      handle: (id) => ({
+        id,
+        writeFile: async () => undefined,
+        async runScript(script) {
+          calls.push(`run ${id} ${script}`);
+          return { exitCode: 0, stdout: '', stderr: '' };
+        },
+      }),
+    };
+  };
+  return { factory, sandboxes, calls, creates, keys, slow };
+}
+
+function fakeTailnet() {
+  const devices: TailscaleDevice[] = [];
+  const api: TailscaleApi = {
+    mintAuthKey: async () => ({ id: 'k', key: 'tskey-fake-SECRET' }),
+    listDevices: async () => devices,
+    findDevicesByHostname: async (hostname) => devices.filter((device) => device.hostname === hostname),
+    async deleteDevice(nodeId) {
+      const index = devices.findIndex((device) => device.nodeId === nodeId);
+      if (index !== -1) devices.splice(index, 1);
+      return index !== -1;
+    },
+  };
+  return { api, devices };
+}
+
+interface BootstrapScript {
+  provisionError?: Error;
+  /** Answers for successive waitForHealth calls (default: healthy). */
+  health?: boolean[];
+  repair?: RepairResult;
+  /** applyClaudeModel fails, e.g. the sandbox's settings.json is not JSON. */
+  claudeModelFails?: boolean;
+}
+
+function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: BootstrapScript = {}) {
+  const agentEnvs: Array<string | undefined> = [];
+  const paneSources: PaneSource[] = [];
+  const repairs: string[] = [];
+  const updates: string[] = [];
+  const claudeModels: string[] = [];
+  const health = [...(script.health ?? [])];
+  const bootstrap: CloudBootstrap = {
+    async provision(_sandbox, options): Promise<ProvisionResult> {
+      agentEnvs.push(options.agentEnv);
+      paneSources.push(options.paneSource);
+      tailnet.devices.push({ nodeId: 'n1', id: '1', hostname: options.hostname, name: FQDN, addresses: [], tags: ['tag:rp-session'] });
+      if (script.provisionError) throw script.provisionError;
+      options.onStep?.({ step: 'install-pane', state: 'start' });
+      return {
+        nodeId: 'n1', hostname: options.hostname, magicDnsName: `${options.hostname}.tail1234.ts.net`, tailscaleIps: [], tags: ['tag:rp-session'], runSsh: false,
+        pairing: { v: 1, label: options.label, baseUrl: `https://${options.hostname}.tail1234.ts.net`, token: 'paired-token-SECRET', transport: 'http+sse', tunnel: { kind: 'tailscale', selected: true } },
+        transport: 'https',
+        daemonVersion: '2.4.146',
+        health: { ok: true, elapsedMs: 1, version: '2.4.146' },
+        deletedStaleNodeIds: [],
+      };
+    },
+    async repair(_sandbox, options) {
+      repairs.push(options.hostname);
+      return script.repair ?? { reenrolled: false, backendState: 'Running', serveApplied: true };
+    },
+    async update(_sandbox, pane) {
+      updates.push(pane.debUrl);
+      return { version: '2.4.147' };
+    },
+    async applyClaudeModel(_sandbox, model) {
+      if (script.claudeModelFails) throw new Error('cloud bootstrap step "claude-model" failed: settings.json is not a JSON object');
+      claudeModels.push(model);
+      return { outcome: 'set', model };
+    },
+    async waitForHealth(): Promise<DaemonHealthResult> {
+      const ok = health.length > 0 ? health.shift() === true : true;
+      return { ok, elapsedMs: 1, version: ok ? '2.4.146' : undefined };
+    },
+  };
+  return { bootstrap, agentEnvs, paneSources, repairs, updates, claudeModels };
+}
+
+/** The user's Claude Code default model on "this machine"; tests change it. */
+class LocalClaudeDefault {
+  constructor(public model: string | null) {}
+}
+
+function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-cloud-'));
+  const clock = new FakeClock();
+  const provider = fakeProvider(clock);
+  const tailnet = fakeTailnet();
+  const boot = fakeBootstrap(tailnet, script);
+  const saved = new Map<string, CloudHostProfile>();
+  const progress: CloudProgress[] = [];
+  const local = new LocalClaudeDefault('claude-opus-5-5');
+  const cloud = createCloudSandboxes({
+    dir,
+    createProvider: provider.factory,
+    createTailscale: () => tailnet.api,
+    bootstrap: boot.bootstrap,
+    savedHosts: {
+      upsert: async (profile) => {
+        saved.set(profile.cloud.sessionId, profile);
+      },
+      remove: async (sessionId) => {
+        saved.delete(sessionId);
+      },
+    },
+    sleep: clock.sleep,
+    now: clock.now,
+    env,
+    localClaudeModel: async () => local.model,
+  });
+  const onProgress = (update: CloudProgress) => progress.push(update);
+  return { dir, cloud, provider, tailnet, boot, saved, progress, onProgress, local, clock };
+}
+
+async function withCredentials(h: ReturnType<typeof harness>) {
+  await h.cloud.setup({ boatApiKey: SECRETS[0], boatOrg: 'test', tailscaleClientId: 'client-id', tailscaleClientSecret: SECRETS[1], claudeToken: SECRETS[2] });
+}
+
+function readTree(dir: string): string {
+  return fs.readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => fs.readFileSync(path.join(entry.parentPath, entry.name), 'utf8'))
+    .join('\n');
+}
+
+test('setup saves the credentials 0600, resolves the wallet, and its status never carries a secret', async () => {
+  const h = harness();
+  assert.deepEqual(await h.cloud.getCredentialsStatus(), {
+    boat: { configured: false }, tailscale: { configured: false }, claude: { configured: false }, ready: false,
+  });
+  await withCredentials(h);
+  const status = await h.cloud.getCredentialsStatus();
+  assert.deepEqual(status, {
+    boat: { configured: true, org: { id: 'team_test', name: 'test' } }, tailscale: { configured: true }, claude: { configured: true }, ready: true,
+  });
+  assert.equal(fs.statSync(path.join(h.dir, 'credentials.json')).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(h.dir).mode & 0o777, 0o700);
+  // Empty fields keep what is saved.
+  await h.cloud.setup({ boatApiKey: '', tailscaleClientSecret: ' ' });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(h.dir, 'credentials.json'), 'utf8')).boat.apiKey, SECRETS[0]);
+});
+
+test('setup refuses half a Tailscale OAuth client and an unknown wallet', async () => {
+  const h = harness();
+  await assert.rejects(h.cloud.setup({ tailscaleClientId: 'client-id' }), /needs both its client id and its secret/u);
+  await assert.rejects(h.cloud.setup({ boatApiKey: SECRETS[0], boatOrg: 'nope' }), /No boat wallet "nope". Yours: test \(team_test\)/u);
+  assert.equal(fs.existsSync(path.join(h.dir, 'credentials.json')), false);
+});
+
+test('create provisions in the saved wallet, signs agents in, saves the host and reports progress without secrets', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const info = await h.cloud.create({ label: 'My sandbox' }, h.onProgress);
+
+  assert.equal(info.state, 'running');
+  assert.equal(info.label, 'My sandbox');
+  assert.match(info.hostname, /^rp-[a-z0-9]{8}$/u);
+  assert.equal(info.baseUrl, `https://${info.hostname}.tail1234.ts.net`);
+  assert.equal(info.transport, 'https');
+  assert.deepEqual(info.health, { ok: true, version: '2.4.146' });
+  assert.ok(info.startedAt);
+  assert.equal(info.daemonVersion, '2.4.146');
+  assert.equal(h.provider.creates[0].org, 'team_test');
+  assert.deepEqual(h.boot.paneSources, [{ kind: 'runpane-npm', spec: 'runpane@latest' }]);
+  assert.match(h.provider.creates[0].idempotencyKey, /^runpane-cloud-new-/u);
+  assert.deepEqual(h.boot.agentEnvs, [`CLAUDE_CODE_OAUTH_TOKEN=${SECRETS[2]}\n`]);
+
+  const saved = h.saved.get(info.sessionId);
+  assert.equal(saved?.token, 'paired-token-SECRET');
+  assert.deepEqual(saved?.cloud, { provider: 'boat', sandboxId: info.sandboxId, sessionId: info.sessionId, nodeId: 'n1', hostname: info.hostname, version: 1 });
+  assert.equal(fs.statSync(path.join(h.dir, 'hosts', `${info.hostname}.json`)).mode & 0o777, 0o600);
+  assert.deepEqual(h.progress.map((update) => update.step), ['sandbox', 'tailnet', 'install', 'install', 'saved-host', 'done']);
+  assert.deepEqual(info.claudeModel, { model: 'claude-opus-5-5', outcome: 'set' });
+  assert.deepEqual(h.boot.claudeModels, ['claude-opus-5-5']);
+  const visible = JSON.stringify([info, h.progress]);
+  for (const secret of SECRETS) assert.ok(!visible.includes(secret), 'no secret in results or progress');
+});
+
+test('a failed create removes the sandbox, its tailnet device and its record', async () => {
+  const h = harness({ provisionError: new Error('cloud bootstrap step "install-pane" failed: apt-get exited 100') });
+  await withCredentials(h);
+  await assert.rejects(h.cloud.create({}, h.onProgress), /Creating rp-[a-z0-9]{8} failed: cloud bootstrap step "install-pane" failed/u);
+  assert.equal(h.provider.sandboxes.size, 0);
+  assert.equal(h.tailnet.devices.length, 0);
+  assert.deepEqual(await h.cloud.list(), []);
+  assert.equal(h.saved.size, 0);
+});
+
+test('stop flushes then stops; start resumes and waits for the daemon', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname, sandboxId } = await h.cloud.create();
+
+  const stopped = await h.cloud.stop(hostname, h.onProgress);
+  assert.equal(stopped.state, 'stopped');
+  assert.deepEqual(h.provider.calls.slice(-2), [`run ${sandboxId} sync; sleep 0.2; sync`, `stop ${sandboxId}`]);
+  assert.equal((await h.cloud.stop(hostname)).state, 'stopped', 'stopping a stopped sandbox is a no-op');
+  assert.equal((await h.cloud.list())[0].state, 'stopped');
+  assert.equal(h.provider.keys.at(-1)?.org, 'team_test', 'list is scoped to the wallet the sandbox bills');
+
+  const started = await h.cloud.start(hostname, h.onProgress);
+  assert.equal(started.state, 'running');
+  assert.deepEqual(started.health, { ok: true, version: '2.4.146' });
+  assert.equal(h.provider.calls.at(-1), `resume ${sandboxId}`);
+  assert.deepEqual(h.boot.repairs, [], 'a healthy start needs no repair');
+});
+
+test('start repairs a node that came back logged out, under the same name, and updates the saved host', async () => {
+  const h = harness({
+    health: [false, true],
+    repair: { reenrolled: true, previousBackendState: 'NeedsLogin', deletedNodeIds: ['n1'], nodeId: 'n2', hostname: 'x', magicDnsName: FQDN, tailscaleIps: [], tags: [], runSsh: false },
+  });
+  await withCredentials(h);
+  const { hostname, sessionId, baseUrl } = await h.cloud.create();
+  await h.cloud.stop(hostname);
+  const started = await h.cloud.start(hostname, h.onProgress);
+
+  assert.deepEqual(h.boot.repairs, [hostname]);
+  assert.equal(started.baseUrl, baseUrl, 'same address after a re-enrol');
+  assert.deepEqual(h.saved.get(sessionId)?.cloud.nodeId, 'n2');
+  assert.equal(h.saved.get(sessionId)?.cloud.version, 2);
+  assert.ok(h.progress.some((update) => update.step === 'repair'));
+});
+
+test('start fails when the daemon never answers, even after the repair', async () => {
+  const h = harness({ health: [false, false] });
+  await withCredentials(h);
+  const { hostname } = await h.cloud.create();
+  await h.cloud.stop(hostname);
+  await assert.rejects(h.cloud.start(hostname), /its Pane daemon did not answer/u);
+});
+
+test('update installs a pinned .deb only on a running sandbox', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname } = await h.cloud.create();
+  const pane = { debUrl: 'https://example.com/pane_2.4.147_amd64.deb', sha256: 'c'.repeat(64) };
+  const updated = await h.cloud.update(hostname, pane, h.onProgress);
+  assert.deepEqual(h.boot.updates, [pane.debUrl]);
+  assert.equal(updated.daemonVersion, '2.4.146', 'the version the daemon reports wins over the package\'s');
+  assert.equal(updated.health?.ok, true);
+  await h.cloud.stop(hostname);
+  await assert.rejects(h.cloud.update(hostname, pane), /is stopped; start it before updating Pane/u);
+});
+
+test('remove deletes the tailnet device, the sandbox, the saved host and the record', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname, sessionId } = await h.cloud.create();
+  await h.cloud.stop(hostname);
+  await h.cloud.remove(hostname, h.onProgress);
+  assert.equal(h.tailnet.devices.length, 0);
+  assert.equal(h.provider.sandboxes.size, 0);
+  assert.equal(h.saved.has(sessionId), false);
+  assert.deepEqual(await h.cloud.list(), []);
+  await assert.rejects(h.cloud.status(hostname), /No cloud sandbox matches/u);
+});
+
+test('host records hold the paired token but never a provider or Tailscale secret', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname } = await h.cloud.create();
+  const record = fs.readFileSync(path.join(h.dir, 'hosts', `${hostname}.json`), 'utf8');
+  for (const secret of SECRETS.slice(0, 3)) assert.ok(!record.includes(secret));
+  // Only credentials.json holds those.
+  const others = readTree(path.join(h.dir, 'hosts')) + fs.readFileSync(path.join(h.dir, 'settings.json'), 'utf8');
+  for (const secret of SECRETS.slice(0, 3)) assert.ok(!others.includes(secret));
+});
+
+test('the environment can pin the Pane .deb (with its sha256) and the name prefix for new sandboxes', async () => {
+  const h = harness({}, {
+    RUNPANE_CLOUD_PANE_DEB_URL: 'https://example.com/pane_cs.deb', RUNPANE_CLOUD_PANE_DEB_SHA256: 'd'.repeat(64), RUNPANE_CLOUD_NAME_PREFIX: 'rp-loop-cs',
+  });
+  await withCredentials(h);
+  const info = await h.cloud.create();
+  assert.match(info.hostname, /^rp-loop-cs-[a-z0-9]{8}$/u);
+  assert.deepEqual(h.boot.paneSources, [{ kind: 'deb-url', url: 'https://example.com/pane_cs.deb', sha256: 'd'.repeat(64) }]);
+
+  const unpinned = harness({}, { RUNPANE_CLOUD_PANE_DEB_URL: 'https://example.com/pane_cs.deb' });
+  await withCredentials(unpinned);
+  await assert.rejects(unpinned.cloud.create(), /RUNPANE_CLOUD_PANE_DEB_URL needs RUNPANE_CLOUD_PANE_DEB_SHA256/u);
+  assert.equal(unpinned.provider.creates.length, 0, 'refused before anything is billed');
+});
+
+test('the sandbox follows the user\'s Claude Code default model: on create, start, update and syncAgentDefaults', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname } = await h.cloud.create();
+  assert.deepEqual(h.boot.claudeModels, ['claude-opus-5-5']);
+
+  // The user changes their default; a running sandbox follows on syncAgentDefaults, before any restart.
+  h.local.model = 'sonnet';
+  assert.deepEqual((await h.cloud.syncAgentDefaults(hostname)).claudeModel, { model: 'sonnet', outcome: 'set' });
+
+  // Detection failed (unknown): nothing is sent, so the sandbox keeps 'sonnet' instead of being cleared.
+  h.local.model = null;
+  const updated = await h.cloud.update(hostname, { debUrl: 'https://example.com/pane.deb', sha256: 'e'.repeat(64) }, h.onProgress);
+  assert.equal(updated.claudeModel, undefined);
+  assert.ok(h.progress.some((update) => update.step === 'update'
+    && update.message === 'Your Claude Code default model is unknown right now, so the sandbox keeps the model it has.'));
+  assert.equal((await h.cloud.syncAgentDefaults(hostname)).claudeModel, undefined);
+
+  h.local.model = 'claude-opus-5-5';
+  await h.cloud.stop(hostname);
+  assert.deepEqual((await h.cloud.start(hostname)).claudeModel, { model: 'claude-opus-5-5', outcome: 'set' });
+  assert.deepEqual(h.boot.claudeModels, ['claude-opus-5-5', 'sonnet', 'claude-opus-5-5'], 'an unknown default is never sent');
+
+  await h.cloud.stop(hostname);
+  await assert.rejects(h.cloud.syncAgentDefaults(hostname), /is stopped; it gets your default model when it starts/u);
+});
+
+test('a start whose model update fails still succeeds and says so', async () => {
+  const h = harness({ claudeModelFails: true });
+  await assert.rejects(withCredentials(h).then(() => h.cloud.create()), /Creating rp-[a-z0-9]{8} failed: cloud bootstrap step "claude-model" failed/u);
+  // create is all or nothing; start and update keep a usable sandbox.
+  const ok = harness();
+  await withCredentials(ok);
+  const { hostname } = await ok.cloud.create();
+  await ok.cloud.stop(hostname);
+  const failing = harness({ claudeModelFails: true });
+  // Reuse the same state dir through a second library on it.
+  const info = await createCloudSandboxes({
+    dir: ok.dir,
+    createProvider: ok.provider.factory,
+    createTailscale: () => ok.tailnet.api,
+    bootstrap: failing.boot.bootstrap,
+    savedHosts: { upsert: async () => undefined, remove: async () => undefined },
+    sleep: async () => undefined,
+    env: {},
+    localClaudeModel: async () => 'claude-opus-5-5',
+  }).start(hostname, failing.onProgress);
+  assert.equal(info.state, 'running');
+  assert.equal(info.claudeModel, undefined);
+  assert.ok(failing.progress.some((update) => /kept its Claude model: cloud bootstrap step "claude-model" failed/u.test(update.message)));
+});
+
+test('a Stop boat accepted waits through a long archive (over 120 s) and reports "Saving the sandbox…"', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname, sandboxId } = await h.cloud.create();
+  h.provider.slow.stop = { archivingMs: 307_000, then: 'stopped' };
+  const started = h.clock.now();
+  const stopped = await h.cloud.stop(hostname, h.onProgress);
+  assert.equal(stopped.state, 'stopped');
+  assert.ok(h.clock.now() - started >= 307_000, 'it waited the whole archive');
+  assert.deepEqual(h.progress.filter((update) => update.step === 'stopping').map((update) => update.message),
+    [`Stopping ${stopped.label}...`, 'Saving the sandbox…']);
+  assert.equal(h.progress.at(-1)?.step, 'done');
+  assert.equal(h.provider.calls.filter((call) => call === `stop ${sandboxId}`).length, 1, 'one stop request');
+});
+
+test('a Stop fails clearly when boat errors, loses the sandbox, or is still archiving at the 15 min ceiling', async () => {
+  for (const [then, expected] of [
+    ['error', /^boat reported an error while stopping rp-[a-z0-9]{8} \(failed: snapshot failed\)\.$/u],
+    ['gone', /^boat no longer has rp-[a-z0-9]{8}'s sandbox bx_1; it was removed while stopping\.$/u],
+    ['stuck', /^rp-[a-z0-9]{8} was still archiving after 15 min; boat may still finish stopping it\. Check its state again later\.$/u],
+  ] as const) {
+    const h = harness();
+    await withCredentials(h);
+    const { hostname } = await h.cloud.create();
+    h.provider.slow.stop = { archivingMs: 200_000, then };
+    const started = h.clock.now();
+    await assert.rejects(h.cloud.stop(hostname, h.onProgress), (error: Error) => {
+      assert.match(error.message, expected);
+      for (const secret of SECRETS) assert.ok(!error.message.includes(secret));
+      return true;
+    });
+    if (then === 'stuck') assert.ok(h.clock.now() - started >= 15 * 60_000, 'the ceiling is 15 min, not 120 s');
+    else assert.ok(h.clock.now() - started < 15 * 60_000);
+  }
+});
+
+test('Start waits through a Stop that boat is still archiving, then resumes', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname, sandboxId } = await h.cloud.create();
+  h.provider.slow.stop = { archivingMs: 300_000, then: 'stopped' };
+  // A Stop boat accepted, still archiving when the user presses Start.
+  await h.provider.factory('k').stop(sandboxId);
+  const started = await h.cloud.start(hostname);
+  assert.equal(started.state, 'running');
+  assert.equal(h.provider.calls.at(-1), `resume ${sandboxId}`);
+});

@@ -21,6 +21,11 @@ import type {
   RemotePaneConnectionProfile,
 } from '../../../shared/types/remoteDaemon';
 import type {
+  CloudCredentialsUpdate,
+  CloudSandboxCreateRequest,
+  CloudSandboxesSnapshot,
+} from '../../../shared/types/cloudSandboxes';
+import type {
   PanePermissionRequest,
   PanePermissionResolvedEvent,
   PanePermissionResponse,
@@ -349,6 +354,16 @@ interface ElectronAPI {
     updateClientState: (updates: Partial<Pick<RemoteDaemonClientSettings, 'activeProfileId' | 'mode'>>) => Promise<IPCResponse<RemoteDaemonClientSettings>>;
     onConnectionStateChanged: (callback: (state: RemotePaneConnectionState) => void) => () => void;
     onHostStateChanged: (callback: (state: RemoteDaemonHostRuntimeState) => void) => () => void;
+    getCloudSandboxes: () => Promise<IPCResponse<CloudSandboxesSnapshot>>;
+    updateCloudCredentials: (update: CloudCredentialsUpdate) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
+    createCloudSandbox: (request: CloudSandboxCreateRequest) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
+    startCloudSandbox: (id: string) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
+    stopCloudSandbox: (id: string) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
+    updateCloudSandbox: (id: string) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
+    removeCloudSandbox: (id: string) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
+    retryCloudSandbox: (id: string) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
+    dismissCloudSandbox: (id: string) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
+    onCloudSandboxesChanged: (callback: (snapshot: CloudSandboxesSnapshot) => void) => () => void;
   };
 
   // Prompts
