@@ -424,7 +424,8 @@ test('asking for the host\'s GitHub settings focuses the GitHub token field, eve
   // What the clone notice's "Open Settings" does on a cloud sandbox.
   await page.evaluate(() => window.dispatchEvent(new Event('pane:open-host-github-settings')));
 
-  const field = page.locator('#settings-remote-cloud-github-token');
+  // The token box itself, ready to paste into, not just its row.
+  const field = page.locator('#settings-remote-cloud-github-token').getByLabel('GitHub token', { exact: true });
   await expect(field).toBeFocused({ timeout: 5_000 });
   await expect(field).toBeInViewport();
 });
@@ -467,7 +468,7 @@ test('adding a sandbox warns about missing setup, and each link focuses its fiel
   await page.screenshot({ path: testInfo.outputPath('setup-warning.png') });
 
   await warning.getByRole('button', { name: 'Set a GitHub token' }).click();
-  await expect(page.locator('#settings-remote-cloud-github-token')).toBeFocused();
+  await expect(page.locator('#settings-remote-cloud-github-token').getByLabel('GitHub token', { exact: true })).toBeFocused();
 });
 
 test('the setup warning leaves out a GitHub token that is already set', async ({ page }) => {
@@ -520,11 +521,22 @@ test('the local start script link focuses that field, and the warning goes away 
 
   const warning = page.getByRole('status', { name: 'Setup a new sandbox would miss' });
   await warning.getByRole('button', { name: 'Set a local start script' }).click();
-  await expect(page.locator('#settings-remote-cloud-local-start-script')).toBeFocused();
+  await expect(page.getByRole('textbox', { name: 'Local start script' })).toBeFocused();
 
   await page.getByRole('textbox', { name: 'Local start script' }).fill('echo E2E_VAR=1');
   await page.getByRole('button', { name: 'Save Local Start Script' }).click();
   await expect(warning).toHaveCount(0);
   await page.getByRole('button', { name: 'Add Cloud Sandbox' }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('setup-warning-gone.png') });
+});
+
+test('on Windows the local start script link lands in the script box, past the shell choice', async ({ page }) => {
+  // The renderer tells Windows apart by navigator.platform.
+  await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { get: () => 'Win32' }));
+  await installElectronApiMock(page, { platform: 'win32', cloudSandboxes: { credentials: { ...ALL_CREDENTIALS, github: true }, sandboxes: [] } });
+  await openRemoteAccess(page);
+
+  await expect(page.locator('#settings-remote-cloud-local-start-script').getByRole('radiogroup', { name: 'Shell' })).toBeAttached();
+  await page.getByRole('status', { name: 'Setup a new sandbox would miss' }).getByRole('button', { name: 'Set a local start script' }).click();
+  await expect(page.getByRole('textbox', { name: 'Local start script' })).toBeFocused();
 });
