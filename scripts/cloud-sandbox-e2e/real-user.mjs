@@ -869,8 +869,8 @@ async function setupWarningAndLocalScript() {
     await shot('setup-warning', { result: true });
     if (!localSet) {
       await ui.setupLink('Set a local start script').click();
-      const focused = Boolean(await until(() => ui.localStartScript().evaluate((element) => element === document.activeElement), 3000, 200));
-      check('setup-link-focuses-local-start-script', focused, focused ? 'the Local start script box has the focus' : 'not focused');
+      const focus = await until(async () => { const f = await focusOn(ui.localStartScript()); return f.field ? f : undefined; }, 3000, 200) ?? await focusOn(ui.localStartScript());
+      check('setup-link-focuses-local-start-script', focus.field, `focus on ${focus.detail}`);
       await shot('setup-link-local-start-script');
     }
   }
@@ -892,8 +892,8 @@ async function setupWarningAndLocalScript() {
   if (!relay && env.DUMMY_IN_D0 === '1') {
     check('setup-warning-still-for-token', await visible(ui.setupWarning(), 3000), 'the warning stays while the token is missing');
     await ui.setupLink('Set a GitHub token').click();
-    const focused = Boolean(await until(() => ui.githubTokenField().evaluate((element) => element === document.activeElement), 3000, 200));
-    check('setup-link-focuses-github-token', focused, focused ? 'the GitHub token box has the focus' : 'not focused');
+    const focus = await until(async () => { const f = await focusOn(ui.githubTokenField()); return f.field ? f : undefined; }, 3000, 200) ?? await focusOn(ui.githubTokenField());
+    check('setup-link-focuses-github-token', focus.field, `focus on ${focus.detail}`);
     await shot('setup-link-github-token');
     await ui.githubTokenField().fill(DUMMY_GITHUB_TOKEN);
     await ui.saveGithubToken().click();
@@ -910,6 +910,18 @@ async function localEnvOnSandbox(panelId) {
   const command = `f=~/.config/runpane-cloud/local-env; echo LOCALENV_MODE=$(stat -c %a $f 2>/dev/null || echo none) LOCALENV_HAS=$(grep -cE '^(export )?${LOCAL_VAR}=' $f 2>/dev/null || echo 0) LOCALENV_RESERVED=$(grep -c '${LOCAL_RESERVED}' $f 2>/dev/null || echo 0) LOCALENV_SHA=$( (. $f 2>/dev/null; printf %s "$${LOCAL_VAR}") | sha256sum | cut -c1-12)`;
   const { lines } = await runInTerminal(panelId, command);
   return { lines, text: lines.join(' ') };
+}
+
+// What has the focus after a "Set a …" link, relative to `field`: the field itself, an element containing it (the
+// setting's row), or something else. The design asks for the FIELD.
+async function focusOn(field) {
+  return field.evaluate((element) => {
+    const active = document.activeElement;
+    const describe = (node) => (node ? `${node.tagName.toLowerCase()}${node.id ? `#${node.id}` : ''}${node.getAttribute('aria-label') ? `[${node.getAttribute('aria-label')}]` : ''}` : 'none');
+    if (active === element) return { field: true, detail: 'the field itself' };
+    if (active && active !== document.body && active.contains(element)) return { field: false, detail: `its container ${describe(active)} (not the box)` };
+    return { field: false, detail: `elsewhere: ${describe(active)}` };
+  }).catch(() => ({ field: false, detail: 'unreadable' }));
 }
 
 // Done-when 7: the variable reached the sandbox (the env file, 0600) and a Pane terminal, checked by NAME only.
@@ -1023,10 +1035,26 @@ async function d0() {
   }
   check('startup-script-saved', await visible(ui.settingsDialog().getByText('Saved', { exact: true }), 10_000), 'the editor says Saved');
   await shot('startup-script-saved', { result: true });
+  // Done-when 8 (E8) and 7 (E7): the setup warning while something is missing, then the kit's local start script.
+  await setupWarningAndLocalScript();
+
+  // E6 (D2, Red 12:21): Red pastes his GitHub token into Settings BEFORE Add; the kit takes no screenshot meanwhile.
+  if (relay && env.SKIP_GITHUB_TOKEN !== '1') {
+    await inView('github-token-section', ui.githubTokenField());
+    const saved = await waitForFlag('github-token-saved', 'In the Pane window (Settings > Remote Access, already open): paste your GitHub token (fine-grained: montlakev2, Contents + Pull requests Read and write) into the "GitHub token" box, then click "Save GitHub Token". "Saved token" then reads Set. Do not type it anywhere else.');
+    check('github-token-flag', saved, 'Red saved the GitHub token');
+    const registered = registerSavedCredentials().filter((entry) => /github/i.test(entry));
+    // For the auditor's exact-value scan: length and sha256[:12] only, computed here on SOBECK.
+    results.githubToken = registered.map((entry) => ({ entry: entry.replace(/^.*?\(/, '(') }));
+    log(`GitHub token registered for the exact-value scan: ${registered.join(', ') || 'none found in the saved credentials'}`);
+    check('github-token-registered-for-scan', registered.length > 0, registered.length ? 'by name, length and sha256[:12] only' : 'the saved credentials hold no GitHub token');
+  }
+
   if (cloud) {
     const tokenStatus = ((await ui.githubTokenStatus().innerText().catch(() => '')) || '').trim();
     results.githubTokenStatusBeforeAdd = tokenStatus;
     if (relay) check('github-token-set', tokenStatus === 'Set', `GitHub token: ${tokenStatus || 'unread'}`);
+    else if (state.dummyToken) check('github-token-dummy-set', tokenStatus === 'Set', `GitHub token: ${tokenStatus || 'unread'} (the rehearsal's dummy)`);
     else check('github-token-not-set', tokenStatus !== 'Set', `GitHub token: ${tokenStatus || 'unread'} (a rehearsal carries no GitHub credential)`);
     await inView('github-token-status', ui.githubTokenStatus());
     await shot('github-token-status');
@@ -1055,21 +1083,6 @@ async function d0() {
     await shot('dry-before-add');
     await ui.nameInput().fill('');
     return;
-  }
-
-  // Done-when 8 (E8) and 7 (E7): the setup warning while something is missing, then the kit's local start script.
-  await setupWarningAndLocalScript();
-
-  // E6 (D2, Red 12:21): Red pastes his GitHub token into Settings BEFORE Add; the kit takes no screenshot meanwhile.
-  if (relay && env.SKIP_GITHUB_TOKEN !== '1') {
-    await inView('github-token-section', ui.githubTokenField());
-    const saved = await waitForFlag('github-token-saved', 'In the Pane window (Settings > Remote Access, already open): paste your GitHub token (fine-grained: montlakev2, Contents + Pull requests Read and write) into the "GitHub token" box, then click "Save GitHub Token". "Saved token" then reads Set. Do not type it anywhere else.');
-    check('github-token-flag', saved, 'Red saved the GitHub token');
-    const registered = registerSavedCredentials().filter((entry) => /github/i.test(entry));
-    // For the auditor's exact-value scan: length and sha256[:12] only, computed here on SOBECK.
-    results.githubToken = registered.map((entry) => ({ entry: entry.replace(/^.*?\(/, '(') }));
-    log(`GitHub token registered for the exact-value scan: ${registered.join(', ') || 'none found in the saved credentials'}`);
-    check('github-token-registered-for-scan', registered.length > 0, registered.length ? 'by name, length and sha256[:12] only' : 'the saved credentials hold no GitHub token');
   }
 
   state.label = env.LABEL ?? (relay ? `e2e-${stamp}` : `rp-loop-cs-e2e-${stamp}`);
@@ -1267,8 +1280,8 @@ async function d3AddToken() {
   await shot('clone-add-token-notice', { result: true });
   await ui.openSettingsForToken().click();
   check('open-settings-shows-token-field', await visible(ui.settingsDialog(), 10_000) && await inView('github-token-field', ui.githubTokenField()), 'Settings opened at the GitHub token');
-  const focused = Boolean(await until(() => ui.githubTokenField().evaluate((element) => element === document.activeElement), 3000, 200));
-  check('open-settings-focuses-token-field', focused, focused ? 'the GitHub token box has the focus' : 'not focused');
+  const focus = await until(async () => { const f = await focusOn(ui.githubTokenField()); return f.field ? f : undefined; }, 3000, 200) ?? await focusOn(ui.githubTokenField());
+  check('open-settings-focuses-token-field', focus.field, `focus on ${focus.detail}`);
   await shot('settings-github-token', { result: true });
   if (relay || env.DUMMY_GITHUB_TOKEN === '0') return;
   addSecret('dummyGithubToken', DUMMY_GITHUB_TOKEN);
