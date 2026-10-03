@@ -421,7 +421,13 @@ jobs:
           if ($console -notmatch [regex]::Escape($end)) { throw "the run never reached '$end'" }
         }
         "default plan OK: $steps; D7 refresh/no-op/failing chip, DW7 Doppler, D6 agent env all on; both restores reached"
-        "launcher smoke PASS: live console, relay mode, stopped at the wallet check, results.json + zip written"
+        # The FATAL path must still have restored: the restores sit in main's finally, before the rejection handler.
+        $endAt = ($console -split "`n" | Select-String -Pattern 'end: restore-startup-script' | Select-Object -First 1).LineNumber
+        $fatalAt = ($console -split "`n" | Select-String -Pattern 'FATAL' | Select-Object -First 1).LineNumber
+        if ($fatalAt -and $endAt -and $endAt -gt $fatalAt) { throw 'the restores ran AFTER the FATAL line' }
+        "launcher smoke PASS: live console, relay mode, stopped at the wallet check (expected: no credentials here), restores reached before FATAL, results.json + zip written"
+        # The kit's own exit code (2: it stopped at the wallet check, as designed here) is not this job's result.
+        exit 0
 
     - uses: actions/upload-artifact@v7
       if: always()
