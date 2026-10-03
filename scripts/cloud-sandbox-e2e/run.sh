@@ -33,6 +33,20 @@ export PANE_DEB_URL="https://github.com/$repo/releases/download/$tag/$deb"
 PANE_DEB_SHA256="$(cut -d' ' -f1 "$build/download/SHA256SUMS.txt")"
 export PANE_DEB_SHA256
 
+# SBS_TAG=cs-sbs-<sha8>: the side-by-side build of the same commit, for the HOME-go (ii) desktop pass.
+if [ -n "${SBS_TAG:-}" ]; then
+  sbs="$cache/builds/$SBS_TAG"
+  mkdir -p "$sbs/download"
+  gh release download "$SBS_TAG" --repo "$repo" --dir "$sbs" --pattern SHA256SUMS.txt --clobber
+  if ! cmp -s "$sbs/SHA256SUMS.txt" "$sbs/download/SHA256SUMS.txt"; then rm -rf "$sbs/opt" "$sbs/usr" "$sbs/download"/*; fi
+  if [ ! -x "$sbs/opt/Pane/pane" ]; then
+    gh release download "$SBS_TAG" --repo "$repo" --dir "$sbs/download" --pattern '*.deb' --pattern SHA256SUMS.txt --clobber
+    (cd "$sbs/download" && sha256sum -c SHA256SUMS.txt)
+    dpkg-deb -x "$sbs/download"/*.deb "$sbs"
+  fi
+  export PANE_BIN_SBS="$sbs/opt/Pane/pane"
+fi
+
 if [ -d "$work" ] && [ "${KEEP:-0}" != 1 ]; then echo "work dir $work exists (KEEP=1 to reuse it)" >&2; exit 2; fi
 mkdir -p "$work"
 export WORK="$work" OUT="${OUT:-$work/evidence}" PANE_BIN="$build/opt/Pane/pane" MODE="${MODE:-fake}"
@@ -44,6 +58,11 @@ ln -sfn "$NODE_PATH" "$here/node_modules"
 # for a run split over several invocations (KEEP=1 PHASES=...); its last invocation must leave it unset.
 cleanup() {
   rm -f "$here/node_modules"
+  # A HOME-go pass the driver couldn't finish: its staged data dir under the real HOME goes.
+  if [ -f "$work/state.json" ] && grep -q '"homeGoStaged": true' "$work/state.json" && [ -d "$HOME/.pane_cloudsandbox" ]; then
+    [ -f "$HOME/.pane_cloudsandbox/config.json" ] && shred -u "$HOME/.pane_cloudsandbox/config.json"
+    rm -rf "$HOME/.pane_cloudsandbox"; echo "deleted a staged $HOME/.pane_cloudsandbox"
+  fi
   if [ "${KEEP_CREDENTIALS:-0}" != 1 ]; then
     find "$work/home/.config/runpane-cloud" "$work/home/.pane/config.json" "$work/home/.claude/.credentials.json" -type f -exec shred -u {} + 2>/dev/null || true
     echo "shredded staged credentials and saved host tokens under $work/home"

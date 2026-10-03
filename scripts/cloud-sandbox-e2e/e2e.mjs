@@ -44,7 +44,7 @@ const windows = process.platform === 'win32';
 const fakeClaude = mode === 'fake' && env.FAKE_CLAUDE === '1';
 const home = relay ? realHome : path.join(work, 'home');
 // A side-by-side build (SIDE_BY_SIDE_NAME) keeps its data in ~/.pane_<name> whatever PANE_DIR says.
-const paneDir = relay ? path.resolve(required('PANE_DATA_DIR'))
+let paneDir = relay ? path.resolve(required('PANE_DATA_DIR'))
   : env.SIDE_BY_SIDE_NAME ? path.join(home, `.pane_${env.SIDE_BY_SIDE_NAME}`) : path.join(home, '.pane');
 for (const forbidden of [path.join(realHome, '.pane'), path.join(realHome, '.pane_remote'), ...(relay ? [] : [realHome])]) {
   if ([relay ? '' : home, paneDir].map((dir) => dir.toLowerCase()).includes(forbidden.toLowerCase())) throw new Error(`e2e: refusing to use ${forbidden}`);
@@ -54,13 +54,18 @@ if (paneBin.startsWith('/opt/') || paneBin === '/usr/bin/pane' || /[\\/]Programs
 }
 // model-follow (D2): after DW2, the user changes their default and the sandbox's next new Claude panel follows.
 // model-detect (D2 ii): with NO explicit default the sandbox runs what local Claude actually uses.
-const allPhases = ['credentials', 'add', 'agent', 'stop', 'start', 'model-follow', 'model-detect', 'remove', 'hygiene'];
+// home-detect (D2 ii, Red's HOME-go): a second desktop on the same sandbox runs as agentbox's real user (HOME=/home/agent,
+// side-by-side build) with no explicit default; its offline detection must give the sandbox's next panel that model.
+// model-detect (token-only variant) is opt-in (PHASES=...): it can't tell D2 from no-D2 (iface-cs 20:45Z).
+const allPhases = ['credentials', 'add', 'agent', 'stop', 'start', 'model-follow', ...(env.PANE_BIN_SBS ? ['home-detect'] : []), 'remove', 'hygiene'];
 const phases = (env.PHASES ? env.PHASES.split(',') : allPhases)
   .filter((phase) => mode !== 'fake' || phase !== 'credentials')
   // On SOBECK the user's real default is only read, never changed.
-  .filter((phase) => !relay || !['model-follow', 'model-detect'].includes(phase))
+  .filter((phase) => !relay || !['model-follow', 'model-detect', 'home-detect'].includes(phase))
   // A fake host is never provisioned, so D2 can't reach it.
-  .filter((phase) => mode !== 'fake' || phase !== 'model-detect');
+  // FAKE_HOME_DETECT=1: a dry run of the HOME-go mechanics against the fake host (its model checks can't pass there).
+  .filter((phase) => mode !== 'fake' || phase !== 'model-detect')
+  .filter((phase) => mode !== 'fake' || phase !== 'home-detect' || env.FAKE_HOME_DETECT === '1');
 const maxStarts = Number(env.MAX_STARTS ?? (relay ? 2 : 6));
 const startsLog = env.STARTS_LOG ?? (relay ? path.join(out, 'starts.txt') : path.join(realHome, 'rc-loop/evidence/cs-e2e/starts.txt'));
 const secretsDir = env.SECRETS_DIR ?? path.join(realHome, 'rc-loop/secrets');
@@ -372,14 +377,15 @@ const shot = async (name) => {
   fs.writeFileSync(file.replace(/\.png$/, '.aria.yml'), redact(aria));
 };
 
-async function launch() {
-  app = await electron.launch({ executablePath: paneBin, args: ['--no-sandbox'], env: appEnv, timeout: 120_000 });
+async function launch({ bin = paneBin, launchEnv = appEnv, trace = !relay && !tokenInAppEnv } = {}) {
+  app = await electron.launch({ executablePath: bin, args: ['--no-sandbox'], env: launchEnv, timeout: 120_000 });
   const mainLog = path.join(out, 'app-main.log');
   for (const stream of [app.process().stdout, app.process().stderr]) stream?.on('data', (chunk) => fs.appendFileSync(mainLog, redact(chunk.toString())));
   context = app.context();
   // No trace on SOBECK (Red's own data on screen), nor while the app's environment holds a token; elsewhere a
   // trace with credentials paused out of it.
-  if (!relay && !tokenInAppEnv) {
+  tracing = trace;
+  if (trace) {
     await context.tracing.start({ screenshots: true, snapshots: true, title: `cloud-sandbox-e2e ${mode}` });
     await context.tracing.startChunk();
   }
@@ -391,12 +397,24 @@ async function launch() {
 }
 
 let traceChunk = 0;
+let tracing = false;
+// Closes the running desktop, saving its trace first.
+async function closeApp() {
+  if (context && tracing) {
+    await context.tracing.stopChunk({ path: path.join(out, `trace-${String(++traceChunk).padStart(2, '0')}.zip`) }).catch(() => undefined);
+    await context.tracing.stop().catch(() => undefined);
+  }
+  tracing = false;
+  await app?.close().catch(() => undefined);
+  app = undefined;
+  context = undefined;
+}
 async function pauseTrace() {
-  if (relay || tokenInAppEnv) return;
+  if (!tracing) return;
   await context.tracing.stopChunk({ path: path.join(out, `trace-${String(++traceChunk).padStart(2, '0')}.zip`) });
 }
 async function resumeTrace() {
-  if (relay || tokenInAppEnv) return;
+  if (!tracing) return;
   await context.tracing.startChunk();
 }
 
@@ -1163,6 +1181,189 @@ async function phaseModelDetect() {
   await shot('model-detect');
 }
 
+// ---------------------------------------------------------------- D2 (ii): HOME-go (Red, 2026-10-02 5:41 PM PT)
+// Desktop B is the side-by-side Linux build of the same commit (PANE_BIN_SBS), run as agentbox's real user (HOME=/home/agent,
+// whose ~/.claude has a Max login and no explicit model) with everything else isolated. The side-by-side mode keeps it from
+// touching that HOME's MCP config, skills, autostart and pane:// handler; its own data dir is /home/agent/.pane_cloudsandbox,
+// staged with copies of desktop A's saved host and cloud credentials and deleted afterwards. The login is never copied; the
+// only Claude run against it is the offline probe (dead proxy, as the library's), so no request leaves and no token refreshes.
+const realClaudeDir = path.join(realHome, '.claude');
+const homeGoDataDir = path.join(realHome, '.pane_cloudsandbox');
+const sha256 = (value) => crypto.createHash('sha256').update(value ?? '').digest('hex').slice(0, 16);
+const fileHash = (file) => (fs.existsSync(file) ? sha256(fs.readFileSync(file)) : 'absent');
+const listing = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir).sort() : []);
+
+// What must not change under the real HOME (hashes and names only; ~/.claude.json itself is rewritten by every running
+// Claude, so only its mcpServers part is compared).
+function homeSnapshot() {
+  let mcp = 'absent';
+  try {
+    mcp = sha256(JSON.stringify(JSON.parse(fs.readFileSync(path.join(realHome, '.claude.json'), 'utf8')).mcpServers ?? null));
+  } catch {
+    // Mid-rewrite by another Claude: compared again below.
+  }
+  return {
+    claudeJsonMcpServers: mcp,
+    claudeSettings: fileHash(path.join(realClaudeDir, 'settings.json')),
+    claudeCredentials: fileHash(path.join(realClaudeDir, '.credentials.json')),
+    claudeSkills: listing(path.join(realClaudeDir, 'skills')),
+    agentsSkills: listing(path.join(realHome, '.agents', 'skills')),
+    codexConfig: fileHash(path.join(realHome, '.codex', 'config.toml')),
+    cursorMcp: fileHash(path.join(realHome, '.cursor', 'mcp.json')),
+    autostart: listing(path.join(realHome, '.config', 'autostart')),
+    applications: listing(path.join(realHome, '.local', 'share', 'applications')),
+    mimeapps: fileHash(path.join(realHome, '.config', 'mimeapps.list')),
+  };
+}
+
+// The oracle: the library's own offline probe, run here as agentbox's user: `claude -p` with every proxy at a closed port,
+// one placeholder message, the model on Claude's system/init line, then killed; its empty project folder is removed.
+async function offlineProbeModel() {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-e2e-probe-'));
+  const probeEnv = { PATH: basePath, HOME: realHome, USER: os.userInfo().username, LANG: env.LANG ?? 'C.UTF-8' };
+  for (const name of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']) probeEnv[name] = 'http://127.0.0.1:9';
+  const child = spawn(claudeBin || 'claude', ['-p', '--no-session-persistence', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'],
+    { env: probeEnv, cwd, detached: true });
+  child.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content: 'x' } })}\n`);
+  const model = await new Promise((resolve) => {
+    let buffer = '';
+    const done = (value) => {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+      resolve(value);
+    };
+    child.stdout.on('data', (chunk) => {
+      buffer += chunk;
+      for (const line of buffer.split('\n')) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.type === 'system' && parsed.subtype === 'init') done(parsed.model ?? null);
+        } catch {
+          // Not a whole JSON line yet.
+        }
+      }
+    });
+    child.on('close', () => done(null));
+    setTimeout(() => done(null), 15_000);
+  });
+  // As the library does: only folders named after the probe's temp dir that hold no file.
+  const projects = path.join(realClaudeDir, 'projects');
+  const hasFile = (dir) => fs.readdirSync(dir, { recursive: true }).some((entry) => fs.statSync(path.join(dir, String(entry))).isFile());
+  for (const entry of listing(projects).filter((name) => name.endsWith(path.basename(cwd)))) {
+    if (!hasFile(path.join(projects, entry))) fs.rmSync(path.join(projects, entry), { recursive: true, force: true });
+  }
+  fs.rmSync(cwd, { recursive: true, force: true });
+  return model;
+}
+
+function removeHomeGoDataDir() {
+  if (!fs.existsSync(homeGoDataDir)) return;
+  const config = path.join(homeGoDataDir, 'config.json');
+  if (fs.existsSync(config)) spawnSync('shred', ['-u', config]);
+  fs.rmSync(homeGoDataDir, { recursive: true, force: true });
+  log(`deleted ${homeGoDataDir}`);
+}
+
+async function phaseHomeDetect() {
+  if (realHome !== '/home/agent') throw new Error('home-detect: runs only on agentbox as /home/agent');
+  if (fs.existsSync(homeGoDataDir)) throw new Error(`home-detect: ${homeGoDataDir} exists already; not touching it`);
+  let realSettingsModel;
+  try {
+    realSettingsModel = JSON.parse(fs.readFileSync(path.join(realClaudeDir, 'settings.json'), 'utf8')).model;
+  } catch {
+    realSettingsModel = undefined;
+  }
+  if (realSettingsModel) throw new Error('home-detect: /home/agent has an explicit model; (ii) needs none');
+  const before = homeSnapshot();
+  const expected = env.HOME_EXPECTED_MODEL ?? 'claude-opus-5-5';
+
+  // Oracle first, as agentbox's user, offline.
+  const probed = await offlineProbeModel();
+  state.homeGoProbe = probed;
+  saveState();
+  check('home-probe-init-model', probed === expected, `offline probe as /home/agent (no explicit default): init model ${probed ?? 'none'}; expected ${expected}`);
+
+  // Desktop A off; desktop B on, staged with copies of A's saved host and cloud credentials (shredded/deleted after).
+  const desktopADir = paneDir;
+  await closeApp();
+  const cloudDirB = path.join(work, 'home-go', 'runpane-cloud');
+  fs.mkdirSync(path.dirname(cloudDirB), { recursive: true, mode: 0o700 });
+  if (fs.existsSync(path.join(home, '.config', 'runpane-cloud'))) fs.cpSync(path.join(home, '.config', 'runpane-cloud'), cloudDirB, { recursive: true });
+  else fs.mkdirSync(cloudDirB, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(homeGoDataDir, { recursive: true, mode: 0o700 });
+  fs.copyFileSync(path.join(desktopADir, 'config.json'), path.join(homeGoDataDir, 'config.json'));
+  fs.chmodSync(path.join(homeGoDataDir, 'config.json'), 0o600);
+  state.homeGoStaged = true;
+  saveState();
+  const isolated = path.join(work, 'home-go');
+  const envB = {
+    PATH: basePath,
+    HOME: realHome,
+    USER: os.userInfo().username,
+    LANG: env.LANG ?? 'C.UTF-8',
+    DISPLAY: env.DISPLAY ?? '',
+    XAUTHORITY: env.XAUTHORITY ?? '',
+    XDG_CONFIG_HOME: path.join(isolated, 'config'),
+    XDG_DATA_HOME: path.join(isolated, 'data'),
+    XDG_CACHE_HOME: path.join(isolated, 'cache'),
+    XDG_STATE_HOME: path.join(isolated, 'state'),
+    XDG_RUNTIME_DIR: path.join(work, 'run'),
+    RUNPANE_CLOUD_DIR: cloudDirB,
+  };
+  paneDir = homeGoDataDir;
+  let panel;
+  try {
+    // No trace: desktop B runs on a real user's HOME.
+    await launch({ bin: path.resolve(env.PANE_BIN_SBS), launchEnv: envB, trace: false });
+    await shot('home-go-launched');
+    // Picking the sandbox connects; the desktop syncs its default to a running cloud sandbox on connect.
+    const connectedAt = Date.now();
+    check('home-go-connected', await connectTo(state.label, 90_000), `desktop B (HOME=/home/agent) → ${state.label}`);
+    await page.waitForTimeout(Number(env.DEFAULT_SYNC_WAIT_MS ?? 10_000));
+    const synced = await syncedModelOnSandbox();
+    check('home-go-detected-and-sent', synced === probed, `the sandbox's synced default (marker) ${synced ?? 'none'}; offline probe ${probed ?? 'none'}`);
+    panel = await newPaneWithClaude('cs-e2e-home');
+    const actual = await panelModel(panel.panelId, panel.paneId).catch(() => undefined);
+    check('model-detected-default-home', actual === probed && actual === expected,
+      `new sandbox panel ${panel.panelId} ran ${actual ?? 'unknown'}; local Claude (probe) ${probed ?? 'none'}; expected ${expected} (Sonnet without D2; the sandbox held ${env.LOCAL_DEFAULT_MODEL_2 ?? 'claude-haiku-4-5-20251001'} from (iii))`);
+    timing('home-go-connect-to-checked', connectedAt);
+    await shot('home-go-panel');
+  } finally {
+    await closeApp();
+    paneDir = desktopADir;
+    removeHomeGoDataDir();
+    spawnSync('find', [cloudDirB, '-type', 'f', '-exec', 'shred', '-u', '{}', '+']);
+    fs.rmSync(path.join(work, 'home-go'), { recursive: true, force: true });
+    state.homeGoStaged = false;
+    saveState();
+    await launch();
+  }
+  const after = homeSnapshot();
+  const changed = Object.keys(before).filter((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]));
+  check('home-agent-unchanged', changed.length === 0 && !fs.existsSync(homeGoDataDir),
+    `changed under /home/agent: ${JSON.stringify(changed)} (login file hash ${before.claudeCredentials === after.claudeCredentials ? 'unchanged: no refresh' : 'CHANGED'}); ${homeGoDataDir} ${fs.existsSync(homeGoDataDir) ? 'still there' : 'deleted'}`);
+}
+
+// The default the desktop last synced to the sandbox: the library's marker file there, read through a probe panel.
+async function syncedModelOnSandbox() {
+  const host = savedHosts(paneDir).find((entry) => entry.label === state.label);
+  const token = savedHostToken(paneDir, host.id);
+  const marker = `CSE2E_SYNCED_${crypto.randomBytes(3).toString('hex')}`;
+  const created = await daemonInvoke(host.baseUrl, token, 'runpane:panels:create', {
+    paneId: state.paneId, type: 'terminal', noFocus: true,
+    tool: { title: 'cs-e2e synced-model probe', command: `echo ${marker}=$(cat ~/.runpane-cloud/claude-model 2>/dev/null | head -1)` },
+  });
+  const probe = created?.panelId ?? created?.panel?.id;
+  return until(async () => {
+    const screen = await daemonInvoke(host.baseUrl, token, 'runpane:panels:screen', { panelId: probe, limit: 40 });
+    const value = String(screen?.text ?? '').match(new RegExp(`${marker}=(\\S*)`))?.[1];
+    return value === undefined ? undefined : value || null;
+  }, 20_000, 1000);
+}
+
 async function phaseRemove() {
   const startedAt = Date.now();
   if (mode === 'fake') {
@@ -1236,7 +1437,7 @@ try {
   }
   await launch();
   await shot('launched');
-  const run = { credentials: phaseCredentials, add: phaseAdd, agent: phaseAgent, stop: phaseStop, start: phaseStart, 'model-follow': phaseModelFollow, 'model-detect': phaseModelDetect, remove: phaseRemove, hygiene: phaseHygiene };
+  const run = { credentials: phaseCredentials, add: phaseAdd, agent: phaseAgent, stop: phaseStop, start: phaseStart, 'model-follow': phaseModelFollow, 'model-detect': phaseModelDetect, 'home-detect': phaseHomeDetect, remove: phaseRemove, hygiene: phaseHygiene };
   for (const phase of phases) {
     log(`== phase ${phase}`);
     const phaseStartedAt = Date.now();
@@ -1256,8 +1457,9 @@ try {
     });
   }
 } finally {
-  if (context && !relay && !tokenInAppEnv) await context.tracing.stopChunk({ path: path.join(out, `trace-${String(++traceChunk).padStart(2, '0')}.zip`) }).catch(() => undefined);
-  if (context && !relay && !tokenInAppEnv) await context.tracing.stop().catch(() => undefined);
+  if (state.homeGoStaged) removeHomeGoDataDir();
+  if (context && tracing) await context.tracing.stopChunk({ path: path.join(out, `trace-${String(++traceChunk).padStart(2, '0')}.zip`) }).catch(() => undefined);
+  if (context && tracing) await context.tracing.stop().catch(() => undefined);
   await app?.close().catch(() => undefined);
   if (mode === 'fake' && phases.at(-1) !== 'stop') fakeDaemonKill();
   saveState();
