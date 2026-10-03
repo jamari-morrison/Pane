@@ -14,7 +14,7 @@ const names = Object.keys(cloudBootstrapAssets) as CloudBootstrapAssetName[];
 const PROVISION_STEPS = [
   'identity', 'tailscale-install', 'tailnet-identity', 'check', 'firewall', 'tailscale-up', 'ts-guard', 'agent-env', 'agent-prompts', 'claude-model', 'install-pane',
   'pairing-read', 'health-local', 'cert-status', 'serve-http', 'serve-guard', 'tailscale-reset', 'serve-restore', 'update-pane',
-  'startup-install', 'startup-run', 'startup-status', 'startup-log', 'os-hostname',
+  'startup-install', 'startup-run', 'startup-status', 'startup-log', 'os-hostname', 'github-auth',
 ];
 
 /** Runs one rp-bootstrap.sh step in a temp HOME; `functions` replace commands (exported bash functions win over PATH). */
@@ -604,4 +604,74 @@ test('os-hostname records the name, installs the boot unit and applies it now, n
   assert.equal(run(['rp-pp69t1zz']).status, 0);
   assert.equal(fs.readFileSync(calls, 'utf8').match(/^hostname /gmu)?.length, 1, 'idempotent');
   assert.match(run(['Bad Name']).stdout, /"error": "os-hostname: not a hostname"/u);
+});
+
+const FAKE_GITHUB_TOKEN = 'FAKE-GH-TOKEN-0123456789-SECRET';
+
+/**
+ * Runs `github-auth` with gh faked: it records each argv line in `<home>/gh-argv` and what `auth login` read from
+ * stdin in `<home>/gh-stdin`, and answers as `mode` says.
+ */
+function runGitHubAuth(mode: 'valid' | 'bad-credentials' | 'missing-scope' | 'offline' | 'setup-git-fails') {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  const state = path.join(home, 'state');
+  fs.mkdirSync(state, { mode: 0o700 });
+  const tokenFile = path.join(state, 'gh-token-abc');
+  fs.writeFileSync(tokenFile, `${FAKE_GITHUB_TOKEN}\n`, { mode: 0o644 });
+  const argv = path.join(home, 'gh-argv');
+  const stdin = path.join(home, 'gh-stdin');
+  const loginFails = mode === 'bad-credentials'
+    ? `echo 'error validating token: HTTP 401: Bad credentials (https://api.github.com/)' >&2; return 1;`
+    : mode === 'missing-scope'
+      ? `echo "error validating token: missing required scope 'read:org'" >&2; return 1;`
+      : mode === 'offline'
+        ? `echo 'error validating token: Get "https://api.github.com/": dial tcp: lookup api.github.com: no such host' >&2; return 1;`
+        : '';
+  const gh = `() { echo "$*" >> '${argv}';
+    case "$1 $2" in
+      "auth login") cat > '${stdin}'; ${loginFails} mkdir -p "$HOME/.config/gh"; printf 'github.com:\\n  oauth_token: %s\\n' "$(cat '${stdin}')" > "$HOME/.config/gh/hosts.yml"; chmod 644 "$HOME/.config/gh/hosts.yml"; echo 'Logged in as octo-cat (token FAKE-GH-***)' >&2 ;;
+      "auth setup-git") ${mode === 'setup-git-fails' ? 'return 1;' : ''} ;;
+      "auth status") echo 'Token: FAKE-GH-***' ;;
+      "api user") echo 'octo-cat' ;;
+    esac; }`;
+  const result = runStep('github-auth', [tokenFile], new Map([['gh', gh]]), home);
+  const payload = JSON.parse(result.stdout.trim().split('\n').pop()?.replace(/^RP_RESULT /u, '') ?? '{}');
+  return {
+    ...result, payload, tokenFile,
+    argv: fs.existsSync(argv) ? fs.readFileSync(argv, 'utf8') : '',
+    stdin: fs.existsSync(stdin) ? fs.readFileSync(stdin, 'utf8') : '',
+    hostsYml: path.join(home, '.config/gh/hosts.yml'),
+  };
+}
+
+test('github-auth signs gh and git in with the token on stdin only, then removes it', () => {
+  const run = runGitHubAuth('valid');
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.deepEqual(run.payload, { ok: true, state: 'signed-in', user: 'octo-cat' });
+  assert.equal(run.stdin.trim(), FAKE_GITHUB_TOKEN, 'gh read the token from stdin');
+  assert.equal(run.argv.split('\n')[0], 'auth login --hostname github.com --with-token --insecure-storage');
+  assert.match(run.argv, /^auth setup-git --hostname github\.com$/mu);
+  assert.match(run.argv, /^auth status --hostname github\.com$/mu);
+  assert.doesNotMatch(run.argv, /FAKE-GH-TOKEN|SECRET/u, 'the token is on no command line');
+  assert.doesNotMatch(run.stdout + run.stderr, /SECRET|FAKE-GH-TOKEN|\*\*\*/u, 'nothing gh printed reaches the output');
+  assert.equal(fs.existsSync(run.tokenFile), false, 'the token file is removed');
+  assert.equal(fs.statSync(run.hostsYml).mode & 0o777, 0o600, 'hosts.yml is owner-only');
+});
+
+test('github-auth calls a token GitHub refuses invalid, and anything else an error, and always removes the token file', () => {
+  for (const mode of ['bad-credentials', 'missing-scope'] as const) {
+    const run = runGitHubAuth(mode);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.deepEqual(run.payload, { ok: true, state: 'invalid' }, mode);
+    assert.equal(fs.existsSync(run.tokenFile), false, `${mode}: the token file is removed`);
+    assert.doesNotMatch(run.stdout + run.stderr, /SECRET|FAKE-GH-TOKEN|Bad credentials/u);
+  }
+  const offline = runGitHubAuth('offline');
+  assert.deepEqual(offline.payload, { ok: true, state: 'error', reason: 'login-failed' });
+  assert.equal(fs.existsSync(offline.tokenFile), false);
+  const setupGit = runGitHubAuth('setup-git-fails');
+  assert.deepEqual(setupGit.payload, { ok: true, state: 'error', reason: 'setup-git-failed' });
+  assert.equal(fs.existsSync(setupGit.tokenFile), false);
+
+  assert.match(runStep('github-auth', ['/nonexistent/gh-token']).stdout, /"error": "github-auth: no token file"/u);
 });

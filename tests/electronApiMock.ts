@@ -1311,6 +1311,7 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
             boat: cloud.credentials.boat || Boolean(update.boatApiKey),
             tailscale: cloud.credentials.tailscale || Boolean(update.tailscale),
             claude: cloud.credentials.claude || Boolean(update.claudeToken),
+            github: cloud.credentials.github || Boolean(update.githubToken),
             boatOrg: update.boatOrg ?? cloud.credentials.boatOrg,
           };
           return emitCloud();

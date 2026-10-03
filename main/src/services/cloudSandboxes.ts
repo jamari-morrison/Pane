@@ -5,6 +5,7 @@ import type {
   CloudSandboxCreateRequest,
   CloudSandboxesSnapshot,
   CloudSandboxProgressStep,
+  CloudSandboxGitHubView,
   CloudSandboxStartupScriptView,
   CloudSandboxState,
   CloudSandboxView,
@@ -16,7 +17,7 @@ import type {
   CloudSandboxes,
   CloudSandboxInfo,
 } from '../../../packages/runpane/src/cloud/api';
-import type { StartupScriptStatus } from '../../../packages/runpane/src/cloud/bootstrap/provision';
+import type { GitHubAuthStatus, StartupScriptStatus } from '../../../packages/runpane/src/cloud/bootstrap/provision';
 
 /**
  * Cloud sandboxes (experimental). runpane's cloud library (packages/runpane/src/cloud/api.ts) creates,
@@ -105,6 +106,8 @@ export class CloudSandboxManager {
   private readonly unconfirmed = new Set<string>();
   /** Each sandbox's latest startup script run, by hostname, while this app knows it. */
   private readonly startupRuns = new Map<string, CloudSandboxStartupScriptView>();
+  /** Each sandbox's GitHub sign-in from its last create or start, by hostname. */
+  private readonly githubStates = new Map<string, CloudSandboxGitHubView>();
   /** Counts runs per hostname, so only the latest run's result is shown. */
   private readonly startupRunIds = new Map<string, number>();
 
@@ -146,6 +149,7 @@ export class CloudSandboxManager {
         error: operation?.error ?? (summary.state === 'gone' ? 'boat.dev no longer has this sandbox.' : undefined),
         failedAction: operation?.error ? operation.action : undefined,
         startupScript: this.startupRuns.get(summary.hostname),
+        github: this.githubStates.get(summary.hostname),
       });
     }
     return {
@@ -208,6 +212,7 @@ export class CloudSandboxManager {
       });
       this.operations.delete(id);
       this.replaceListed(summary.hostname, summary);
+      this.applyGitHubState(summary.hostname, summary.github);
       const startupScript = getStartupScriptView(summary.startupScript ?? null);
       if (startupScript) this.startupRuns.set(summary.hostname, startupScript);
       if (claudeModel !== null) this.syncedClaudeModels.set(summary.hostname, claudeModel);
@@ -341,6 +346,8 @@ export class CloudSandboxManager {
       // A stopped or removed sandbox's last run says nothing about its next one.
       if (action === 'stop' || action === 'remove') this.forgetStartupRun(id);
       if (!summary) this.syncedClaudeModels.delete(id);
+      if (!summary) this.githubStates.delete(id);
+      else if (summary.github) this.applyGitHubState(id, summary.github);
       else if (claudeModel) this.syncedClaudeModels.set(id, claudeModel);
       this.replaceListed(id, summary);
       if (summary) void this.readDaemonVersion(summary);
@@ -356,6 +363,13 @@ export class CloudSandboxManager {
     }
     this.schedulePoll();
     return this.emit();
+  }
+
+  /** `none` (no token saved) shows nothing; every other state replaces what the row showed. */
+  private applyGitHubState(hostname: string, github: GitHubAuthStatus | undefined): void {
+    if (!github) return;
+    if (github.state === 'none') this.githubStates.delete(hostname);
+    else this.githubStates.set(hostname, github);
   }
 
   private forgetStartupRun(hostname: string): void {

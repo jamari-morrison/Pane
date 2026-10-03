@@ -771,3 +771,34 @@ describe('getStartupScriptView', () => {
     expect(getStartupScriptView(status)).toEqual(view);
   });
 });
+
+describe('CloudSandboxManager GitHub token', () => {
+  const rowOf = (snapshot: CloudSandboxesSnapshot) => snapshot.sandboxes.find((row) => row.id === 'rp-alpha');
+  const TOKEN = 'FAKE-GH-TOKEN-main-SECRET';
+
+  it('saves the token through setup and shows only whether it is set', async () => {
+    const setup = vi.fn(async () => ({ ...CONFIGURED, github: { configured: true } }));
+    const { manager } = createManager(createLibrary({ setup }));
+
+    const snapshot = await manager.updateCredentials({ githubToken: TOKEN });
+
+    expect(setup).toHaveBeenCalledWith(expect.objectContaining({ githubToken: TOKEN }));
+    expect(snapshot.credentials.github).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toContain(TOKEN);
+  });
+
+  it('shows the GitHub sign-in from create and start on the row; no token shows nothing', async () => {
+    const create = vi.fn(async () => summary({ github: { state: 'signed-in', user: 'octo-cat' } }));
+    const start = vi.fn(async () => summary({ github: { state: 'invalid' } }));
+    const { manager } = createManager(createLibrary({ create, start }));
+
+    expect(rowOf(await manager.create({ name: 'alpha', size: 'default' }))?.github).toEqual({ state: 'signed-in', user: 'octo-cat' });
+    expect(rowOf(await manager.start('rp-alpha'))?.github).toEqual({ state: 'invalid' });
+
+    start.mockResolvedValueOnce(summary({ github: { state: 'error', message: "Couldn't apply the GitHub token on the sandbox." } }));
+    expect(rowOf(await manager.start('rp-alpha'))?.github).toEqual({ state: 'error', message: "Couldn't apply the GitHub token on the sandbox." });
+
+    start.mockResolvedValueOnce(summary({ github: { state: 'none' } }));
+    expect(rowOf(await manager.start('rp-alpha'))?.github).toBeUndefined();
+  });
+});

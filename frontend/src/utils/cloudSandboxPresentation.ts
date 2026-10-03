@@ -90,6 +90,15 @@ export function getCloudStartupScriptNotice(sandbox: CloudSandboxView): CloudSta
   return { kind: 'failed', text: `⚠ Startup script failed (${reason})`, viewLog: true };
 }
 
+/** The sandbox row's GitHub line: who the saved token signed in as, or why it didn't; null without a token. */
+export function getCloudGitHubNotice(sandbox: CloudSandboxView): { kind: 'ok' | 'warning'; text: string } | null {
+  const github = sandbox.github;
+  if (!github) return null;
+  if (github.state === 'signed-in') return { kind: 'ok', text: `GitHub: signed in as ${github.user}` };
+  if (github.state === 'invalid') return { kind: 'warning', text: '⚠ GitHub token invalid' };
+  return { kind: 'warning', text: `⚠ GitHub sign-in didn't finish: ${github.message}` };
+}
+
 export interface CloudHostSwitcherEntry {
   /** Replaces the profile's address under its name. */
   description: string;

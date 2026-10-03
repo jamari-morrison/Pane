@@ -5,7 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { createCloudSandboxes, type CloudBootstrap, type CloudProgress } from './api';
 import type { DaemonHealthResult } from './bootstrap/health';
-import type { ProvisionResult, RepairResult, StartupScriptStatus } from './bootstrap/provision';
+import type { GitHubAuthStatus, ProvisionResult, RepairResult, StartupScriptStatus } from './bootstrap/provision';
 import type { CloudProvider, CloudSandbox, CreateSandboxRequest, ListedBoatOrg } from './provider';
 import type { CloudHostProfile, PaneSource } from './store';
 import type { TailscaleApi, TailscaleDevice } from './tailscale';
@@ -126,6 +126,8 @@ interface BootstrapScript {
   startupStatus?: StartupScriptStatus | null;
   startupPushFails?: boolean;
   hostnameFails?: boolean;
+  /** What applying the GitHub token reports (default: signed in); a thrown Error when the sandbox fails. */
+  github?: GitHubAuthStatus | Error;
   startupRunFails?: boolean;
 }
 
@@ -140,6 +142,8 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
   const health = [...(script.health ?? [])];
   /** Startup script pushes and runs, and health checks, in call order. */
   const events: string[] = [];
+  /** The GitHub tokens applyGitHubToken received, in order (undefined: none saved). Kept out of `events`. */
+  const githubTokens: Array<string | undefined> = [];
   const bootstrap: CloudBootstrap = {
     async provision(_sandbox, options): Promise<ProvisionResult> {
       agentEnvs.push(options.agentEnv);
@@ -169,6 +173,13 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
       claudeModels.push(model);
       return { outcome: 'set', model };
     },
+    async applyGitHubToken(_sandbox, token) {
+      events.push('github');
+      githubTokens.push(token);
+      if (!token) return { state: 'none' };
+      if (script.github instanceof Error) throw script.github;
+      return script.github ?? { state: 'signed-in', user: 'octo-cat' };
+    },
     async setHostname(_sandbox, hostname) {
       events.push(`hostname ${hostname}`);
       if (script.hostnameFails) throw new Error('cloud bootstrap step "os-hostname" failed: hostname exited 1');
@@ -194,7 +205,7 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
       return { ok, elapsedMs: 1, version: ok ? '2.4.146' : undefined };
     },
   };
-  return { bootstrap, agentEnvs, paneSources, repairs, updates, claudeModels, events };
+  return { bootstrap, agentEnvs, paneSources, repairs, updates, claudeModels, events, githubTokens };
 }
 
 /** The user's Claude Code default model on "this machine"; tests change it. */
@@ -514,7 +525,7 @@ test('create pushes the startup script and runs it once, showing "Running your s
   const h = harness({}, {}, 'echo MARKER\n');
   await withCredentials(h);
   const info = await h.cloud.create({}, h.onProgress);
-  assert.deepEqual(h.boot.events.filter((event) => event !== 'health'), ['push "echo MARKER\\n"', 'run always']);
+  assert.deepEqual(h.boot.events.filter((event) => event !== 'health' && event !== 'github'), ['push "echo MARKER\\n"', 'run always']);
   assert.deepEqual(h.progress.find((update) => update.step === 'startup'), { step: 'startup', message: 'Running your startup script…' });
   assert.deepEqual(h.progress.map((update) => update.step).slice(-3), ['saved-host', 'startup', 'done']);
   assert.deepEqual(info.startupScript, STARTUP_OK);
@@ -524,14 +535,14 @@ test('create with an empty startup script installs the unit but runs nothing; wi
   const empty = harness({}, {}, '');
   await withCredentials(empty);
   const info = await empty.cloud.create({}, empty.onProgress);
-  assert.deepEqual(empty.boot.events.filter((event) => event !== 'health'), ['push ""']);
+  assert.deepEqual(empty.boot.events.filter((event) => event !== 'health' && event !== 'github'), ['push ""']);
   assert.ok(!empty.progress.some((update) => update.step === 'startup'));
   assert.equal(info.startupScript, undefined);
 
   const cli = harness();
   await withCredentials(cli);
   await cli.cloud.create();
-  assert.deepEqual(cli.boot.events.filter((event) => event !== 'health'), [], 'the CLI never replaces the script desktop Pane pushed');
+  assert.deepEqual(cli.boot.events.filter((event) => event !== 'health' && event !== 'github'), [], 'the CLI never replaces the script desktop Pane pushed');
 });
 
 test('a failing startup script never fails create: the sandbox is kept and the status reports the failure', async () => {
@@ -560,7 +571,7 @@ test('start pushes the current startup script before the health check, and a fai
   h.startup.script = 'echo v2\n';
   h.boot.events.length = 0;
   await h.cloud.start(hostname, h.onProgress);
-  assert.deepEqual(h.boot.events, [`hostname ${hostname}`, 'push "echo v2\\n"', 'health'], 'pushed before the health check, and not run (the boot ran it)');
+  assert.deepEqual(h.boot.events, [`hostname ${hostname}`, 'github', 'push "echo v2\\n"', 'health'], 'pushed before the health check, and not run (the boot ran it)');
 
   const script: BootstrapScript = {};
   const failing = harness(script, {}, 'echo v1\n');
@@ -580,7 +591,7 @@ test('a failed push never fails create either: the sandbox is kept', async () =>
   const info = await h.cloud.create({}, h.onProgress);
   assert.equal(info.state, 'running');
   assert.equal(info.startupScript, undefined);
-  assert.deepEqual(h.boot.events.filter((event) => event !== 'health'), ['push "echo v1\\n"'], 'nothing runs without the pushed script');
+  assert.deepEqual(h.boot.events.filter((event) => event !== 'health' && event !== 'github'), ['push "echo v1\\n"'], 'nothing runs without the pushed script');
   assert.ok(h.progress.some((update) => /^Your startup script could not run: cloud bootstrap step "startup-install" failed/u.test(update.message)));
 });
 
@@ -616,7 +627,7 @@ test('start and update give the OS its tailnet name again (a resume brings back 
   await h.cloud.stop(hostname);
   h.boot.events.length = 0;
   await h.cloud.start(hostname, h.onProgress);
-  assert.deepEqual(h.boot.events, [`hostname ${hostname}`, 'health']);
+  assert.deepEqual(h.boot.events, [`hostname ${hostname}`, 'github', 'health']);
 
   h.boot.events.length = 0;
   await h.cloud.update(hostname, { debUrl: 'https://example.com/pane_2.4.147_amd64.deb', sha256: 'c'.repeat(64) });
@@ -628,4 +639,56 @@ test('start and update give the OS its tailnet name again (a resume brings back 
   const progress: CloudProgress[] = [];
   assert.equal((await h.cloud.start(hostname, (update) => progress.push(update))).state, 'running');
   assert.ok(progress.some((update) => /^.+ kept the OS name it came back with: cloud bootstrap step "os-hostname" failed/u.test(update.message)));
+});
+
+const GITHUB_TOKEN = 'FAKE-GH-TOKEN-api-SECRET';
+
+test('setup saves the GitHub token like the Claude token: 0600, reported only as configured', async () => {
+  const h = harness();
+  await withCredentials(h);
+  assert.equal((await h.cloud.getCredentialsStatus()).github.configured, false);
+  assert.equal((await h.cloud.setup({ githubToken: GITHUB_TOKEN })).github.configured, true);
+  assert.equal((await h.cloud.setup({ githubToken: '  ' })).github.configured, true, 'blank keeps the saved token');
+  const file = path.join(h.dir, 'credentials.json');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).github.token, GITHUB_TOKEN);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.ok(!JSON.stringify(await h.cloud.getCredentialsStatus()).includes(GITHUB_TOKEN));
+});
+
+test('create and every start sign the sandbox in to GitHub with the saved token, and report how it went', async () => {
+  const h = harness();
+  await withCredentials(h);
+  await h.cloud.setup({ githubToken: GITHUB_TOKEN });
+  const created = await h.cloud.create({}, h.onProgress);
+  assert.deepEqual(created.github, { state: 'signed-in', user: 'octo-cat' });
+  await h.cloud.stop(created.hostname);
+  const started = await h.cloud.start(created.hostname, h.onProgress);
+  assert.deepEqual(started.github, { state: 'signed-in', user: 'octo-cat' });
+  assert.deepEqual(h.boot.githubTokens, [GITHUB_TOKEN, GITHUB_TOKEN], 'applied on create and on start');
+  const visible = JSON.stringify([created, started, h.progress, h.boot.events]);
+  assert.ok(!visible.includes(GITHUB_TOKEN), 'the token is in no result, progress or event');
+});
+
+test('no GitHub token is quiet, an invalid one is reported, and a failure never costs the sandbox', async () => {
+  const none = harness();
+  await withCredentials(none);
+  assert.deepEqual((await none.cloud.create()).github, { state: 'none' });
+  assert.deepEqual(none.boot.githubTokens, [undefined]);
+
+  const invalid = harness({ github: { state: 'invalid' } });
+  await withCredentials(invalid);
+  await invalid.cloud.setup({ githubToken: GITHUB_TOKEN });
+  const created = await invalid.cloud.create();
+  assert.equal(created.state, 'running');
+  assert.deepEqual(created.github, { state: 'invalid' });
+
+  const script: BootstrapScript = { github: new Error(`boat exec failed for ${GITHUB_TOKEN.slice(0, 4)}`) };
+  const broken = harness(script);
+  await withCredentials(broken);
+  await broken.cloud.setup({ githubToken: GITHUB_TOKEN });
+  const kept = await broken.cloud.create();
+  assert.equal(kept.state, 'running');
+  assert.deepEqual(kept.github, { state: 'error', message: "Couldn't apply the GitHub token on the sandbox." });
+  await broken.cloud.stop(kept.hostname);
+  assert.deepEqual((await broken.cloud.start(kept.hostname)).github, { state: 'error', message: "Couldn't apply the GitHub token on the sandbox." });
 });
