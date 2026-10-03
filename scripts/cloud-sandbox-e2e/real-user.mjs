@@ -536,6 +536,8 @@ function commandEnd(lines, command) {
   return -1;
 }
 async function runInTerminal(panelId, command, { timeoutMs = 60_000, done } = {}) {
+  // The read finds the typed command on the screen; a clear would wipe it (rehearsal D7 false FAIL).
+  if (/(^|[;&|]\s*)(clear|reset)\b/.test(command)) throw new Error(`kit bug: "${command}" clears the screen the check reads`);
   // Text left at the prompt (D3's unsubmitted sign-in line) is abandoned first with Ctrl+C, as a user would;
   // typing after it would run both.
   const pending = nonEmpty(await screenText(panelId).catch(() => '')).at(-1) ?? '';
@@ -822,7 +824,7 @@ async function d2() {
   const codexFlag = await waitForFlag('codex-signed-in', `In YOUR browser open the URL shown in the "${state.label} · Terminal" tab (auth.openai.com/codex/device), enter the code shown there, and approve. Wait until the terminal is back at its prompt.`);
   check('codex-flag', codexFlag, 'Red finished the Codex sign-in');
   await until(async () => promptLine.test(nonEmpty(await screenText(panelId)).at(-1) ?? ''), 120_000, 1000);
-  const { lines } = await runInTerminal(panelId, 'clear; gh auth status; codex login status', { timeoutMs: 60_000 });
+  const { lines } = await runInTerminal(panelId, 'gh auth status; codex login status', { timeoutMs: 60_000 });
   const text = lines.join('\n');
   check('gh-logged-in', /Logged in to github\.com/i.test(text), lines.filter((line) => /github\.com|account|Logged/i.test(line)).join(' | '));
   check('codex-logged-in', /Logged in using/i.test(text), lines.filter((line) => /Logged in|Not logged/i.test(line)).join(' | '));
@@ -1002,7 +1004,7 @@ async function d6() {
 
 // ---------------------------------------------------------------- D7: startup script status, Stop/Start, failing script
 async function startupStatus(panelId) {
-  const { lines } = await runInTerminal(panelId, `clear; cat ~/.local/state/runpane-cloud/startup-status.json; echo; grep -c ${MARKER} ${STARTUP_MARKER_LOG}`);
+  const { lines } = await runInTerminal(panelId, `cat ~/.local/state/runpane-cloud/startup-status.json; echo; grep -c ${MARKER} ${STARTUP_MARKER_LOG}`);
   const text = lines.join('\n');
   return { lines, exitCode: Number(text.match(/"exitCode"\s*:\s*(-?\d+)/)?.[1] ?? NaN), runs: Number(lines.filter((line) => /^\d+$/.test(line.trim())).at(-1) ?? NaN) };
 }
@@ -1146,7 +1148,7 @@ async function d8() {
   }
   // And confirmed from the Pane's own terminal, typed like a user.
   await ui.panelTab('Terminal').click();
-  const { lines } = await runInTerminal(state.pane.terminalPanelId, `clear; gh pr view ${answer} --json url,isDraft,headRefName,state`, { timeoutMs: 60_000 });
+  const { lines } = await runInTerminal(state.pane.terminalPanelId, `gh pr view ${answer} --json url,isDraft,headRefName,state`, { timeoutMs: 60_000 });
   const view = lines.join('');
   check('pr-is-draft-on-branch', /"isDraft":\s*true/.test(view) && view.includes(`"headRefName":"${prBranch}"`) && /"state":"OPEN"/.test(view), view);
   await shot('pr-view', { result: true, oracle: { lines } });
