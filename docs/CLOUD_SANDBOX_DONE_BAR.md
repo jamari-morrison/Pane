@@ -1,30 +1,22 @@
-# Real-user done bar (Red, 2026-10-03)
+# Real-user done bar (Red, 2026-10-03, revised 10:40 AM PT)
 
-Set by Red on 2026-10-03, 10:23 AM PT. This replaces done-when tests 1-5 (Oct 1 reduced scope) as the definition of done for Runpane Cloud.
+Set by Red on 2026-10-03 at 10:40 AM PT. It replaces both the 10:23 AM version and done-when tests 1-5 from the Oct 1 reduced scope.
 
-**E2E means the real user path through the app UI. API or script shortcuts never count.**
+**Sandboxes stay a generic remote (Parsa's simpler bar). Doppler injection and implicit GitHub auth stay out of scope.**
 
-Done when all of the following are done through the Windows desktop UI on SOBECK:
+Every step is done through the real Windows UI:
 
-1. The user creates a sandbox through the UI.
-2. The user connects their repo (montlakev2) through the UI. First find out how base Pane handles repos on a new remote: are they copied over from local, or must the user connect or clone them? Either way, connecting must work.
-3. The user opens each supported terminal type through its UI path: Claude Code, Codex and plain Terminal.
-4. The Terminal opens inside the sandbox. Claude Code and Codex start in the correct worktree on the sandbox.
-5. The agents can see the appropriate secrets and have the appropriate GitHub credentials.
-
-Note: secrets and GitHub credentials were out of the Oct 1 reduced scope (Doppler secrets, GitHub broker). Red is now bringing them back in. What "appropriate" means is proposed below and needs Red's confirmation.
+1. The Open project, New project and GitHub buttons on the main Pane page work on the active host, not the local machine.
+2. Clone from GitHub clones montlakev2 onto the sandbox. Implicit gh auth is not required: an unauthenticated user gets whatever error they would normally get. Agree with Red on what that error and UX actually are before building, in case something custom is needed.
+3. A new pane lands on the sandbox in its correct worktree. Claude Code, Codex and Terminal in that pane all work: they run on the sandbox, in the worktree, and their basic functions are confirmed.
+4. Doppler injection is skipped. The user runs `doppler login` themselves.
+5. Implicit GitHub login is skipped. The user signs the sandbox in to GitHub when they create it, like any remote. They probably need a terminal on the host before opening a repo pane. State whether Pane already supports this.
+6. To finish, an agent edits a file, commits, pushes a branch and opens a draft PR on montlakev2.
 
 ## Reporting rule
 
-Every done report must list each real-user UI step that was exercised, with evidence from the actual Windows UI (screenshots or a recording). A step without UI evidence counts as not done.
+Every done report lists each real-user UI step that was exercised, with evidence from the actual Windows UI (screenshots or a recording). A step without UI evidence counts as not done. The result is audited element by element by cs-auditor.
 
-## How it is proven
+## Superseded: 10:23 AM PT version
 
-- A test kit drives the real Electron UI on SOBECK, clicking the same buttons a user would (Playwright against the Electron window). It takes a screenshot at every step and records the run.
-- The test checks results inside the sandbox read-only, for example the terminal's `pwd`, `git worktree list`, the Claude and Codex process cwd, `gh auth status`, and the names of secrets that are present (never their values).
-- cs-auditor audits element by element against this bar.
-
-## Proposed meaning of "appropriate" (awaiting Red's confirmation)
-
-- Secrets: the Doppler config montlake/dev is injected into agent panels on the sandbox through the existing Doppler manifest, policy and stand-in. Only the names are checked; values are never printed.
-- GitHub: a repo-scoped credential for montlakev2 that can fetch, push branches and open PRs, issued through the existing GitHub App broker and the `gh` stand-in. No personal token is stored on the sandbox.
+The 10:23 AM version, which brought Doppler secrets and GitHub credentials back into scope, is superseded by this revision and no longer applies.
