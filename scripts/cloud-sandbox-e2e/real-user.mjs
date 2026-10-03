@@ -79,7 +79,7 @@ fs.mkdirSync(paneDir, { recursive: true, mode: 0o700 });
 const statePath = path.join(work, 'state.json');
 const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : {};
 const saveState = () => fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
-const results = { kit: 'real-user', mode, stamp, steps: [], checks: [], findings: [], regression: [], prUrl: null, video: [] };
+const results = { kit: 'real-user', mode, stamp, ...(env.RUN_NOTE ? { note: env.RUN_NOTE } : {}), steps: [], checks: [], findings: [], regression: [], prUrl: null, video: [] };
 const writeResults = () => fs.writeFileSync(path.join(out, 'results.json'), `${redact(JSON.stringify(results, null, 2))}\n`);
 const log = (...parts) => {
   const line = redact(`${new Date().toISOString()} ${parts.join(' ')}`);
@@ -329,7 +329,7 @@ async function shot(what, { oracle, result = false } = {}) {
 
 async function step(id, title, run, { applies = true, why = '' } = {}) {
   if (!wanted.has(id)) return;
-  current = { id, title, verdict: 'SKIP', startedAtVideo: videoAt(), shots: [], checks: [], error: null };
+  current = { id, title, verdict: 'SKIP', startedAtVideo: videoAt(), shots: [], checks: [], error: null, ...(env.RUN_NOTE ? { note: env.RUN_NOTE } : {}) };
   results.steps.push(current);
   log(`== ${id} ${title}`);
   if (!applies) {
@@ -759,6 +759,9 @@ async function d3() {
   if (!(await connectTo(state.label))) throw new Error('not connected');
   const dialog = await openCloneDialog();
   check('clone-host-chip', await visible(ui.hostChip(dialog, state.label, hostKind), 3000), `"On: ${state.label} (${hostKind})"`);
+  // The chip's icon: a cloud for a sandbox, a server for a self-hosted host (HostChip's data-host-icon).
+  const icon = await ui.hostChip(dialog, state.label, hostKind).locator('xpath=..').getAttribute('data-host-icon').catch(() => null);
+  check('host-chip-icon', icon === (cloud ? 'cloud' : 'server'), `icon ${icon}`);
   await dialog.getByLabel('Repository URL').fill(PRIVATE_REPO);
   const destination = await dialog.getByLabel('Destination').inputValue().catch(() => '');
   check('clone-destination-default-home', destination === '~', `destination "${destination}"`);
@@ -1013,7 +1016,13 @@ async function d7() {
   await openCloud();
   check('row-no-chip-after-ok-run', !(await visible(ui.startupChip(state.label), 1000)), 'no ⚠ chip');
   check('row-open-terminal-while-running', await visible(ui.rowOpenTerminal(state.label), 2000), 'Open terminal in the Running row');
-  await shot('row-running');
+  await shot('row-running', { result: true });
+  // The row's Open terminal opens the same host terminal (E2's second entry point).
+  await ui.rowOpenTerminal(state.label).click();
+  check('row-open-terminal-opens-it', await visible(ui.hostTerminalTab(state.label), 30_000), `tab "${state.label} · Terminal"`);
+  check('row-open-terminal-same-terminal', (await hostTerminalPanelId()) === panelId, 'the same host terminal panel');
+  await shot('row-open-terminal', { result: true });
+  await openCloud();
 
   await ui.rowAction('Stop', state.label).click();
   let sawOpenTerminalWhileNotRunning = false;
@@ -1041,6 +1050,10 @@ async function d7() {
   }, 600_000, 15_000) ?? await startupStatus(panelId);
   check('startup-ran-again-on-start', second.runs >= first.runs + 1 && second.exitCode === 0, `marker lines ${first.runs} → ${second.runs}, exitCode ${second.exitCode}`);
   await shot('startup-status-after-start', { result: true, oracle: second });
+  // D1's hostname once more, after a reboot (the first-boot identity unit may only apply it then).
+  const { lines: afterBoot } = await runInTerminal(panelId, 'hostname');
+  check('hostname-after-start', expected.hostname.test(afterBoot[0]?.trim() ?? ''), `${afterBoot[0]} (want ${expected.hostname})`);
+  await shot('hostname-after-start', { oracle: { lines: afterBoot } });
 
   // A failing script, set through the editor, surfaces in the row.
   await openCloud();
