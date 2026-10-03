@@ -832,7 +832,9 @@ async function d0() {
   await editor.waitFor({ timeout: 10_000 });
   // Whatever the user had there comes back at the end (D9); only its length and hash are recorded.
   original.startupScript = await editor.inputValue();
-  results.startupScriptBefore = { length: original.startupScript.length, sha256: crypto.createHash('sha256').update(original.startupScript).digest('hex').slice(0, 16) };
+  // The user's script exactly as the desktop keeps it (the FILE it pushes from on every Create/Start), saved next to it
+  // so it can be put back even if the UI restore can't run. Never printed, never in the evidence: length + sha256 only.
+  saveOriginalStartupScript();
   check('startup-warning-shown', await visible(ui.settingsDialog().getByText("Don't put secrets here; it's stored unencrypted."), 2000), 'the editor warns against secrets');
   await editor.fill(startupScript);
   await ui.saveStartupScript().click();
@@ -1798,19 +1800,64 @@ async function d9() {
   }
 }
 
+// The desktop reads <pane data dir>/cloud-sandboxes/startup.sh fresh on every push (cloudStartupScriptFile.read, no
+// in-memory copy), so that file is what any sandbox's next Start gets. A missing file is an empty script.
+const startupScriptFile = path.join(paneDir, 'cloud-sandboxes', 'startup.sh');
+const sha256Of = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+const readStartupFile = () => (fs.existsSync(startupScriptFile) ? fs.readFileSync(startupScriptFile) : Buffer.alloc(0));
+function saveOriginalStartupScript() {
+  const bytes = readStartupFile();
+  const sha = sha256Of(bytes);
+  original.startupFileSha = sha;
+  original.startupCopy = `${startupScriptFile}.e2e-original-${sha.slice(0, 12)}`;
+  fs.mkdirSync(path.dirname(startupScriptFile), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(original.startupCopy, bytes, { mode: 0o600 });
+  results.startupScriptBefore = { length: bytes.length, sha256: sha.slice(0, 12), savedCopy: path.basename(original.startupCopy) };
+  log(`startup script before the run: length ${bytes.length}, sha256 ${sha.slice(0, 12)} (a copy kept beside it, not in the evidence)`);
+}
+// Writes the saved copy back to the file only (no UI save, so nothing is pushed to any sandbox).
+function restoreStartupScriptLocally() {
+  if (!original.startupCopy || !fs.existsSync(original.startupCopy)) return false;
+  const bytes = fs.readFileSync(original.startupCopy);
+  if (sha256Of(bytes) !== original.startupFileSha) return false;
+  const temporary = `${startupScriptFile}.e2e-restore.tmp`;
+  fs.writeFileSync(temporary, bytes, { mode: 0o600 });
+  fs.renameSync(temporary, startupScriptFile);
+  return sha256Of(readStartupFile()) === original.startupFileSha;
+}
+
 async function restoreStartupScript() {
   if (!cloud || original.startupScript === undefined) return;
-  await openCloud();
-  if ((await otherActiveSandboxes()).length > 0) {
-    results.regression.push({ name: 'startup-script-restored', verdict: 'FAIL', detail: 'NOT restored: another sandbox is active and a save would run it there; restore it by hand once it is stopped' });
-    return;
+  let how = 'ui';
+  await openCloud().catch(() => undefined);
+  const others = await otherActiveSandboxes().catch(() => ['(unreadable)']);
+  // RESTORE_TEST_SKIP_UI=1 (tests only, never in Run 8): behave as if another sandbox were active.
+  if (others.length > 0 || env.RESTORE_TEST_SKIP_UI === '1') {
+    how = 'skipped';
+    log(`UI restore skipped: ${others.join(', ')} active (a save would run the script there)`);
+  } else {
+    await ui.startupScript().fill(original.startupScript).catch(() => undefined);
+    await ui.saveStartupScript().click().catch(() => undefined);
+    await visible(ui.settingsDialog().getByText('Saved', { exact: true }), 10_000);
+    await shot('startup-script-restored');
+    await closeSettings().catch(() => undefined);
   }
-  await ui.startupScript().fill(original.startupScript);
-  await ui.saveStartupScript().click();
-  const ok = await visible(ui.settingsDialog().getByText('Saved', { exact: true }), 10_000);
-  results.regression.push({ name: 'startup-script-restored', verdict: ok ? 'PASS' : 'FAIL', detail: `length ${original.startupScript.length}` });
-  await shot('startup-script-restored');
-  await closeSettings();
+  // The file decides, whatever the UI did: if it isn't the user's script again, put the saved copy back locally.
+  let after = sha256Of(readStartupFile());
+  if (after !== original.startupFileSha) {
+    how = how === 'ui' ? 'ui-mismatch+local' : 'local';
+    restoreStartupScriptLocally();
+    after = sha256Of(readStartupFile());
+  }
+  const restored = after === original.startupFileSha;
+  results.startupScriptRestored = restored;
+  results.startupScript = { before: original.startupFileSha.slice(0, 12), after: after.slice(0, 12), how };
+  // Anything but a clean UI restore FAILS the run, even when the local copy fixed it.
+  results.regression.push({ name: 'startup-script-restored', verdict: restored && how === 'ui' ? 'PASS' : 'FAIL',
+    detail: `startupScriptRestored: ${restored}; sha256 before ${original.startupFileSha.slice(0, 12)} after ${after.slice(0, 12)}; by ${how}` });
+  log(`startupScriptRestored: ${restored} (sha256 before ${original.startupFileSha.slice(0, 12)}, after ${after.slice(0, 12)}, by ${how})`);
+  if (restored) fs.rmSync(original.startupCopy, { force: true });
+  else log(`NOT RESTORED: before starting any sandbox again run kit\\restore-startup-script.ps1 (its saved copy ${path.basename(original.startupCopy)} stays)`);
 }
 
 // The local host is unchanged: Browse on This computer asks for the native dialog, with no in-app browser.
@@ -1906,7 +1953,14 @@ async function main() {
     stopBrowserSampler();
     if (state.label) await step('D9', 'Remove through the UI', d9);
     current = undefined;
-    await restoreStartupScript().catch((error) => log('restore startup script failed:', error.message));
+    await restoreStartupScript().catch((error) => {
+      log('restore startup script failed:', error.message);
+      if (original.startupCopy && results.startupScriptRestored === undefined) {
+        results.startupScriptRestored = restoreStartupScriptLocally();
+        results.regression.push({ name: 'startup-script-restored', verdict: 'FAIL', detail: `startupScriptRestored: ${results.startupScriptRestored}; by local (the UI restore threw)` });
+        log(`startupScriptRestored: ${results.startupScriptRestored} (local file restore after an error)`);
+      }
+    });
     await regressionLocalBrowse().catch((error) => results.regression.push({ name: 'local-browse-native', verdict: 'FAIL', detail: String(error.message) }));
     const hostsAfter = hostFingerprint();
     const same = JSON.stringify(hostsBefore) === JSON.stringify(hostsAfter);
@@ -1925,8 +1979,13 @@ async function main() {
   }
 }
 
-main().then(() => process.exit(results.steps.some((entry) => entry.verdict === 'FAIL') ? 1 : 0), (error) => {
+main().then(() => process.exit(results.steps.some((entry) => entry.verdict === 'FAIL') || results.regression.some((entry) => entry.verdict === 'FAIL') ? 1 : 0), async (error) => {
   log('FATAL', error instanceof Error ? error.stack ?? error.message : String(error));
+  // Even a crash leaves the user's startup script as it was (file only; nothing is pushed).
+  if (original.startupCopy && results.startupScriptRestored === undefined) {
+    results.startupScriptRestored = restoreStartupScriptLocally();
+    log(`startupScriptRestored: ${results.startupScriptRestored} (after a crash, local file restore)`);
+  }
   writeResults();
   process.exit(2);
 });
