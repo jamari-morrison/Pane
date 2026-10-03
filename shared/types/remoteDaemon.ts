@@ -607,6 +607,8 @@ function withCloudSandboxHostKind(profile: RemotePaneConnectionProfile): RemoteP
     hostTerminalEnv: profile.hostTerminalEnv ?? CLOUD_SANDBOX_HOST_TERMINAL_ENV,
     // Its GitHub token is set in Settings > Cloud sandboxes, not by signing in on the sandbox.
     githubSignIn: profile.githubSignIn ?? 'settings',
+    // Nobody can unlock a sandbox's keyring, so gh keeps its token in ~/.config/gh/hosts.yml.
+    ghInsecureStorage: profile.ghInsecureStorage ?? true,
   };
 }
 

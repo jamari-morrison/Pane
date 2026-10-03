@@ -122,6 +122,9 @@ function profileJson(profile: CloudHostProfile, id: string): JsonObject {
     hostTerminalEnv: [{ name: 'BROWSER', value: 'false' }, { name: 'GH_BROWSER', value: 'false' }],
     // Its GitHub token is set in the desktop's Settings > Cloud sandboxes; a clone that needs a sign-in points there.
     githubSignIn: 'settings',
+    // Its keyring can't be unlocked without someone at its screen, so gh keeps the token Pane
+    // signs it in with in ~/.config/gh/hosts.yml (owner-only) instead.
+    ghInsecureStorage: true,
   };
   if (profile.tunnel) {
     const tunnel: JsonObject = { kind: profile.tunnel.kind, selected: profile.tunnel.selected };
