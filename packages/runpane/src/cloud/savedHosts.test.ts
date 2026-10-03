@@ -40,6 +40,8 @@ test('upsert adds the profile and keeps everything else in config.json', async (
     { name: 'BROWSER', value: 'false' },
     { name: 'GH_BROWSER', value: 'false' },
   ]);
+  // Its GitHub token is set in the desktop's Settings, so a clone that needs a sign-in points there.
+  assert.equal(config.remoteDaemon.client.profiles[1].githubSignIn, 'settings');
   assert.equal(fs.statSync(path.join(dir, 'config.json')).mode & 0o777, 0o600);
 });
 

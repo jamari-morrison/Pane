@@ -605,6 +605,8 @@ function withCloudSandboxHostKind(profile: RemotePaneConnectionProfile): RemoteP
     ...profile,
     hostKind: profile.hostKind ?? { label: 'cloud sandbox', icon: 'cloud' },
     hostTerminalEnv: profile.hostTerminalEnv ?? CLOUD_SANDBOX_HOST_TERMINAL_ENV,
+    // Its GitHub token is set in Settings > Cloud sandboxes, not by signing in on the sandbox.
+    githubSignIn: profile.githubSignIn ?? 'settings',
   };
 }
 

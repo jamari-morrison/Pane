@@ -77,6 +77,15 @@ describe('saved host kind', () => {
     expect(config.client.profiles).toEqual([]);
   });
 
+  it('routes an older cloud sandbox\'s GitHub sign-in to Settings, and leaves other hosts alone', () => {
+    const cloud = { provider: 'boat' as const, sandboxId: 'bx_1', sessionId: 's1', nodeId: 'n1', hostname: 'rp-s1', version: 1 };
+    const config = normalizeRemoteDaemonConfig({
+      client: { profiles: [profile({ label: 'sandbox-1', cloud }), profile({ id: 'plain', label: 'devbox' })], activeProfileId: null, mode: 'local' },
+    });
+    expect(config.client.profiles[0].githubSignIn).toBe('settings');
+    expect(config.client.profiles[1].githubSignIn).toBeUndefined();
+  });
+
   it('keeps a host whose GitHub sign-in lives in Settings', () => {
     const config = normalizeRemoteDaemonConfig({
       client: { profiles: [profile({ githubSignIn: 'settings' }), profile({ id: 'plain' })], activeProfileId: null, mode: 'local' },
