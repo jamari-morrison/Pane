@@ -349,7 +349,7 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
     }
     const cloud: CloudMockState = {
       available: mockOptions.cloudSandboxes !== undefined,
-      credentials: clone(mockOptions.cloudSandboxes?.credentials ?? { boat: false, tailscale: false, claude: false }),
+      credentials: clone(mockOptions.cloudSandboxes?.credentials ?? { boat: false, tailscale: false, claude: false, github: false }),
       sandboxes: clone(mockOptions.cloudSandboxes?.sandboxes ?? []),
       credentialUpdates: [],
       failNext: new Map(),

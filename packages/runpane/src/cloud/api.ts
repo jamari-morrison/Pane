@@ -79,12 +79,15 @@ export interface CloudCredentialsInput {
   tailnet?: string;
   /** A Claude subscription token (`claude setup-token`) that agents in every new sandbox sign in with. */
   claudeToken?: string;
+  /** A GitHub personal access token that gh and git in every sandbox sign in with. */
+  githubToken?: string;
 }
 
 export interface CloudCredentialsStatus {
   boat: { configured: boolean; org?: BoatOrg };
   tailscale: { configured: boolean };
   claude: { configured: boolean };
+  github: { configured: boolean };
   /** boat and Tailscale are both configured: sandboxes can be created. */
   ready: boolean;
 }
@@ -299,6 +302,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       boat: { configured: Boolean(credentials.boat) },
       tailscale: { configured: Boolean(credentials.tailscale) },
       claude: { configured: Boolean(credentials.claude) },
+      github: { configured: Boolean(credentials.github) },
       ready: Boolean(credentials.boat && credentials.tailscale),
     };
     if (settings.boatOrg) status.boat.org = settings.boatOrg;
@@ -387,6 +391,8 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       }
       const claudeToken = nonEmpty(input.claudeToken);
       if (claudeToken) credentials.claude = { oauthToken: claudeToken };
+      const githubToken = nonEmpty(input.githubToken);
+      if (githubToken) credentials.github = { token: githubToken };
 
       const wantedOrg = nonEmpty(input.boatOrg);
       if (wantedOrg && !credentials.boat) throw new Error('Choosing a boat wallet needs the boat API key.');

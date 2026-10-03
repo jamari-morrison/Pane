@@ -86,7 +86,7 @@ type HostAction = Exclude<CloudSandboxAction, 'create'>;
 
 const CREATE_ID_PREFIX = 'create:';
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
-const NO_CREDENTIALS: CloudCredentialStatus = { boat: false, tailscale: false, claude: false };
+const NO_CREDENTIALS: CloudCredentialStatus = { boat: false, tailscale: false, claude: false, github: false };
 
 export class CloudSandboxManager {
   private libraryPromise: Promise<CloudSandboxLibrary> | null = null;
@@ -184,6 +184,7 @@ export class CloudSandboxManager {
       tailscaleClientId: update.tailscale?.clientId,
       tailscaleClientSecret: update.tailscale?.clientSecret,
       claudeToken: update.claudeToken,
+      githubToken: update.githubToken,
     }));
     return this.emit();
   }
@@ -538,6 +539,7 @@ function toCredentialStatus(status: CloudCredentialsStatus): CloudCredentialStat
     boat: status.boat.configured,
     tailscale: status.tailscale.configured,
     claude: status.claude.configured,
+    github: status.github.configured,
     boatOrg: status.boat.org?.name,
   };
 }

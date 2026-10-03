@@ -42,7 +42,7 @@ function createStartupScriptFile(initial = '') {
   };
 }
 
-const CONFIGURED = { boat: { configured: true, org: { id: 'team_test', name: 'test' } }, tailscale: { configured: true }, claude: { configured: false }, ready: true };
+const CONFIGURED = { boat: { configured: true, org: { id: 'team_test', name: 'test' } }, tailscale: { configured: true }, claude: { configured: false }, github: { configured: false }, ready: true };
 
 function createLibrary(overrides: Partial<CloudSandboxLibrary> = {}): CloudSandboxLibrary {
   return {
@@ -105,7 +105,7 @@ describe('CloudSandboxManager', () => {
     const snapshot = await manager.refresh();
 
     expect(snapshot.available).toBe(true);
-    expect(snapshot.credentials).toEqual({ boat: true, tailscale: true, claude: false, boatOrg: 'test' });
+    expect(snapshot.credentials).toEqual({ boat: true, tailscale: true, claude: false, github: false, boatOrg: 'test' });
     expect(snapshot.sandboxes.map((row) => [row.id, row.state, row.startedAt])).toEqual([
       ['rp-alpha', 'running', '2026-10-01T10:00:00.000Z'],
       ['rp-beta', 'stopped', undefined],
@@ -296,7 +296,7 @@ describe('CloudSandboxManager library mapping', () => {
       tailscaleClientSecret: 'synthetic-secret',
       claudeToken: undefined,
     });
-    expect(snapshot.credentials).toEqual({ boat: true, tailscale: true, claude: true, boatOrg: 'test' });
+    expect(snapshot.credentials).toEqual({ boat: true, tailscale: true, claude: true, github: false, boatOrg: 'test' });
     expect(JSON.stringify(snapshot)).not.toContain('synthetic');
   });
 

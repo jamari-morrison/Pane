@@ -21,6 +21,8 @@ export interface CloudCredentialStatus {
   boat: boolean;
   tailscale: boolean;
   claude: boolean;
+  /** A GitHub token is saved; every sandbox signs gh and git in with it on create and start. */
+  github: boolean;
   /** The boat wallet new sandboxes bill, by name (not a secret). */
   boatOrg?: string;
 }
@@ -32,7 +34,19 @@ export interface CloudCredentialsUpdate {
   boatOrg?: string;
   tailscale?: { clientId: string; clientSecret: string };
   claudeToken?: string;
+  /** A GitHub personal access token for gh and git on every sandbox. Blank keeps the saved one. */
+  githubToken?: string;
 }
+
+/**
+ * How a sandbox's GitHub sign-in with the saved token went, as read after its last create or start. `invalid`: GitHub
+ * refused the token. `error`: it could not be applied or checked (gh missing, the sandbox or network failing); the
+ * message is fixed text, never gh's output.
+ */
+export type CloudSandboxGitHubView =
+  | { state: 'signed-in'; user: string }
+  | { state: 'invalid' }
+  | { state: 'error'; message: string };
 
 export interface CloudSandboxCreateRequest {
   name: string;
@@ -84,6 +98,8 @@ export interface CloudSandboxView {
   failedAction?: CloudSandboxAction;
   /** The startup script's latest run; absent when none ran since this app created or started the sandbox. */
   startupScript?: CloudSandboxStartupScriptView;
+  /** GitHub sign-in with the saved token; absent when no token is saved or it wasn't applied since this app started. */
+  github?: CloudSandboxGitHubView;
 }
 
 export interface CloudSandboxesSnapshot {
@@ -98,7 +114,7 @@ export interface CloudSandboxesSnapshot {
 export function createDefaultCloudSandboxesSnapshot(): CloudSandboxesSnapshot {
   return {
     available: false,
-    credentials: { boat: false, tailscale: false, claude: false },
+    credentials: { boat: false, tailscale: false, claude: false, github: false },
     sandboxes: [],
   };
 }

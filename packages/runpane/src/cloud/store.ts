@@ -20,6 +20,8 @@ export interface CloudCredentials {
   tailscale?: { clientId: string; clientSecret: string; tailnet?: string };
   /** A Claude subscription token (`claude setup-token`) that agents in every sandbox sign in with. */
   claude?: { oauthToken: string };
+  /** A GitHub personal access token that gh and git in every sandbox sign in with (on create and start). */
+  github?: { token: string };
 }
 
 export type PaneSource =

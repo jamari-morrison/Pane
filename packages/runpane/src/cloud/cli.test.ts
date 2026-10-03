@@ -17,9 +17,9 @@ function harness(env: NodeJS.ProcessEnv = {}) {
   const cloud: CloudSandboxes = {
     async setup(input) {
       setups.push(input);
-      return { boat: { configured: true }, tailscale: { configured: true }, claude: { configured: false }, ready: true };
+      return { boat: { configured: true }, tailscale: { configured: true }, claude: { configured: false }, github: { configured: false }, ready: true };
     },
-    getCredentialsStatus: async () => ({ boat: { configured: false }, tailscale: { configured: false }, claude: { configured: false }, ready: false }),
+    getCredentialsStatus: async () => ({ boat: { configured: false }, tailscale: { configured: false }, claude: { configured: false }, github: { configured: false }, ready: false }),
     async create(options = {}, onProgress) {
       creates.push(options);
       onProgress?.({ step: 'sandbox', message: 'Creating a default sandbox rp-abc12345...' });

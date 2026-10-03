@@ -14,7 +14,7 @@ type CloudMockControls = {
   setCloudStartupLog(id: string, log: string): void;
 };
 
-const ALL_CREDENTIALS = { boat: true, tailscale: true, claude: true };
+const ALL_CREDENTIALS = { boat: true, tailscale: true, claude: true, github: true };
 const HOUR_MS = 60 * 60 * 1000;
 
 function cloudProfile(name: string): RemotePaneConnectionProfile {
@@ -54,7 +54,7 @@ async function openRemoteAccess(page: Page) {
 }
 
 test('cloud credentials are saved once and only shown as set or not set', async ({ page }, testInfo) => {
-  await installElectronApiMock(page, { cloudSandboxes: { credentials: { boat: false, tailscale: false, claude: false }, sandboxes: [] } });
+  await installElectronApiMock(page, { cloudSandboxes: { credentials: { boat: false, tailscale: false, claude: false, github: false }, sandboxes: [] } });
   await openRemoteAccess(page);
 
   const status = page.getByRole('definition');

@@ -962,8 +962,9 @@ function parseCloudCredentialsUpdate(input: PaneCommandValue): CloudCredentialsU
       clientSecret: boundary.nonEmptyString,
     })),
     claudeToken: boundary.optional(boundary.nonEmptyString),
+    githubToken: boundary.optional(boundary.nonEmptyString),
   }));
-  if (!decoded.boatApiKey && !decoded.boatOrg && !decoded.tailscale && !decoded.claudeToken) {
+  if (!decoded.boatApiKey && !decoded.boatOrg && !decoded.tailscale && !decoded.claudeToken && !decoded.githubToken) {
     throw new Error('Enter at least one credential to save');
   }
   return decoded;

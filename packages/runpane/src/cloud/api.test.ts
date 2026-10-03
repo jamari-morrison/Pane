@@ -254,12 +254,12 @@ function readTree(dir: string): string {
 test('setup saves the credentials 0600, resolves the wallet, and its status never carries a secret', async () => {
   const h = harness();
   assert.deepEqual(await h.cloud.getCredentialsStatus(), {
-    boat: { configured: false }, tailscale: { configured: false }, claude: { configured: false }, ready: false,
+    boat: { configured: false }, tailscale: { configured: false }, claude: { configured: false }, github: { configured: false }, ready: false,
   });
   await withCredentials(h);
   const status = await h.cloud.getCredentialsStatus();
   assert.deepEqual(status, {
-    boat: { configured: true, org: { id: 'team_test', name: 'test' } }, tailscale: { configured: true }, claude: { configured: true }, ready: true,
+    boat: { configured: true, org: { id: 'team_test', name: 'test' } }, tailscale: { configured: true }, claude: { configured: true }, github: { configured: false }, ready: true,
   });
   assert.equal(fs.statSync(path.join(h.dir, 'credentials.json')).mode & 0o777, 0o600);
   assert.equal(fs.statSync(h.dir).mode & 0o777, 0o700);
