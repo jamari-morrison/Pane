@@ -45,6 +45,9 @@ interface SettingsProps {
   onSendFeedback: () => void;
 }
 
+/** How long an opened Settings link waits for its row to render. */
+const SETTING_FOCUS_WAIT_MS = 5000;
+
 export function Settings({ isOpen, onClose, category, onCategoryChange, openRequest, onOpenRequestHandled, onShowKeyboardShortcuts, onUpdate, onSendFeedback }: SettingsProps) {
   const persistence = useSettingsPersistence(isOpen);
   const dirtyForms = useDirtySettingsForms();
@@ -102,14 +105,39 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
     if (isOpen && category === 'usage' && codexUsageDetection === 'unavailable') onCategoryChange('general');
   }, [category, codexUsageDetection, isOpen, onCategoryChange]);
 
+  // Some rows render only once their data loads (the cloud sandbox rows wait for the cloud
+  // library), so wait for the row to appear rather than looking for it once.
+  const stopFocusWaitRef = useRef<(() => void) | null>(null);
   const focusSetting = useCallback((setting?: SettingsSettingId) => {
+    stopFocusWaitRef.current?.();
+    stopFocusWaitRef.current = null;
     if (!setting) return;
-    window.setTimeout(() => {
+    const focus = () => {
       const element = document.getElementById(settingDomId(setting));
-      element?.scrollIntoView({ block: 'center' });
-      element?.focus({ preventScroll: true });
-    }, 100);
+      if (!element) return false;
+      element.scrollIntoView({ block: 'center' });
+      element.focus({ preventScroll: true });
+      return true;
+    };
+    const observer = new MutationObserver(() => {
+      if (focus()) stop();
+    });
+    const timeout = window.setTimeout(() => stop(), SETTING_FOCUS_WAIT_MS);
+    const stop = () => {
+      observer.disconnect();
+      window.clearTimeout(timeout);
+      if (stopFocusWaitRef.current === stop) stopFocusWaitRef.current = null;
+    };
+    stopFocusWaitRef.current = stop;
+    // The category switch renders first; a row already there is focused on the next frame.
+    window.requestAnimationFrame(() => {
+      if (stopFocusWaitRef.current !== stop) return;
+      if (focus()) stop();
+      else observer.observe(document.body, { childList: true, subtree: true });
+    });
   }, []);
+
+  useEffect(() => () => stopFocusWaitRef.current?.(), []);
 
   useEffect(() => {
     if (!isOpen || !openRequest || handledRequestRef.current === openRequest.nonce) return;
