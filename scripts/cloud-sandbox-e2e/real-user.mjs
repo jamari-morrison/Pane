@@ -301,6 +301,7 @@ async function launch({ video = true } = {}) {
     return pages.find((entry) => /index\.html/.test(entry.url()));
   }, 120_000, 2000) ?? app.windows()[0];
   if (video) videoStartedAt = Date.now();
+  if (video) startCodeWatch();
   page.on('console', (message) => fs.appendFileSync(path.join(out, 'app-console.log'), `${redact(`[${message.type()}] ${message.text()}`)}\n`));
   // The UI is up when the sidebar's Home button renders; a load event can be missed or late.
   if (!(await visible(page.getByRole('button', { name: 'Home', exact: true }), 120_000))) {
@@ -329,6 +330,7 @@ async function launch({ video = true } = {}) {
   await dismissFirstRun();
 }
 async function closeApp() {
+  stopCodeWatch();
   const video = page?.video();
   await app?.close().catch(() => undefined);
   app = undefined;
@@ -388,9 +390,11 @@ async function shot(what, { oracle, result = false } = {}) {
   const entry0 = {};
   const base = path.join(out, `${String(++shotIndex).padStart(3, '0')}-${current?.id ?? 'setup'}-${what}`);
   // While a device code is on screen the terminal is masked in the shot (Red's rule: never show it in evidence).
-  const mask = codeOnScreenSince === null ? [] : await codeMask();
+  // On EVERY shot, whatever the kit believes: the code element by its frozen names and any text shaped like a device
+  // code (backstop); while a code is known to be on screen also the kit's own mask (the terminal, or the code element).
+  const mask = [ui.deviceCode(), page.getByText(DEVICE_CODE_SHAPE), ...(codeOnScreenSince === null ? [] : await codeMask())];
   await page.screenshot({ path: `${base}.png`, mask }).catch(() => undefined);
-  if (mask.length > 0) entry0.masked = 'the device code (on screen at this shot)';
+  if (codeOnScreenSince !== null || (await ui.deviceCode().count().catch(() => 0)) > 0) entry0.masked = 'the device code (on screen at this shot)';
   const aria = redact(await page.locator('body').ariaSnapshot().catch(() => ''));
   fs.writeFileSync(`${base}.aria.yml`, aria);
   const entry = { ...entry0, file: path.basename(`${base}.png`), videoAt: videoAt(), result };
@@ -404,6 +408,31 @@ async function shot(what, { oracle, result = false } = {}) {
   if (shapes.length > 0) check(`no-token-on-screen:${what}`, false, `token shapes in the window or its oracle: ${shapes.join(', ')}`);
   current?.shots.push(entry);
   log('SHOT', entry.file, `video ${entry.videoAt ?? '-'} s`);
+}
+
+// Proves a mask in the SAVED image: the shot is loaded into the page and the pixels under `locator` must all be
+// Playwright's mask colour (#FF00FF). No image library needed.
+async function maskedInShot(file, locator) {
+  const box = await locator.boundingBox().catch(() => null);
+  if (!box) return false;
+  const dataUrl = `data:image/png;base64,${fs.readFileSync(path.join(out, file)).toString('base64')}`;
+  return page.evaluate(async ({ dataUrl, box }) => {
+    const image = new Image();
+    image.src = dataUrl;
+    await image.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext('2d');
+    context.drawImage(image, 0, 0);
+    // Screenshots are in device pixels; the box is in CSS pixels.
+    const scale = image.width / window.innerWidth;
+    const pixels = context.getImageData(Math.floor(box.x * scale) + 1, Math.floor(box.y * scale) + 1, Math.max(1, Math.floor(box.width * scale) - 2), Math.max(1, Math.floor(box.height * scale) - 2)).data;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index] < 240 || pixels[index + 1] > 15 || pixels[index + 2] < 240) return false;
+    }
+    return true;
+  }, { dataUrl, box }).catch(() => false);
 }
 
 async function step(id, title, run, { applies = true, why = '' } = {}) {
@@ -427,6 +456,9 @@ async function step(id, title, run, { applies = true, why = '' } = {}) {
     // A dialog or menu left open by the failure would hide the rest of the window from the next step.
     for (let round = 0; round < 3; round++) await closeMenus();
   }
+  // Whatever the step left open (a dialog, a menu, Settings) is closed, so the next step starts from the window.
+  await closeSettings().catch(() => undefined);
+  for (let round = 0; round < 2; round++) await closeMenus().catch(() => undefined);
   const failed = current.error || current.checks.some((entry) => entry.verdict === 'FAIL');
   // A7: no screenshot of the result in the window, no MET.
   const shown = current.shots.some((entry) => entry.result);
@@ -467,11 +499,12 @@ const ui = {
   signInAlert: (scope, label) => scope.getByRole('alert').filter({ hasText: `${label} isn't signed in to GitHub.` }),
   signInOpenTerminal: (label) => page.getByRole('button', { name: `Open terminal on ${label} to sign in`, exact: true }),
   tryAgain: () => page.getByRole('button', { name: 'Try again', exact: true }),
-  // E3 v2 in-app sign-in (names proposed in the cs-e2e E3 v2 contract; adapt here to the builder's AGREE).
+  // E3 v2 in-app sign-in: the product's FROZEN names (cs-clone-auth, iface-real.md "E3 v2 UI: FROZEN names").
   signInGitHub: () => page.getByRole('button', { name: 'Sign in to GitHub', exact: true }),
-  deviceCode: () => page.getByLabel('GitHub device code', { exact: true }),
-  copyCode: () => page.getByRole('button', { name: 'Copy code', exact: true }),
-  openDeviceLink: () => page.getByRole('link', { name: 'Open github.com/login/device' }).or(page.getByRole('button', { name: 'Open github.com/login/device' })).first(),
+  deviceCode: () => page.getByLabel('One-time code', { exact: true }).or(page.locator('[data-secret="github-device-code"]')),
+  deviceCodePanel: () => ui.deviceCode().first().locator('xpath=ancestor::div[2]'),
+  copyCode: () => ui.deviceCodePanel().getByRole('button', { name: /^(Copy|Copied)$/ }),
+  openDeviceLink: () => ui.deviceCodePanel().getByRole('button', { name: 'Open github.com/login/device', exact: true }),
   signedInAs: () => page.getByText(/^Signed in to GitHub as /),
   settingsButton: () => page.getByRole('button', { name: 'Settings', exact: true }).first(),
   settingsDialog: () => page.getByRole('dialog', { name: /Pane Settings/ }),
@@ -1051,10 +1084,11 @@ async function d3SignIn(dialog) {
   // Exactly one code element: mask it; anything else: mask the whole dialog.
   codeShown('ghDeviceCode', code, async () => ((await ui.deviceCode().count().catch(() => 0)) === 1 ? [ui.deviceCode()] : [dialog]));
   check('in-app-device-code', Boolean(code), code ? 'a device code is shown in Pane (masked in all evidence)' : 'no code');
-  check('in-app-copy-and-link', await visible(ui.copyCode(), 2000) && await visible(ui.openDeviceLink(), 2000), '"Copy code" + "Open github.com/login/device"');
+  check('in-app-copy-and-link', await visible(ui.copyCode(), 2000) && await visible(ui.openDeviceLink(), 2000), '"Copy" + "Open github.com/login/device" next to the code');
   check('in-app-waiting', await visible(page.getByText('Waiting for you to approve on GitHub…'), 5000), '"Waiting for you to approve on GitHub…"');
   check('no-terminal-for-sign-in', !(await visible(ui.hostTerminalTab(state.label), 500)) || (await dialog.isVisible()), 'the sign-in stays in the dialog');
   await shot('in-app-code', { result: true });
+  check('code-masked-in-shot', await maskedInShot(current.shots.at(-1).file, ui.deviceCode().first()), 'every pixel where the code sits in the saved shot is the mask colour');
   if (mode === 'live' && state.cloud?.sandboxId) {
     const { stdout } = await boatExec(state.cloud.sandboxId, boatOrg, `ps -eo comm= | grep -ciE '${BROWSER_PATTERN}' || true`).catch(() => ({ stdout: '' }));
     const during = Number(String(stdout).trim().split('\n').at(-1));
@@ -1062,7 +1096,7 @@ async function d3SignIn(dialog) {
   }
   if (!relay && env.D3V2_COMPLETE !== '1') {
     // Rehearsal: no real sign-in. Cancel, and the code is gone.
-    await page.getByRole('button', { name: 'Cancel', exact: true }).last().click();
+    await ui.deviceCodePanel().getByRole('button', { name: 'Cancel', exact: true }).click();
     check('in-app-cancel', await ui.deviceCode().first().waitFor({ state: 'hidden', timeout: 10_000 }).then(() => true, () => false), 'the code is gone after Cancel');
     codeHidden();
     stopBrowserSampler();
@@ -1149,6 +1183,31 @@ async function browserProcesses(panelId, what) {
   return { count, boat, lines };
 }
 const SIGN_IN_MARK = '/tmp/e2e-before-sign-in';
+const DEVICE_CODE_SHAPE = /\b[A-Z0-9]{4,5}-[A-Z0-9]{4,5}\b/;
+// Backstop for the video: once a second, any device-code-shaped text in the window (or the code element) opens an
+// interval that is cut out of the recording, whether or not the kit's own steps flagged it.
+let codeWatch = null;
+function startCodeWatch() {
+  let since = null;
+  const timer = setInterval(async () => {
+    const shown = await page.evaluate((source) => {
+      const shape = new RegExp(source);
+      return shape.test(document.body?.innerText ?? '') || Boolean(document.querySelector('[data-secret="github-device-code"], [aria-label="One-time code"]'));
+    }, DEVICE_CODE_SHAPE.source).catch(() => false);
+    if (shown && since === null) since = videoAt();
+    if (!shown && since !== null) {
+      codeIntervals.push([since, videoAt()]);
+      since = null;
+    }
+  }, 1000);
+  codeWatch = { timer, open: () => since };
+}
+function stopCodeWatch() {
+  if (!codeWatch) return;
+  clearInterval(codeWatch.timer);
+  if (codeWatch.open() !== null) codeIntervals.push([codeWatch.open(), null]);
+  codeWatch = null;
+}
 // K1 (live only): boat exec counts browser processes on the sandbox every 2 s over a sign-in window, counts only.
 let sampler = null;
 function startBrowserSampler(what) {
@@ -1702,6 +1761,12 @@ async function liveCredentials() {
 
 // ---------------------------------------------------------------- main
 async function main() {
+  // E6-c (auditor): the dummy GitHub token's exact value is in the exact-value scan from the start of every run that
+  // may type it, reported only by name, length and sha256[:12].
+  if (!relay) {
+    addSecret('dummyGithubToken', DUMMY_GITHUB_TOKEN);
+    log(`exact-value scan includes dummyGithubToken (len ${DUMMY_GITHUB_TOKEN.length}, sha256 ${crypto.createHash('sha256').update(DUMMY_GITHUB_TOKEN).digest('hex').slice(0, 12)})`);
+  }
   fs.mkdirSync(flagDir, { recursive: true });
   for (const name of ['gh-signed-in', 'codex-signed-in']) fs.rmSync(path.join(flagDir, name), { force: true });
   log(`mode ${mode}, steps ${[...wanted].join(',')}, flags in ${flagDir}`);
