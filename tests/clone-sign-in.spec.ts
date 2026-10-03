@@ -1,12 +1,14 @@
 import { expect, test, type Page } from '@playwright/test';
 import { installElectronApiMock } from './electronApiMock';
+import type { GitHubDeviceLoginState } from '../shared/types/githubDeviceLogin';
 
 // BROWSER=false: gh must print its device code, never open a browser on the host.
 const SIGN_IN_COMMAND = 'BROWSER=false gh auth login --web --git-protocol https && gh auth setup-git';
+const POWERSHELL_SIGN_IN_COMMAND = "$env:BROWSER='false'; gh auth login --web --git-protocol https; if ($?) { gh auth setup-git }";
 const DEVICE_HINT = 'Open github.com/login/device on your computer, enter the code, and wait here.';
-const REPO_URL = 'https://github.com/jamari-morrison/montlakev2';
+const REPO_URL = 'https://github.com/octocat/Hello-World';
 const LOCAL_HTTPS_MESSAGE = 'Authentication failed — check your credentials or use an SSH URL.';
-const SSH_URL = 'git@github.com:jamari-morrison/montlakev2.git';
+const SSH_URL = 'git@github.com:octocat/Hello-World.git';
 const SSH_HINT = 'This is an SSH URL; after signing in, use the HTTPS URL instead.';
 // What the daemon says on this computer for each SSH sign-in failure.
 const SSH_FAILURES = [
@@ -36,6 +38,70 @@ async function failClonesWithAuth(page: Page, error: string, authProtocol: 'http
       },
     });
   }, { error, authProtocol });
+}
+
+/** The host's daemon reports this `process.platform` from fs:browse-directories. */
+async function hostReportsPlatform(page: Page, platform: 'linux' | 'win32') {
+  await page.evaluate((platform) => {
+    const invoke = window.electronAPI.invoke;
+    window.electronAPI.invoke = (channel: string, ...args: unknown[]) => (channel === 'fs:browse-directories'
+      ? Promise.resolve({ success: true, data: { path: '/home/user', parent: '/home', home: '/home/user', platform, entries: [] } })
+      : invoke(channel, ...args));
+  }, platform);
+}
+
+interface FakeDeviceLogin {
+  state: GitHubDeviceLoginState;
+  starts: unknown[];
+  statusCalls: number;
+  cancels: number;
+}
+
+declare global {
+  interface Window {
+    __deviceLogin?: FakeDeviceLogin;
+  }
+}
+
+/** A fake gh device sign-in on the host's daemon; the test moves it from state to state. */
+async function fakeDeviceLogin(page: Page) {
+  await page.evaluate(() => {
+    const login: FakeDeviceLogin = { state: { status: 'idle' }, starts: [], statusCalls: 0, cancels: 0 };
+    window.__deviceLogin = login;
+    const invoke = window.electronAPI.invoke;
+    const ok = () => Promise.resolve({ success: true, data: structuredClone(login.state) });
+    window.electronAPI.invoke = (channel: string, ...args: unknown[]) => {
+      if (channel === 'github:device-login-start') {
+        login.starts.push(args[0]);
+        login.state = { status: 'starting', loginId: 'login-1' };
+        return ok();
+      }
+      if (channel === 'github:device-login-status') {
+        login.statusCalls += 1;
+        return ok();
+      }
+      if (channel === 'github:device-login-cancel') {
+        login.cancels += 1;
+        login.state = { status: 'cancelled', loginId: 'login-1' };
+        return ok();
+      }
+      return invoke(channel, ...args);
+    };
+  });
+}
+
+async function setDeviceLogin(page: Page, state: FakeDeviceLogin['state']) {
+  await page.evaluate((state) => {
+    if (window.__deviceLogin) window.__deviceLogin.state = state;
+  }, state);
+}
+
+async function openedExternalUrls(page: Page) {
+  return page.evaluate(() => {
+    // SAFETY: installElectronApiMock defines __paneTestElectronMock with getOpenedExternalUrls.
+    const mock = (window as typeof window & { __paneTestElectronMock: { getOpenedExternalUrls: () => string[] } }).__paneTestElectronMock;
+    return mock.getOpenedExternalUrls();
+  });
 }
 
 async function hostTerminalOpenRequests(page: Page) {
@@ -85,6 +151,7 @@ test('a remote host that is not signed in offers its terminal, prefilled, and a 
   await installElectronApiMock(page);
   await page.goto('/');
   await connectRemote(page);
+  await hostReportsPlatform(page, 'linux');
   await failClonesWithAuth(page, LOCAL_HTTPS_MESSAGE);
 
   const dialog = await fillAndClone(page, '~');
@@ -92,7 +159,7 @@ test('a remote host that is not signed in offers its terminal, prefilled, and a 
   await expect(notice).toContainText("devbox isn't signed in to GitHub.");
   await expect(notice).toContainText('Sign in on devbox, then try again.');
   await expect(notice.getByText(DEVICE_HINT, { exact: true })).toBeVisible();
-  await expect(notice.getByRole('button')).toHaveText(['Open terminal on devbox to sign in', 'Try again']);
+  await expect(notice.getByRole('button')).toHaveText(['Sign in to GitHub', 'Open terminal on devbox to sign in', 'Try again']);
   await expect(dialog.getByText(LOCAL_HTTPS_MESSAGE)).toHaveCount(0);
   await expect(dialog.getByText(SSH_HINT)).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath('remote-sign-in-notice.png') });
@@ -176,7 +243,7 @@ for (const [failure, message] of SSH_FAILURES) {
     await expect(notice).toContainText('Sign in on devbox, then try again.');
     await expect(notice.getByText(DEVICE_HINT, { exact: true })).toBeVisible();
     await expect(notice.getByText(SSH_HINT, { exact: true })).toBeVisible();
-    await expect(notice.getByRole('button')).toHaveText(['Open terminal on devbox to sign in', 'Try again']);
+    await expect(notice.getByRole('button')).toHaveText(['Sign in to GitHub', 'Open terminal on devbox to sign in', 'Try again']);
     await page.screenshot({ path: testInfo.outputPath(`remote-ssh-${failure.replaceAll(' ', '-')}.png`) });
 
     // The URL stays as typed: Try again clones the same SSH URL to the same place.
@@ -198,3 +265,149 @@ for (const [failure, message] of SSH_FAILURES) {
     await expect(dialog.getByText(/isn't signed in to GitHub/)).toHaveCount(0);
   });
 }
+
+test('a Windows host gets the PowerShell sign-in line, still not submitted', async ({ page }) => {
+  await installElectronApiMock(page);
+  await page.goto('/');
+  await connectRemote(page);
+  await hostReportsPlatform(page, 'win32');
+  await failClonesWithAuth(page, LOCAL_HTTPS_MESSAGE);
+
+  const dialog = await fillAndClone(page, '~');
+  await dialog.getByRole('button', { name: 'Open terminal on devbox to sign in' }).click();
+  await expect(page.getByRole('tab', { name: 'devbox · Terminal' })).toBeVisible();
+  expect(await hostTerminalOpenRequests(page)).toEqual([{ input: POWERSHELL_SIGN_IN_COMMAND }]);
+  expect(POWERSHELL_SIGN_IN_COMMAND).not.toMatch(/[\r\n]/);
+});
+
+test('signing in from Pane shows the code, opens GitHub on this computer and then tries the clone again', async ({ page }, testInfo) => {
+  await installElectronApiMock(page);
+  await page.goto('/');
+  await connectRemote(page);
+  await fakeDeviceLogin(page);
+  await failClonesWithAuth(page, LOCAL_HTTPS_MESSAGE);
+
+  const dialog = await fillAndClone(page, '~');
+  const notice = dialog.getByRole('alert');
+  await notice.getByRole('button', { name: 'Sign in to GitHub' }).click();
+  await expect.poll(() => page.evaluate(() => window.__deviceLogin?.starts)).toEqual([{ hostLabel: 'devbox', ghInsecureStorage: false }]);
+
+  // A malicious or odd verification URL from the host is never opened: only GitHub's device page is.
+  await setDeviceLogin(page, { status: 'waiting', loginId: 'login-1', code: 'fake-0000', verificationUrl: 'https://example.com/phish' });
+  await expect(notice.getByLabel('One-time code')).toHaveText('fake-0000');
+  await expect(notice.getByText('Waiting for you to approve on GitHub…')).toBeVisible();
+  await expect(notice.getByRole('button', { name: 'Sign in to GitHub' })).toHaveCount(0);
+  await notice.getByRole('button', { name: 'Open github.com/login/device' }).click();
+  await expect.poll(() => openedExternalUrls(page)).toEqual(['https://github.com/login/device']);
+  await page.screenshot({ path: testInfo.outputPath('device-login-waiting.png') });
+
+  // A state from another sign-in is ignored.
+  await setDeviceLogin(page, { status: 'signed-in', loginId: 'someone-else', user: 'mallory' });
+  await page.waitForTimeout(1500);
+  await expect(notice.getByText('Waiting for you to approve on GitHub…')).toBeVisible();
+
+  await setDeviceLogin(page, { status: 'approved', loginId: 'login-1' });
+  await expect(notice.getByText('Approved on GitHub. Finishing sign-in on devbox…')).toBeVisible();
+  await setDeviceLogin(page, { status: 'signed-in', loginId: 'login-1', user: 'octocat' });
+  const signedIn = dialog.getByRole('alert');
+  await expect(signedIn.getByText('Signed in to GitHub as octocat')).toBeVisible();
+  await expect(signedIn.getByText(/isn't signed in/)).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath('device-login-signed-in.png') });
+
+  // Polling stops once gh is done.
+  const calls = await page.evaluate(() => window.__deviceLogin?.statusCalls);
+  await page.waitForTimeout(2500);
+  expect(await page.evaluate(() => window.__deviceLogin?.statusCalls)).toBe(calls);
+
+  await signedIn.getByRole('button', { name: 'Try again' }).click();
+  await expect.poll(() => page.evaluate(() => window.__cloneProbe?.cloneCalls)).toEqual([[REPO_URL, '~'], [REPO_URL, '~']]);
+});
+
+test('Cancel stops the sign-in on the host and offers it again', async ({ page }) => {
+  await installElectronApiMock(page);
+  await page.goto('/');
+  await connectRemote(page);
+  await fakeDeviceLogin(page);
+  await failClonesWithAuth(page, LOCAL_HTTPS_MESSAGE);
+
+  const notice = (await fillAndClone(page, '~')).getByRole('alert');
+  await notice.getByRole('button', { name: 'Sign in to GitHub' }).click();
+  await setDeviceLogin(page, { status: 'waiting', loginId: 'login-1', code: 'fake-0000', verificationUrl: 'https://github.com/login/device' });
+  await notice.getByRole('button', { name: 'Cancel' }).click();
+  expect(await page.evaluate(() => window.__deviceLogin?.cancels)).toBe(1);
+  await expect(notice.getByLabel('One-time code')).toHaveCount(0);
+  await expect(notice.getByRole('button', { name: 'Sign in to GitHub' })).toBeVisible();
+});
+
+test('a failed sign-in says why and keeps the terminal fallback', async ({ page }, testInfo) => {
+  await installElectronApiMock(page);
+  await page.goto('/');
+  await connectRemote(page);
+  await hostReportsPlatform(page, 'linux');
+  await fakeDeviceLogin(page);
+  await failClonesWithAuth(page, LOCAL_HTTPS_MESSAGE);
+
+  const notice = (await fillAndClone(page, '~')).getByRole('alert');
+  await notice.getByRole('button', { name: 'Sign in to GitHub' }).click();
+  await setDeviceLogin(page, { status: 'failed', loginId: 'login-1', reason: 'gh-missing', exitCode: null, message: "GitHub CLI (gh) isn't installed on devbox." });
+  await expect(notice.getByText("GitHub CLI (gh) isn't installed on devbox.")).toBeVisible();
+  await expect(notice.getByRole('button', { name: 'Sign in to GitHub' })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('device-login-failed.png') });
+  await notice.getByRole('button', { name: 'Open terminal on devbox to sign in' }).click();
+  expect(await hostTerminalOpenRequests(page)).toEqual([{ input: SIGN_IN_COMMAND }]);
+});
+
+test('a host saved to keep gh\'s token in a file asks the daemon for that', async ({ page }) => {
+  await installElectronApiMock(page);
+  await page.goto('/');
+  await page.evaluate(async () => {
+    await window.electronAPI.remoteDaemon.upsertConnectionProfile({
+      id: 'sandbox-1', label: 'sandbox-1', baseUrl: 'https://sandbox-1.example.ts.net',
+      token: 'synthetic', transport: 'http+sse', ghInsecureStorage: true,
+    });
+    await window.electronAPI.remoteDaemon.updateClientState({ mode: 'remote', activeProfileId: 'sandbox-1' });
+  });
+  await expect(page.getByRole('button', { name: /Agents run on sandbox-1/ })).toBeVisible();
+  await fakeDeviceLogin(page);
+  await failClonesWithAuth(page, LOCAL_HTTPS_MESSAGE);
+
+  const notice = (await fillAndClone(page, '~')).getByRole('alert');
+  await notice.getByRole('button', { name: 'Sign in to GitHub' }).click();
+  await expect.poll(() => page.evaluate(() => window.__deviceLogin?.starts)).toEqual([{ hostLabel: 'sandbox-1', ghInsecureStorage: true }]);
+});
+
+test('a host whose GitHub sign-in lives in Settings sends the user there', async ({ page }, testInfo) => {
+  await installElectronApiMock(page);
+  await page.goto('/');
+  await page.evaluate(async () => {
+    await window.electronAPI.remoteDaemon.upsertConnectionProfile({
+      id: 'sandbox-1', label: 'sandbox-1', baseUrl: 'https://sandbox-1.example.ts.net',
+      token: 'synthetic', transport: 'http+sse', githubSignIn: 'settings',
+    });
+    await window.electronAPI.remoteDaemon.updateClientState({ mode: 'remote', activeProfileId: 'sandbox-1' });
+  });
+  await expect(page.getByRole('button', { name: /Agents run on sandbox-1/ })).toBeVisible();
+  await fakeDeviceLogin(page);
+  await failClonesWithAuth(page, LOCAL_HTTPS_MESSAGE);
+  const dialog = await fillAndClone(page, '~');
+  const notice = dialog.getByRole('alert');
+  await expect(notice.getByText('Add a GitHub token in Settings', { exact: true })).toBeVisible();
+  await expect(notice.getByRole('button')).toHaveText(['Open Settings', 'Try again']);
+  await expect(notice.getByText(/isn't signed in to GitHub/)).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath('settings-route-notice.png') });
+
+  await notice.getByRole('button', { name: 'Open Settings' }).click();
+  await expect(page.getByRole('heading', { name: 'Remote Access' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Clone from GitHub' })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath('settings-route-opened-settings.png') });
+  expect(await page.evaluate(() => window.__deviceLogin?.starts)).toEqual([]);
+  expect(await hostTerminalOpenRequests(page)).toEqual([]);
+
+  // The URL and destination wait for the user to come back.
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('heading', { name: 'Remote Access' })).toHaveCount(0);
+  await goHome(page);
+  await page.getByRole('button', { name: 'GitHub', exact: true }).click();
+  await expect(page.getByRole('dialog').getByRole('textbox', { name: 'Repository URL' })).toHaveValue(REPO_URL);
+  await expect(page.getByRole('dialog').getByRole('textbox', { name: 'Destination' })).toHaveValue('~');
+});

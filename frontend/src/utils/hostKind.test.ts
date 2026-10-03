@@ -62,6 +62,36 @@ describe('saved host kind', () => {
     expect(config.client.profiles[1].hostTerminalEnv).toBeUndefined();
   });
 
+  it('keeps whether gh on the host stores its token in a file', () => {
+    const config = normalizeRemoteDaemonConfig({
+      client: { profiles: [profile({ ghInsecureStorage: true }), profile({ id: 'plain' })], activeProfileId: null, mode: 'local' },
+    });
+    expect(config.client.profiles[0].ghInsecureStorage).toBe(true);
+    expect(config.client.profiles[1].ghInsecureStorage).toBeUndefined();
+  });
+
+  it('drops a profile whose token storage setting is not a boolean', () => {
+    const config = normalizeRemoteDaemonConfig({
+      client: { profiles: [{ ...profile(), ghInsecureStorage: 'yes' }], activeProfileId: null, mode: 'local' },
+    });
+    expect(config.client.profiles).toEqual([]);
+  });
+
+  it('keeps a host whose GitHub sign-in lives in Settings', () => {
+    const config = normalizeRemoteDaemonConfig({
+      client: { profiles: [profile({ githubSignIn: 'settings' }), profile({ id: 'plain' })], activeProfileId: null, mode: 'local' },
+    });
+    expect(config.client.profiles[0].githubSignIn).toBe('settings');
+    expect(config.client.profiles[1].githubSignIn).toBeUndefined();
+  });
+
+  it('drops a profile with an unknown GitHub sign-in route', () => {
+    const config = normalizeRemoteDaemonConfig({
+      client: { profiles: [{ ...profile(), githubSignIn: 'terminal' }], activeProfileId: null, mode: 'local' },
+    });
+    expect(config.client.profiles).toEqual([]);
+  });
+
   it('drops a profile whose host kind has an unknown icon', () => {
     const config = normalizeRemoteDaemonConfig({
       client: { profiles: [{ ...profile(), hostKind: { label: 'x', icon: 'rocket' } }], activeProfileId: null, mode: 'local' },

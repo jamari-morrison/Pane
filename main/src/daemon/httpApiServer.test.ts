@@ -12,6 +12,8 @@ import { boundary, decodeBoundary, type JsonValue } from '../../../shared/valida
 
 import { PaneRemoteHttpApiServer } from './httpApiServer';
 import { registerHostFsHandlers } from '../ipc/hostFs';
+import { registerGitHubLoginHandlers } from '../ipc/githubLogin';
+import { createGhSpawner, GitHubDeviceLogin } from '../services/githubDeviceLogin';
 
 interface ConfigManagerStub {
   getConfig(): { deepgramApiKey?: string; remoteDaemon?: RemoteDaemonConfig };
@@ -318,7 +320,7 @@ describe('PaneRemoteHttpApiServer', () => {
 
   it('serves the host folder browser to remote clients from the host filesystem', async () => {
     const hostHome = await mkdtemp(path.join(os.tmpdir(), 'pane-remote-host-'));
-    await mkdir(path.join(hostHome, 'montlakev2', '.git'), { recursive: true });
+    await mkdir(path.join(hostHome, 'my-repo', '.git'), { recursive: true });
     vi.spyOn(os, 'homedir').mockReturnValue(hostHome);
     const registry = new PaneCommandRegistry();
     // SAFETY: Registry binding only needs IpcMain.handle.
@@ -330,7 +332,7 @@ describe('PaneRemoteHttpApiServer', () => {
     try {
       await expect(requestJson(server, 'POST', '/invoke', {
         channel: 'fs:browse-directories',
-        args: [{ hostLabel: 'testina' }],
+        args: [{ hostLabel: 'sandbox-1' }],
       }, 'secret-token')).resolves.toEqual({
         statusCode: 200,
         body: {
@@ -342,7 +344,7 @@ describe('PaneRemoteHttpApiServer', () => {
               parent: path.dirname(hostHome),
               home: hostHome,
               platform: process.platform,
-              entries: [{ name: 'montlakev2', path: path.join(hostHome, 'montlakev2'), isGitRepo: true, isHidden: false }],
+              entries: [{ name: 'my-repo', path: path.join(hostHome, 'my-repo'), isGitRepo: true, isHidden: false }],
             },
           },
         },
@@ -350,7 +352,7 @@ describe('PaneRemoteHttpApiServer', () => {
       if (process.platform !== 'win32') {
         await expect(requestJson(server, 'POST', '/invoke', {
           channel: 'fs:browse-directories',
-          args: [{ path: 'C:\\runpane-temp-home', hostLabel: 'testina' }],
+          args: [{ path: 'C:\\Users\\me', hostLabel: 'sandbox-1' }],
         }, 'secret-token')).resolves.toMatchObject({
           statusCode: 200,
           body: { ok: true, result: { success: false, code: 'WINDOWS_PATH_ON_POSIX_HOST' } },
@@ -359,6 +361,37 @@ describe('PaneRemoteHttpApiServer', () => {
     } finally {
       vi.mocked(os.homedir).mockRestore();
       await rm(hostHome, { recursive: true, force: true });
+    }
+  });
+
+  it('serves GitHub device sign-in to remote clients without logging the code', async () => {
+    const code = 'TEST-0000';
+    const fakeGh = `process.stderr.write('! First copy your one-time code: ${code}\\nOpen this URL to continue in your web browser: https://github.com/login/device\\n'); setInterval(() => {}, 1000);`;
+    const login = new GitHubDeviceLogin({ spawnGh: createGhSpawner(process.env, process.execPath, ['-e', fakeGh]) });
+    const registry = new PaneCommandRegistry();
+    // SAFETY: Registry binding only needs IpcMain.handle.
+    registerGitHubLoginHandlers({ handle: vi.fn() } as IpcMain, registry, login);
+    const consoleCalls = (['log', 'info', 'warn', 'error', 'debug'] as const).map(level => vi.spyOn(console, level));
+    const server = new PaneRemoteHttpApiServer(registry, createConfigManagerStub(createEnabledRemoteConfig()));
+    activeServers.push(server);
+    await server.start();
+
+    try {
+      await expect(requestJson(server, 'POST', '/invoke', { channel: 'github:device-login-start', args: [{}] }, 'secret-token'))
+        .resolves.toMatchObject({ statusCode: 200, body: { ok: true, result: { success: true, data: { status: 'starting' } } } });
+      await vi.waitFor(() => expect(login.getState().status).toBe('waiting'), { timeout: 5000, interval: 10 });
+      await expect(requestJson(server, 'POST', '/invoke', { channel: 'github:device-login-status', args: [] }, 'secret-token'))
+        .resolves.toMatchObject({
+          statusCode: 200,
+          body: { ok: true, result: { data: { status: 'waiting', code, verificationUrl: 'https://github.com/login/device' } } },
+        });
+      await expect(requestJson(server, 'POST', '/invoke', { channel: 'github:device-login-cancel', args: [] }, 'secret-token'))
+        .resolves.toMatchObject({ body: { ok: true, result: { data: { status: 'cancelled' } } } });
+
+      const logged = consoleCalls.flatMap(spy => spy.mock.calls).map(call => JSON.stringify(call));
+      expect(logged.filter(line => line.includes(code))).toEqual([]);
+    } finally {
+      login.cancel();
     }
   });
 
