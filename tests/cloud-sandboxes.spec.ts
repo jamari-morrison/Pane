@@ -513,3 +513,18 @@ test('the local start script is saved on this computer only, and its failures sh
   await expect(page.getByRole('listitem', { name: 'Cloud sandbox delta' })).not.toContainText('Local start script');
   await page.screenshot({ path: testInfo.outputPath('cloud-local-start-script.png'), fullPage: true });
 });
+
+test('the local start script link focuses that field, and the warning goes away once both are set', async ({ page }, testInfo) => {
+  await installElectronApiMock(page, { cloudSandboxes: { credentials: { ...ALL_CREDENTIALS, github: true }, sandboxes: [] } });
+  await openRemoteAccess(page);
+
+  const warning = page.getByRole('status', { name: 'Setup a new sandbox would miss' });
+  await warning.getByRole('button', { name: 'Set a local start script' }).click();
+  await expect(page.locator('#settings-remote-cloud-local-start-script')).toBeFocused();
+
+  await page.getByRole('textbox', { name: 'Local start script' }).fill('echo E2E_VAR=1');
+  await page.getByRole('button', { name: 'Save Local Start Script' }).click();
+  await expect(warning).toHaveCount(0);
+  await page.getByRole('button', { name: 'Add Cloud Sandbox' }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('setup-warning-gone.png') });
+});
