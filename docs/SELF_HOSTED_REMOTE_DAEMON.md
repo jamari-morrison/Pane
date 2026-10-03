@@ -268,7 +268,9 @@ host to desktop Pane's saved remote hosts in `~/.pane/config.json` (`$RUNPANE_CL
 plain HTTP (below). It:
 
 1. creates the sandbox in the chosen wallet;
-2. resets its identity: a fresh machine-id and SSH host keys, and no credentials or Pane state left from the image;
+2. resets its identity: a fresh machine-id and SSH host keys, and no credentials or Pane state left from the image.
+   The OS takes the sandbox's tailnet name (`rp-…`), so `hostname` and shell prompts show it. A resumed sandbox comes
+   back with boat's machine name, so Start, Update and a boot unit (`rp-hostname.service`) give the name back;
 3. closes inbound tailnet traffic except Tailscale Serve (an nftables table, reloaded at every boot);
 4. joins your tailnet with a single-use, pre-authorized auth key tagged `tag:rp-session`, with Tailscale SSH off;
 5. prepares agents: Claude Code signs in with the saved token, its first-run, folder-trust and

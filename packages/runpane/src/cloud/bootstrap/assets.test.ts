@@ -14,7 +14,7 @@ const names = Object.keys(cloudBootstrapAssets) as CloudBootstrapAssetName[];
 const PROVISION_STEPS = [
   'identity', 'tailscale-install', 'tailnet-identity', 'check', 'firewall', 'tailscale-up', 'ts-guard', 'agent-env', 'agent-prompts', 'claude-model', 'install-pane',
   'pairing-read', 'health-local', 'cert-status', 'serve-http', 'serve-guard', 'tailscale-reset', 'serve-restore', 'update-pane',
-  'startup-install', 'startup-run', 'startup-status', 'startup-log',
+  'startup-install', 'startup-run', 'startup-status', 'startup-log', 'os-hostname',
 ];
 
 /** Runs one rp-bootstrap.sh step in a temp HOME; `functions` replace commands (exported bash functions win over PATH). */
@@ -489,4 +489,119 @@ test('startup-log returns the last 200 lines of the latest run', () => {
   assert.equal(lines.length, 200);
   assert.equal(lines[0], 'line 51');
   assert.equal(lines[199], 'line 250');
+});
+
+/** An /etc for rp-hostname: the pool machine's name, as a boat resume leaves it. */
+function poolEtc(name = 'box-node-5f6eafd7ef7aafb8') {
+  const etc = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-etc-'));
+  fs.mkdirSync(path.join(etc, 'rp-cloud'));
+  fs.writeFileSync(path.join(etc, 'hostname'), `${name}\n`);
+  fs.writeFileSync(path.join(etc, 'hosts'), `127.0.0.1 localhost\n127.0.1.1 ${name}\n`);
+  return etc;
+}
+
+/** Runs rp-hostname.sh against `etc`, with `hostname` faked: it reads and records the kernel name in `<etc>/kernel`. */
+function runHostname(etc: string) {
+  const runner = path.join(etc, 'rp-hostname.sh');
+  fs.writeFileSync(runner, cloudBootstrapAssets['rp-hostname.sh']);
+  const kernel = path.join(etc, 'kernel');
+  if (!fs.existsSync(kernel)) fs.writeFileSync(kernel, fs.readFileSync(path.join(etc, 'hostname'), 'utf8').trim());
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    RP_HOSTNAME_ETC: etc,
+    'BASH_FUNC_hostname%%': `() { if [ $# -eq 0 ]; then cat '${kernel}'; else echo "set $1" >> '${etc}/calls'; printf '%s' "$1" > '${kernel}'; fi; }`,
+  };
+  const result = childProcess.spawnSync('bash', [runner], { encoding: 'utf8', env });
+  return { ...result, calls: fs.existsSync(path.join(etc, 'calls')) ? fs.readFileSync(path.join(etc, 'calls'), 'utf8') : '' };
+}
+
+test('rp-hostname gives the OS the sandbox\'s rp- name, resolvable in /etc/hosts, and is idempotent', () => {
+  const etc = poolEtc();
+  fs.writeFileSync(path.join(etc, 'rp-cloud/hostname'), 'rp-pp69t1zz\n');
+  const first = runHostname(etc);
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+  assert.equal(fs.readFileSync(path.join(etc, 'kernel'), 'utf8'), 'rp-pp69t1zz');
+  assert.equal(fs.readFileSync(path.join(etc, 'hostname'), 'utf8'), 'rp-pp69t1zz\n');
+  // Appended, so sudo resolves the new name; the pool machine's line is left alone.
+  assert.equal(fs.readFileSync(path.join(etc, 'hosts'), 'utf8'), '127.0.0.1 localhost\n127.0.1.1 box-node-5f6eafd7ef7aafb8\n127.0.1.1\trp-pp69t1zz\n');
+  assert.equal(first.calls, 'set rp-pp69t1zz\n');
+
+  const hosts = fs.readFileSync(path.join(etc, 'hosts'), 'utf8');
+  const again = runHostname(etc);
+  assert.equal(again.status, 0);
+  assert.equal(again.calls, 'set rp-pp69t1zz\n', 'a second run sets nothing');
+  assert.equal(fs.readFileSync(path.join(etc, 'hosts'), 'utf8'), hosts, 'and adds no second hosts line');
+
+  // A resume put the pool machine's name back.
+  fs.writeFileSync(path.join(etc, 'kernel'), 'box-node-aaaa');
+  fs.writeFileSync(path.join(etc, 'hostname'), 'box-node-aaaa\n');
+  assert.equal(runHostname(etc).status, 0);
+  assert.equal(fs.readFileSync(path.join(etc, 'kernel'), 'utf8'), 'rp-pp69t1zz');
+  assert.equal(fs.readFileSync(path.join(etc, 'hostname'), 'utf8'), 'rp-pp69t1zz\n');
+});
+
+test('rp-hostname leaves the machine alone without a valid name', () => {
+  for (const content of [null, '', 'Not A Name\n', 'rp-x; rm -rf /\n']) {
+    const etc = poolEtc();
+    if (content !== null) fs.writeFileSync(path.join(etc, 'rp-cloud/hostname'), content);
+    const result = runHostname(etc);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(result.calls, '');
+    assert.equal(fs.readFileSync(path.join(etc, 'hostname'), 'utf8'), 'box-node-5f6eafd7ef7aafb8\n');
+  }
+});
+
+test('os-hostname records the name, installs the boot unit and applies it now, never touching Tailscale', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  const etc = poolEtc();
+  const kernel = path.join(etc, 'kernel');
+  fs.writeFileSync(kernel, 'box-node-5f6eafd7ef7aafb8');
+  const calls = path.join(home, 'calls');
+  const env = new Map([
+    ['sudo', '() { "$@"; }'],
+    ['systemctl', `() { echo "systemctl $*" >> '${calls}'; }`],
+    ['tailscale', `() { echo "tailscale $*" >> '${calls}'; }`],
+    ['hostname', `() { if [ $# -eq 0 ]; then cat '${kernel}'; else echo "hostname $1" >> '${calls}'; printf '%s' "$1" > '${kernel}'; fi; }`],
+  ]);
+  fs.mkdirSync(path.join(home, 'root/etc/systemd/system'), { recursive: true });
+  fs.mkdirSync(path.join(home, 'root/usr/local/sbin'), { recursive: true });
+  for (const name of names) fs.writeFileSync(path.join(home, name), cloudBootstrapAssets[name]);
+  const processEnv: NodeJS.ProcessEnv = {
+    ...process.env, HOME: home, RP_STATE: path.join(home, 'state'), XDG_RUNTIME_DIR: home, RP_ETC: etc,
+    RP_UNIT_DIR: path.join(home, 'root/etc/systemd/system'), RP_SBIN: path.join(home, 'root/usr/local/sbin'),
+  };
+  for (const [name, body] of env) processEnv[`BASH_FUNC_${name}%%`] = body;
+  const run = (args: string[]) => childProcess.spawnSync('bash', [path.join(home, 'rp-bootstrap.sh'), 'os-hostname', ...args], { encoding: 'utf8', env: processEnv });
+
+  const result = run(['rp-pp69t1zz']);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^RP_RESULT \{"ok":true,"hostname":"rp-pp69t1zz"\}$/mu);
+  assert.equal(fs.readFileSync(path.join(etc, 'rp-cloud/hostname'), 'utf8'), 'rp-pp69t1zz\n');
+  assert.equal(fs.readFileSync(path.join(etc, 'hostname'), 'utf8'), 'rp-pp69t1zz\n');
+  assert.match(fs.readFileSync(path.join(etc, 'hosts'), 'utf8'), /^127\.0\.1\.1\trp-pp69t1zz$/mu);
+  assert.equal(fs.readFileSync(path.join(home, 'root/usr/local/sbin/rp-hostname'), 'utf8'), cloudBootstrapAssets['rp-hostname.sh']);
+  const unit = fs.readFileSync(path.join(home, 'root/etc/systemd/system/rp-hostname.service'), 'utf8');
+  assert.equal(unit, [
+    '[Unit]',
+    'Description=Pane cloud sandbox: give the OS the sandbox\'s tailnet name after a resume reset it',
+    'Wants=network-online.target',
+    'After=network-online.target cloud-config.service',
+    '',
+    '[Service]',
+    'Type=oneshot',
+    `ExecStart=${home}/root/usr/local/sbin/rp-hostname`,
+    '',
+    '[Install]',
+    'WantedBy=multi-user.target',
+    '',
+  ].join('\n'));
+  assert.match(unit, /^Type=oneshot$/mu);
+  assert.match(unit, /^WantedBy=multi-user\.target$/mu, 'runs on every boot');
+  const log = fs.readFileSync(calls, 'utf8');
+  assert.match(log, /systemctl daemon-reload\nsystemctl enable rp-hostname\.service\nhostname rp-pp69t1zz\n/u);
+  assert.doesNotMatch(log, /tailscale/u, 'the tailnet device keeps the name it joined with');
+
+  assert.equal(run(['rp-pp69t1zz']).status, 0);
+  assert.equal(fs.readFileSync(calls, 'utf8').match(/^hostname /gmu)?.length, 1, 'idempotent');
+  assert.match(run(['Bad Name']).stdout, /"error": "os-hostname: not a hostname"/u);
 });

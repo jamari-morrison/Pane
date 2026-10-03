@@ -7,6 +7,7 @@ import {
   pushStartupScript,
   readStartupLog,
   repairSandboxTailnet,
+  setSandboxHostname,
   runStartupScript,
   updateSandboxPane,
   type ClaudeModelOutcome,
@@ -189,6 +190,7 @@ export interface CloudBootstrap {
   repair: typeof repairSandboxTailnet;
   update: typeof updateSandboxPane;
   applyClaudeModel: typeof applyClaudeModel;
+  setHostname: typeof setSandboxHostname;
   pushStartupScript: typeof pushStartupScript;
   runStartupScript: typeof runStartupScript;
   readStartupLog: typeof readStartupLog;
@@ -222,6 +224,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
     repair: repairSandboxTailnet,
     update: updateSandboxPane,
     applyClaudeModel,
+    setHostname: setSandboxHostname,
     pushStartupScript,
     runStartupScript,
     readStartupLog,
@@ -270,6 +273,15 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
     } catch (error) {
       report(`${failure}: ${error instanceof Error ? error.message : String(error)}`);
       return false;
+    }
+  }
+
+  /** A resume lands on a pool machine with its own OS name; give it the sandbox's again. Reported, never thrown. */
+  async function setHostnameBestEffort(handle: SandboxHandle, record: CloudHostRecord, report: (message: string) => void): Promise<void> {
+    try {
+      await bootstrap.setHostname(handle, record.profile.cloud.hostname);
+    } catch (error) {
+      report(`${record.profile.label} kept the OS name it came back with: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -558,6 +570,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
         await store.writeHost(record);
       }
       sandbox = await waitForSandbox(provider, sandboxId, 'running', SANDBOX_READY_TIMEOUT_MS);
+      await setHostnameBestEffort(provider.handle(sandboxId), record, (message) => onProgress?.({ step: 'starting', message }));
       // The boot already ran the script the sandbox had; an edit since then runs through runStartupScript.
       await pushStartupScriptBestEffort(provider.handle(sandboxId), (message) => onProgress?.({ step: 'starting', message }),
         'Your startup script could not be updated');
@@ -598,6 +611,8 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       if (version) record.meta.daemonVersion = version;
       record.meta.paneSource = { kind: 'deb-url', url: pane.debUrl, sha256: pane.sha256 };
       await store.writeHost(record);
+      // Older sandboxes get the OS name (and its boot unit) here.
+      await setHostnameBestEffort(provider.handle(sandboxId), record, (message) => onProgress?.({ step: 'update', message }));
       const claudeModel = await syncClaudeModelBestEffort(provider.handle(sandboxId), record.profile.label, 'update', onProgress);
       onProgress?.({ step: 'done', message: `${record.profile.label} runs Pane ${version ?? '(version unknown)'}.` });
       return sandboxInfo(record, sandbox, health, claudeModel);
@@ -703,6 +718,7 @@ function describeStep(step: ProvisionStepName): string {
   switch (step) {
     case 'upload-scripts': return 'Uploading the setup scripts...';
     case 'identity': return 'Resetting the sandbox identity...';
+    case 'os-hostname': return 'Naming the sandbox after its tailnet name...';
     case 'tailscale-install': return 'Installing Tailscale...';
     case 'check': return 'Checking the sandbox identity...';
     case 'firewall': return 'Closing inbound tailnet ports...';

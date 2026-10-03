@@ -10,7 +10,7 @@ import { waitForDaemonHealth, type DaemonHealthResult } from './health';
 
 /** boat's login user, which runs bootstrap and the Pane daemon. */
 const DEFAULT_SANDBOX_HOME = '/home/user';
-const UPLOADED_ASSETS: CloudBootstrapAssetName[] = ['rp-bootstrap.sh', 'identity-scrub.sh', 'identity-check.sh', 'rp-user-startup.sh'];
+const UPLOADED_ASSETS: CloudBootstrapAssetName[] = ['rp-bootstrap.sh', 'identity-scrub.sh', 'identity-check.sh', 'rp-user-startup.sh', 'rp-hostname.sh'];
 const HOSTNAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const PAIRING_PATTERN = /pane-remote:\/\/\S+/gu;
 /** auto transport: HTTPS gets this long before the certificate is checked. */
@@ -30,6 +30,7 @@ interface TailnetIdentity {
 export type ProvisionStepName =
   | 'upload-scripts'
   | 'identity'
+  | 'os-hostname'
   | 'tailscale-install'
   | 'check'
   | 'firewall'
@@ -143,6 +144,7 @@ export async function provisionSandbox(sandbox: SandboxHandle, options: Provisio
   await step('upload-scripts', () => uploadScripts(sandbox, home));
   await step('identity', () => runner.run('identity', [options.sessionId], identityStepSchema),
     (value) => (value.reset === true ? 'reset' : 'already this sandbox'));
+  await step('os-hostname', () => runner.run('os-hostname', [hostname], hostnameStepSchema, { timeoutSeconds: 60 }), (value) => value.hostname);
   await step('tailscale-install', () => runner.run('tailscale-install', [], envelopeSchema));
   const current = await runner.run('tailnet-identity', [], tailnetStepSchema);
   const alreadyJoined = current.backendState === 'Running';
@@ -342,6 +344,16 @@ export async function applyClaudeModel(
   return { outcome: result.outcome, model: result.model ?? null };
 }
 
+/**
+ * Gives the sandbox's OS its tailnet name (`rp-…`), now and at every boot: a boat resume brings back the pool
+ * machine's name. Provisioning does this too; start and update call it again. The tailnet device keeps its name.
+ */
+export async function setSandboxHostname(sandbox: SandboxHandle, hostname: string, sandboxHome = DEFAULT_SANDBOX_HOME): Promise<{ hostname: string }> {
+  const name = assertHostname(hostname);
+  await uploadScripts(sandbox, sandboxHome);
+  return { hostname: (await new StepRunner(sandbox, sandboxHome).run('os-hostname', [name], hostnameStepSchema, { timeoutSeconds: 60 })).hostname };
+}
+
 /** The user's startup script's last run, from the sandbox's startup-status.json. */
 export interface StartupScriptStatus {
   /** null while the script runs. */
@@ -519,6 +531,7 @@ const serveGuardStepSchema = boundary.object({
   applied: boundary.optional(boundary.boolean),
   detail: boundary.optional(boundary.string),
 });
+const hostnameStepSchema = boundary.object({ hostname: boundary.string });
 const startupInstallStepSchema = boundary.object({ sha256: boundary.optional(boundary.nullable(boundary.string)) });
 const startupStatusSchema = boundary.object({
   exitCode: boundary.nullable(boundary.number),

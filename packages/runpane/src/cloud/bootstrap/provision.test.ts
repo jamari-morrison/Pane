@@ -8,6 +8,7 @@ import {
   pushStartupScript,
   readStartupLog,
   redact,
+  setSandboxHostname,
   repairSandboxTailnet,
   runStartupScript,
   updateSandboxPane,
@@ -76,6 +77,7 @@ const freshSandboxAnswers = () => {
   let joined = false;
   return new Map<string, StepAnswer>([
     ['identity', answer({ ok: true, reset: true })],
+    ['os-hostname', (args: string[]) => ({ ok: true, hostname: args[0] })],
     ['tailscale-install', answer({ ok: true })],
     ['tailnet-identity', () => (joined ? RUNNING : { ok: true, backendState: 'NeedsLogin' })],
     ['check', answer({ ok: true, passed: 30 })],
@@ -111,9 +113,11 @@ test('provisions over HTTPS: identity, check, firewall, tagged join, agent env, 
   });
 
   assert.deepEqual(sandbox.names(), [
-    'identity', 'tailscale-install', 'tailnet-identity', 'check', 'firewall', 'tailscale-up', 'agent-env', 'agent-prompts', 'install-pane',
+    'identity', 'os-hostname', 'tailscale-install', 'tailnet-identity', 'check', 'firewall', 'tailscale-up', 'agent-env', 'agent-prompts', 'install-pane',
     'pairing-read', 'serve-guard',
   ]);
+  // The OS gets the sandbox's tailnet name right after the identity reset, before anything else reads it.
+  assert.deepEqual(sandbox.steps.find((step) => step.name === 'os-hostname')?.args, ['rp-abc12345']);
   assert.deepEqual(sandbox.steps.find((step) => step.name === 'firewall')?.args, ['443']);
   assert.deepEqual(sandbox.steps.find((step) => step.name === 'install-pane')?.args,
     ['deb-url', 'https://example.com/pane.deb', 'a'.repeat(64), '', 'Cloud']);
@@ -278,4 +282,11 @@ test('runStartupScript gives up when a run never starts or never ends', async ()
 test('readStartupLog returns the log text the sandbox reports', async () => {
   const sandbox = fakeSandbox(new Map([['startup-log', answer({ ok: true, log: 'line 1\nline 2\n' })]]));
   assert.equal(await readStartupLog(sandbox.handle), 'line 1\nline 2\n');
+});
+
+test('setSandboxHostname gives the OS the tailnet name and refuses anything else', async () => {
+  const sandbox = fakeSandbox(new Map([['os-hostname', (args: string[]) => ({ ok: true, hostname: args[0] })]]));
+  assert.deepEqual(await setSandboxHostname(sandbox.handle, 'rp-abc12345'), { hostname: 'rp-abc12345' });
+  assert.deepEqual(sandbox.steps, [{ name: 'os-hostname', args: ['rp-abc12345'] }]);
+  await assert.rejects(setSandboxHostname(sandbox.handle, 'Not A Name'), /is not a valid tailnet hostname/u);
 });
