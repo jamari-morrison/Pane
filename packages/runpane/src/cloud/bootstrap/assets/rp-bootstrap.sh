@@ -16,6 +16,9 @@ mkdir -p "$RP_STATE"
 chmod 700 "$RP_STATE"
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+# Where the startup script's runner and boot unit go (tests point these at a temp dir).
+RP_UNIT_DIR="${RP_UNIT_DIR:-/etc/systemd/system}"
+RP_SBIN="${RP_SBIN:-/usr/local/sbin}"
 
 result() { printf 'RP_RESULT %s\n' "$1"; }
 fail() { result "$(python3 -c 'import json,sys;print(json.dumps({"ok":False,"error":sys.argv[1]}))' "$1")"; exit 1; }
@@ -684,6 +687,103 @@ UNIT
   result "$(python3 -c 'import json,sys;print(json.dumps({"ok":True,"allowedTcp":[int(p) for p in sys.argv[1].split(",") if p]}))' "$ports")"
 }
 
+# The user's startup script (one per user, set in desktop Pane): ~/.config/runpane-cloud/startup.sh, run by
+# rp-user-startup.service on every boot. It is a system unit run as the login user that nothing else waits for, so a
+# slow or failing script never holds up the Pane daemon (a user unit). rp-user-startup.sh records its status and logs.
+STARTUP_SCRIPT="$HOME/.config/runpane-cloud/startup.sh"
+STARTUP_STATUS="$HOME/.local/state/runpane-cloud/startup-status.json"
+STARTUP_UNIT=rp-user-startup.service
+
+install_startup_unit() {
+  sudo install -m 755 "$RP_SCRIPTS/rp-user-startup.sh" "$RP_SBIN/rp-user-startup"
+  sudo tee "$RP_UNIT_DIR/$STARTUP_UNIT" >/dev/null <<UNIT
+[Unit]
+Description=Pane cloud sandbox: run the user's startup script (~/.config/runpane-cloud/startup.sh)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=$(id -un)
+WorkingDirectory=$HOME
+Environment=PATH=$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$RP_SBIN/rp-user-startup
+TimeoutStartSec=660
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo systemctl daemon-reload
+  sudo systemctl enable "$STARTUP_UNIT" >/dev/null 2>&1 || fail "could not enable $STARTUP_UNIT"
+}
+
+# startup-install <uploaded script file | "">: install the boot unit, then make the uploaded file the startup script
+# (0700, the login user's), or remove the script when no file is given. Never runs it. Idempotent.
+step_startup_install() {
+  local upload="${1:-}"
+  install_startup_unit
+  if [ -z "$upload" ]; then
+    rm -f "$STARTUP_SCRIPT"
+    result '{"ok":true,"sha256":null}'
+    return
+  fi
+  [ -f "$upload" ] || fail "startup-install: no uploaded script"
+  mkdir -p "$(dirname "$STARTUP_SCRIPT")"
+  cat "$upload" >"$STARTUP_SCRIPT"
+  rm -f "$upload"
+  chmod 700 "$STARTUP_SCRIPT"
+  chown "$(id -un):" "$STARTUP_SCRIPT"
+  result "$(printf '{"ok":true,"sha256":"%s"}' "$(sha256sum "$STARTUP_SCRIPT" | cut -d' ' -f1)")"
+}
+
+# The latest status as JSON, or null when there is none (never ran, or unreadable).
+startup_status_json() {
+  python3 -c '
+import json, sys
+try:
+    print(json.dumps(json.load(open(sys.argv[1]))))
+except (OSError, ValueError):
+    print("null")' "$STARTUP_STATUS"
+}
+
+# startup-run <always|if-changed>: start one run of the script without waiting for it (a boat command lasts at most
+# 10 minutes, and so can the script); the caller follows it with startup-status. `busy`: a run (a boot run) is in
+# progress, and systemd would merge a start into it, so ask again later. if-changed `skipped`: the last run used this
+# script. Also `skipped` with no script.
+step_startup_run() {
+  local mode="${1:-}" state=skipped
+  case "$mode" in always|if-changed) ;; *) fail "startup-run: mode must be always or if-changed" ;; esac
+  if [ "$(systemctl is-active "$STARTUP_UNIT" 2>/dev/null)" = activating ]; then
+    state=busy
+  elif [ -s "$STARTUP_SCRIPT" ]; then
+    if [ "$mode" = always ] || ! python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); sys.exit(0 if s.get("sha256")==sys.argv[2] and s.get("finishedAt") else 1)' \
+        "$STARTUP_STATUS" "$(sha256sum "$STARTUP_SCRIPT" | cut -d' ' -f1)" 2>/dev/null; then
+      sudo systemctl start --no-block "$STARTUP_UNIT" || fail "could not start $STARTUP_UNIT"
+      state=started
+    fi
+  fi
+  result "{\"ok\":true,\"state\":\"$state\",\"status\":$(startup_status_json)}"
+}
+
+# startup-status: whether the script runs now, and the latest status (null: none).
+step_startup_status() {
+  local active=false
+  [ "$(systemctl is-active "$STARTUP_UNIT" 2>/dev/null)" = activating ] && active=true
+  result "{\"ok\":true,\"active\":$active,\"status\":$(startup_status_json)}"
+}
+
+# startup-log: the last 200 lines of the latest run's log. Only the desktop's View log shows it; it may hold
+# anything the user's script printed.
+step_startup_log() {
+  python3 -c '
+import json, sys
+try:
+    lines = open(sys.argv[1], errors="replace").read().splitlines(True)[-200:]
+except OSError:
+    lines = []
+print("RP_RESULT " + json.dumps({"ok": True, "log": "".join(lines)}))' "$HOME/.local/state/runpane-cloud/startup.log"
+}
+
 step="${1:-}"; shift || true
 case "$step" in
   identity) step_identity "$@" ;;
@@ -705,5 +805,9 @@ case "$step" in
   cert-status) step_cert_status "$@" ;;
   serve-http) step_serve_http ;;
   serve-guard) step_serve_guard "$@" ;;
+  startup-install) step_startup_install "$@" ;;
+  startup-run) step_startup_run "$@" ;;
+  startup-status) step_startup_status ;;
+  startup-log) step_startup_log ;;
   *) fail "unknown step '$step'" ;;
 esac

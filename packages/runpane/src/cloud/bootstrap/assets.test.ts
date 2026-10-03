@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +14,7 @@ const names = Object.keys(cloudBootstrapAssets) as CloudBootstrapAssetName[];
 const PROVISION_STEPS = [
   'identity', 'tailscale-install', 'tailnet-identity', 'check', 'firewall', 'tailscale-up', 'ts-guard', 'agent-env', 'agent-prompts', 'claude-model', 'install-pane',
   'pairing-read', 'health-local', 'cert-status', 'serve-http', 'serve-guard', 'tailscale-reset', 'serve-restore', 'update-pane',
+  'startup-install', 'startup-run', 'startup-status', 'startup-log',
 ];
 
 /** Runs one rp-bootstrap.sh step in a temp HOME; `functions` replace commands (exported bash functions win over PATH). */
@@ -209,6 +211,12 @@ function repoRoot(): string {
   return dir;
 }
 
+// The tests run the embedded copies: an edit to a source script must reach them, or the tests would pass on the old one.
+test('the embedded assets match their source scripts', () => {
+  const sources = path.join(repoRoot(), 'packages/runpane/src/cloud/bootstrap/assets');
+  for (const name of names) assert.equal(cloudBootstrapAssets[name], fs.readFileSync(path.join(sources, name), 'utf8'), `${name} is stale; run node packages/runpane/scripts/generate-cloud-assets.js`);
+});
+
 // CLAUDE_CODE_SANDBOXED turns off Claude Code's folder-trust check. Only a disposable cloud sandbox may set it, and
 // only for its own daemon: never Local Pane, a manually set up remote host, or any other code path.
 test('CLAUDE_CODE_SANDBOXED is set only by the cloud sandbox daemon drop-in', () => {
@@ -256,4 +264,223 @@ test('claude-model sets the default model and keeps a model chosen in the sandbo
   assert.match(runStep('claude-model', ['opus; rm -rf ~'], new Map(), home).stdout, /"error": "claude-model: not a Claude model id"/u);
   // There is no clear: an unknown default sends nothing at all.
   assert.match(runStep('claude-model', ['--clear'], new Map(), home).stdout, /"error": "claude-model: not a Claude model id"/u);
+});
+
+/** Runs rp-user-startup.sh against a temp HOME with a short time limit; returns the HOME and the runner's exit. */
+function runUserStartup(home: string, script: string | null, limitSeconds = 30) {
+  const runner = path.join(home, 'rp-user-startup.sh');
+  fs.writeFileSync(runner, cloudBootstrapAssets['rp-user-startup.sh']);
+  const scriptFile = path.join(home, '.config/runpane-cloud/startup.sh');
+  if (script === null) fs.rmSync(scriptFile, { force: true });
+  else {
+    fs.mkdirSync(path.dirname(scriptFile), { recursive: true });
+    fs.writeFileSync(scriptFile, script, { mode: 0o700 });
+  }
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, RP_STARTUP_TIMEOUT_SECONDS: String(limitSeconds) };
+  return childProcess.spawnSync('bash', [runner], { encoding: 'utf8', env });
+}
+
+const startupState = (home: string) => path.join(home, '.local/state/runpane-cloud');
+const sha256Of = (text: string) => crypto.createHash('sha256').update(text).digest('hex');
+
+test('rp-user-startup records a successful run: status JSON and the script output in the log', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  const script = 'echo MARKER-ONE\n';
+  const result = runUserStartup(home, script);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const status = readJson(path.join(startupState(home), 'startup-status.json'));
+  assert.deepEqual(Object.keys(status).sort(), ['exitCode', 'finishedAt', 'sha256', 'startedAt', 'timedOut']);
+  assert.equal(status.exitCode, 0);
+  assert.equal(status.timedOut, false);
+  assert.equal(status.sha256, sha256Of(script));
+  assert.match(status.startedAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/u);
+  assert.ok(Date.parse(status.finishedAt) >= Date.parse(status.startedAt));
+  assert.match(fs.readFileSync(path.join(startupState(home), 'startup.log'), 'utf8'), /MARKER-ONE/u);
+  assert.equal(fs.statSync(startupState(home)).mode & 0o777, 0o700);
+});
+
+test('rp-user-startup records a failing run with its exit code', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  const result = runUserStartup(home, 'echo about to fail >&2\nexit 7\n');
+  assert.equal(result.status, 7);
+  const status = readJson(path.join(startupState(home), 'startup-status.json'));
+  assert.equal(status.exitCode, 7);
+  assert.equal(status.timedOut, false);
+  assert.match(fs.readFileSync(path.join(startupState(home), 'startup.log'), 'utf8'), /about to fail/u);
+});
+
+test('rp-user-startup kills a script that runs past the time limit and records the timeout', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  const started = Date.now();
+  const result = runUserStartup(home, 'echo started\nsleep 30\necho never\n', 1);
+  assert.ok(Date.now() - started < 15_000, 'the runner did not wait for the script');
+  assert.notEqual(result.status, 0);
+  const status = readJson(path.join(startupState(home), 'startup-status.json'));
+  assert.equal(status.timedOut, true);
+  assert.notEqual(status.exitCode, 0);
+  const log = fs.readFileSync(path.join(startupState(home), 'startup.log'), 'utf8');
+  assert.match(log, /started/u);
+  assert.doesNotMatch(log, /never/u);
+});
+
+test('rp-user-startup keeps the logs of the last 5 runs, rotated in place', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  for (let run = 1; run <= 7; run += 1) assert.equal(runUserStartup(home, `echo RUN-${run}\n`).status, 0);
+  const state = startupState(home);
+  assert.deepEqual(fs.readdirSync(state).sort(),
+    ['startup-status.json', 'startup.log', 'startup.log.1', 'startup.log.2', 'startup.log.3', 'startup.log.4']);
+  const runIn = (name: string) => /RUN-(\d)/u.exec(fs.readFileSync(path.join(state, name), 'utf8'))?.[1];
+  assert.deepEqual(['startup.log', 'startup.log.1', 'startup.log.2', 'startup.log.3', 'startup.log.4'].map(runIn), ['7', '6', '5', '4', '3']);
+});
+
+test('rp-user-startup does nothing without a script', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  const result = runUserStartup(home, null);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(fs.existsSync(startupState(home)), false);
+});
+
+/** Runs a startup step with sudo passed through, systemctl recorded, and the unit and runner installed under the temp HOME. */
+function runStartupStep(home: string, step: string, args: string[], systemctl = '') {
+  const calls = path.join(home, 'calls');
+  fs.rmSync(calls, { force: true });
+  const env = new Map([
+    ['sudo', '() { "$@"; }'],
+    ['chown', '() { return 0; }'],
+    ['systemctl', `() { echo "systemctl $*" >> '${calls}'; ${systemctl} }`],
+  ]);
+  fs.mkdirSync(path.join(home, 'root/etc/systemd/system'), { recursive: true });
+  fs.mkdirSync(path.join(home, 'root/usr/local/sbin'), { recursive: true });
+  const dir = home;
+  const file = path.join(dir, 'rp-bootstrap.sh');
+  for (const name of names) fs.writeFileSync(path.join(dir, name), cloudBootstrapAssets[name]);
+  const processEnv: NodeJS.ProcessEnv = {
+    ...process.env, HOME: dir, RP_STATE: path.join(dir, 'state'), XDG_RUNTIME_DIR: dir,
+    RP_UNIT_DIR: path.join(home, 'root/etc/systemd/system'), RP_SBIN: path.join(home, 'root/usr/local/sbin'),
+  };
+  for (const [name, body] of env) processEnv[`BASH_FUNC_${name}%%`] = body;
+  const result = childProcess.spawnSync('bash', [file, step, ...args], { encoding: 'utf8', env: processEnv });
+  const payload = result.stdout.trim().split('\n').pop()?.replace(/^RP_RESULT /u, '') ?? '{}';
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr, payload: JSON.parse(payload), calls: fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '' };
+}
+
+test('startup-install lays down the boot unit: a oneshot system unit run as the login user, after the network, killed after 10 min', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  fs.mkdirSync(path.join(home, 'state'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'state/startup.sh.new'), 'echo hi\n');
+  const result = runStartupStep(home, 'startup-install', [path.join(home, 'state/startup.sh.new')]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const user = os.userInfo().username;
+  const unit = fs.readFileSync(path.join(home, 'root/etc/systemd/system/rp-user-startup.service'), 'utf8');
+  assert.equal(unit, [
+    '[Unit]',
+    'Description=Pane cloud sandbox: run the user\'s startup script (~/.config/runpane-cloud/startup.sh)',
+    'Wants=network-online.target',
+    'After=network-online.target',
+    '',
+    '[Service]',
+    'Type=oneshot',
+    `User=${user}`,
+    `WorkingDirectory=${home}`,
+    `Environment=PATH=${home}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
+    `ExecStart=${home}/root/usr/local/sbin/rp-user-startup`,
+    // The runner kills the script at 10 min (and records it); this only backs it up.
+    'TimeoutStartSec=660',
+    '',
+    '[Install]',
+    'WantedBy=multi-user.target',
+    '',
+  ].join('\n'));
+  // The design's requirements one by one, so a mutation of any of them names what broke.
+  assert.match(unit, /^Type=oneshot$/mu, 'a oneshot: the boot and startup-run wait for it to finish');
+  assert.match(unit, new RegExp(`^User=${user}$`, 'mu'), 'runs as the login user');
+  assert.match(unit, /^After=network-online\.target$/mu, 'runs after the network is up');
+  assert.match(unit, /^TimeoutStartSec=660$/mu, 'systemd backs up the 10 minute kill');
+  assert.match(unit, /^WantedBy=multi-user\.target$/mu, 'runs on every boot');
+  assert.match(cloudBootstrapAssets['rp-user-startup.sh'], /^LIMIT="\$\{RP_STARTUP_TIMEOUT_SECONDS:-600\}"$/mu, 'the runner kills the script after 10 minutes');
+  // Nothing orders the Pane daemon (a user unit) after it, so a slow script never holds the daemon up.
+  assert.doesNotMatch(unit, /Before=|pane-remote-daemon|RequiredBy/u);
+  assert.equal(fs.readFileSync(path.join(home, 'root/usr/local/sbin/rp-user-startup'), 'utf8'), cloudBootstrapAssets['rp-user-startup.sh']);
+  assert.equal(fs.statSync(path.join(home, 'root/usr/local/sbin/rp-user-startup')).mode & 0o777, 0o755);
+  assert.match(result.calls, /systemctl daemon-reload\nsystemctl enable rp-user-startup\.service/u);
+  assert.doesNotMatch(result.calls, /--now|systemctl start /u, 'installing never runs the script');
+
+  const script = path.join(home, '.config/runpane-cloud/startup.sh');
+  assert.equal(fs.readFileSync(script, 'utf8'), 'echo hi\n');
+  assert.equal(fs.statSync(script).mode & 0o777, 0o700);
+  assert.equal(fs.existsSync(path.join(home, 'state/startup.sh.new')), false, 'the upload is removed');
+  assert.deepEqual(result.payload, { ok: true, sha256: sha256Of('echo hi\n') });
+});
+
+test('startup-install with no file removes the script, and is idempotent', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  const script = path.join(home, '.config/runpane-cloud/startup.sh');
+  fs.mkdirSync(path.dirname(script), { recursive: true });
+  fs.writeFileSync(script, 'echo old\n');
+  for (let run = 0; run < 2; run += 1) {
+    const result = runStartupStep(home, 'startup-install', ['']);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.deepEqual(result.payload, { ok: true, sha256: null });
+  }
+  assert.equal(fs.existsSync(script), false);
+});
+
+test('startup-run starts the unit without waiting; if-changed skips a script the last run used; a run in progress is busy', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  const script = path.join(home, '.config/runpane-cloud/startup.sh');
+  fs.mkdirSync(path.dirname(script), { recursive: true });
+  fs.writeFileSync(script, 'echo v1\n');
+  const statusFile = path.join(startupState(home), 'startup-status.json');
+  const writeStatus = (sha: string) => {
+    fs.mkdirSync(startupState(home), { recursive: true });
+    fs.writeFileSync(statusFile, JSON.stringify({ exitCode: 3, startedAt: '2026-10-03T10:00:00Z', finishedAt: '2026-10-03T10:00:01Z', sha256: sha, timedOut: false }));
+  };
+  const idle = '[ "$1" = is-active ] && echo inactive; return 0;';
+
+  const first = runStartupStep(home, 'startup-run', ['if-changed'], idle);
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+  assert.match(first.calls, /systemctl start --no-block rp-user-startup\.service/u);
+  assert.deepEqual(first.payload, { ok: true, state: 'started', status: null });
+
+  writeStatus(sha256Of('echo v1\n'));
+  const unchanged = runStartupStep(home, 'startup-run', ['if-changed'], idle);
+  assert.equal(unchanged.payload.state, 'skipped');
+  assert.equal(unchanged.payload.status.exitCode, 3);
+  assert.doesNotMatch(unchanged.calls, /systemctl start/u);
+
+  assert.equal(runStartupStep(home, 'startup-run', ['always'], idle).payload.state, 'started');
+  fs.writeFileSync(script, 'echo v2\n');
+  assert.equal(runStartupStep(home, 'startup-run', ['if-changed'], idle).payload.state, 'started');
+
+  // systemd merges a start into a run in progress instead of running again, so the caller waits and asks again.
+  const busy = runStartupStep(home, 'startup-run', ['always'], '[ "$1" = is-active ] && echo activating; return 0;');
+  assert.equal(busy.payload.state, 'busy');
+  assert.doesNotMatch(busy.calls, /systemctl start/u);
+
+  fs.rmSync(script);
+  assert.deepEqual(runStartupStep(home, 'startup-run', ['always'], idle).payload, { ok: true, state: 'skipped', status: { exitCode: 3, startedAt: '2026-10-03T10:00:00Z', finishedAt: '2026-10-03T10:00:01Z', sha256: sha256Of('echo v1\n'), timedOut: false } });
+  assert.match(runStartupStep(home, 'startup-run', ['sometimes']).stdout, /"error": "startup-run: mode must be always or if-changed"/u);
+});
+
+test('startup-status reports whether the unit runs and the latest status', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  assert.deepEqual(runStartupStep(home, 'startup-status', [], '[ "$1" = is-active ] && echo activating; return 0;').payload,
+    { ok: true, active: true, status: null });
+  fs.mkdirSync(startupState(home), { recursive: true });
+  fs.writeFileSync(path.join(startupState(home), 'startup-status.json'), '{"exitCode":0,"startedAt":"a","finishedAt":"b","sha256":"c","timedOut":false}\n');
+  assert.deepEqual(runStartupStep(home, 'startup-status', [], '[ "$1" = is-active ] && echo failed; return 3;').payload,
+    { ok: true, active: false, status: { exitCode: 0, startedAt: 'a', finishedAt: 'b', sha256: 'c', timedOut: false } });
+  fs.writeFileSync(path.join(startupState(home), 'startup-status.json'), '{ half');
+  assert.deepEqual(runStartupStep(home, 'startup-status', [], 'return 3;').payload, { ok: true, active: false, status: null });
+});
+
+test('startup-log returns the last 200 lines of the latest run', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  assert.deepEqual(runStartupStep(home, 'startup-log', []).payload, { ok: true, log: '' });
+  fs.mkdirSync(startupState(home), { recursive: true });
+  fs.writeFileSync(path.join(startupState(home), 'startup.log'), Array.from({ length: 250 }, (_, line) => `line ${line + 1}`).join('\n') + '\n');
+  const lines = runStartupStep(home, 'startup-log', []).payload.log.trimEnd().split('\n');
+  assert.equal(lines.length, 200);
+  assert.equal(lines[0], 'line 51');
+  assert.equal(lines[199], 'line 250');
 });

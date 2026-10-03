@@ -62,7 +62,9 @@ import {
   getCloudErrorMessage,
   resolvePaneReleaseDeb,
   type CloudSandboxLibrary,
+  type CloudStartupScriptFile,
 } from '../services/cloudSandboxes';
+import { createCloudStartupScriptFile } from '../services/cloudStartupScriptFile';
 import type { SavedRemoteHosts } from '../../../packages/runpane/src/cloud/savedHosts';
 import { createDefaultClaudeModelSource } from '../../../packages/runpane/src/cloud/claudeDefaults';
 import { getShellPath } from '../utils/shellPath';
@@ -92,6 +94,7 @@ interface RemoteDaemonHandlerDependencies {
   loadCloudSandboxLibrary: (options: {
     savedHosts: SavedRemoteHosts;
     localClaudeModel: () => Promise<string | null>;
+    readStartupScript: () => Promise<string>;
   }) => Promise<CloudSandboxLibrary>;
   /** The one source of the user's default Claude model for cloud sandboxes; swap it here to change where it comes from. */
   readDefaultClaudeModel: () => Promise<string | null>;
@@ -99,6 +102,8 @@ interface RemoteDaemonHandlerDependencies {
   /** Signals (debounced) that the user's Claude settings may have changed; returns a function that stops it. */
   watchClaudeSettings: (onChange: () => void) => () => void;
   resolvePaneReleaseDeb: typeof resolvePaneReleaseDeb;
+  /** The user's cloud sandbox startup script on this computer; created when the handlers register (the data dir is known). */
+  createCloudStartupScriptFile: () => CloudStartupScriptFile;
 }
 
 const defaultRemoteDaemonHandlerDependencies: RemoteDaemonHandlerDependencies = {
@@ -114,6 +119,7 @@ const defaultRemoteDaemonHandlerDependencies: RemoteDaemonHandlerDependencies = 
   readCloudDaemonVersion: readRemoteDaemonVersion,
   resolvePaneReleaseDeb,
   watchClaudeSettings: (onChange) => watchClaudeSettings(onChange),
+  createCloudStartupScriptFile: () => createCloudStartupScriptFile(),
 };
 
 /**
@@ -743,11 +749,14 @@ export function registerRemoteDaemonHandlers(
     },
   };
 
+  const startupScriptFile = dependencies.createCloudStartupScriptFile();
   const cloudSandboxes = new CloudSandboxManager({
     loadLibrary: () => dependencies.loadCloudSandboxLibrary({
       savedHosts: cloudSavedHosts,
       localClaudeModel: dependencies.readDefaultClaudeModel,
+      readStartupScript: () => startupScriptFile.read(),
     }),
+    startupScriptFile,
     readDefaultClaudeModel: dependencies.readDefaultClaudeModel,
     appVersion: app?.getVersion(),
     readDaemonVersion: async (profileId) => {
@@ -871,6 +880,31 @@ export function registerRemoteDaemonHandlers(
     }
   });
 
+  ipcMain.handle('remote-daemon:get-cloud-startup-script', async () => {
+    try {
+      return { success: true, data: { script: await cloudSandboxes.getStartupScript() } };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to read the startup script') };
+    }
+  });
+
+  ipcMain.handle('remote-daemon:save-cloud-startup-script', async (_event, script: PaneCommandValue) => {
+    try {
+      return { success: true, data: await cloudSandboxes.saveStartupScript(parseCloudStartupScript(script)) };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to save the startup script') };
+    }
+  });
+
+  // The log is whatever the user's script printed: it goes to View log only and is never logged here.
+  ipcMain.handle('remote-daemon:read-cloud-sandbox-startup-log', async (_event, id: PaneCommandValue) => {
+    try {
+      return { success: true, data: { log: await cloudSandboxes.readStartupLog(decodeBoundary(id, boundary.nonEmptyString)) } };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to read the startup log') };
+    }
+  });
+
   ipcMain.handle('remote-daemon:dismiss-cloud-sandbox', async (_event, id: PaneCommandValue) => {
     try {
       return { success: true, data: cloudSandboxes.dismiss(decodeBoundary(id, boundary.nonEmptyString)) };
@@ -916,6 +950,14 @@ function parseCloudCredentialsUpdate(input: PaneCommandValue): CloudCredentialsU
     throw new Error('Enter at least one credential to save');
   }
   return decoded;
+}
+
+const MAX_STARTUP_SCRIPT_BYTES = 256 * 1024;
+
+function parseCloudStartupScript(input: PaneCommandValue): string {
+  const script = decodeBoundary(input, boundary.string);
+  if (Buffer.byteLength(script, 'utf8') > MAX_STARTUP_SCRIPT_BYTES) throw new Error('The startup script is too long (at most 256 KB).');
+  return script;
 }
 
 function parseCloudSandboxCreateRequest(input: PaneCommandValue): CloudSandboxCreateRequest {

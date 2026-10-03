@@ -33,7 +33,7 @@ type RemoteDaemonTestDependencies = NonNullable<Parameters<typeof registerRemote
 function registerTestRemoteDaemonHandlers(
   ipcMain: Parameters<typeof registerRemoteDaemonHandlersImpl>[0],
   services: Omit<Parameters<typeof registerRemoteDaemonHandlersImpl>[1], 'dependencies'>,
-  cloudDependencies: Partial<Pick<RemoteDaemonTestDependencies, 'loadCloudSandboxLibrary' | 'readCloudDaemonVersion' | 'resolvePaneReleaseDeb' | 'readDefaultClaudeModel' | 'watchClaudeSettings'>> = {},
+  cloudDependencies: Partial<Pick<RemoteDaemonTestDependencies, 'loadCloudSandboxLibrary' | 'readCloudDaemonVersion' | 'resolvePaneReleaseDeb' | 'readDefaultClaudeModel' | 'watchClaudeSettings' | 'createCloudStartupScriptFile'>> = {},
 ): void {
   registerRemoteDaemonHandlersImpl(ipcMain, {
     ...services,
@@ -46,6 +46,7 @@ function registerTestRemoteDaemonHandlers(
       readDefaultClaudeModel: async () => null,
       resolvePaneReleaseDeb: async () => { throw new Error('no releases in tests'); },
       watchClaudeSettings: () => () => undefined,
+      createCloudStartupScriptFile: () => ({ read: async () => '', write: async () => undefined }),
       ...cloudDependencies,
     },
   });
@@ -1266,6 +1267,8 @@ describe('cloud sandbox IPC', () => {
 
   interface DesktopHostsRef {
     current?: SavedRemoteHosts;
+    /** What the desktop gave the library to read the user's startup script with. */
+    readStartupScript?: () => Promise<string>;
   }
 
   function createCloudLibrary(hostsRef: DesktopHostsRef, overrides: Partial<CloudSandboxLibrary> = {}) {
@@ -1285,12 +1288,15 @@ describe('cloud sandbox IPC', () => {
       }),
       syncAgentDefaults: vi.fn(async () => alpha),
       status: vi.fn(async () => alpha),
+      runStartupScript: vi.fn(async () => null),
+      readStartupLog: vi.fn(async () => 'MARKER\n'),
       ...overrides,
     };
     return {
       library,
-      loadCloudSandboxLibrary: async ({ savedHosts }: { savedHosts: SavedRemoteHosts }) => {
+      loadCloudSandboxLibrary: async ({ savedHosts, readStartupScript }: { savedHosts: SavedRemoteHosts; readStartupScript: () => Promise<string> }) => {
         hostsRef.current = savedHosts;
+        hostsRef.readStartupScript = readStartupScript;
         return library;
       },
     };
@@ -1358,6 +1364,34 @@ describe('cloud sandbox IPC', () => {
     expect(result).toMatchObject({ success: true, data: { sandboxes: [{ id: 'rp-alpha', state: 'running' }] } });
     expect(configManager.getConfig().remoteDaemon?.client.profiles).toEqual([savedCloudProfile]);
     expect(send).toHaveBeenCalledWith('remote-daemon:cloud-sandboxes-changed', expect.objectContaining({ available: true }));
+  });
+
+  it('keeps the startup script in a local file the library reads, and runs an edit on running sandboxes', async () => {
+    const ipcMain = createIpcMainStub();
+    let saved = '';
+    const startupScriptFile = { read: vi.fn(async () => saved), write: vi.fn(async (script: string) => { saved = script; }) };
+    const hostsRef: DesktopHostsRef = {};
+    const cloud = createCloudLibrary(hostsRef);
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager: createConfigManagerStub() }, {
+      ...cloud,
+      createCloudStartupScriptFile: () => startupScriptFile,
+    });
+    await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
+
+    const result = await ipcMain.handlers.get('remote-daemon:save-cloud-startup-script')?.({}, 'echo MARKER\n');
+
+    expect(result).toMatchObject({ success: true, data: { sandboxes: [{ id: 'rp-alpha' }] } });
+    expect(startupScriptFile.write).toHaveBeenCalledWith('echo MARKER\n');
+    await expect(ipcMain.handlers.get('remote-daemon:get-cloud-startup-script')?.({})).resolves.toEqual({ success: true, data: { script: 'echo MARKER\n' } });
+    await expect(hostsRef.readStartupScript?.()).resolves.toBe('echo MARKER\n');
+    await vi.waitFor(() => expect(cloud.library.runStartupScript).toHaveBeenCalledWith('rp-alpha', { onlyIfChanged: false }));
+    await expect(ipcMain.handlers.get('remote-daemon:read-cloud-sandbox-startup-log')?.({}, 'rp-alpha'))
+      .resolves.toEqual({ success: true, data: { log: 'MARKER\n' } });
+
+    await expect(ipcMain.handlers.get('remote-daemon:save-cloud-startup-script')?.({}, 42)).resolves.toMatchObject({ success: false });
+    await expect(ipcMain.handlers.get('remote-daemon:save-cloud-startup-script')?.({}, 'x'.repeat(256 * 1024 + 1)))
+      .resolves.toEqual({ success: false, error: 'The startup script is too long (at most 256 KB).' });
+    expect(startupScriptFile.write).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the saved profile id when the library saves the same sandbox again', async () => {

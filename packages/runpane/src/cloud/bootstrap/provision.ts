@@ -10,7 +10,7 @@ import { waitForDaemonHealth, type DaemonHealthResult } from './health';
 
 /** boat's login user, which runs bootstrap and the Pane daemon. */
 const DEFAULT_SANDBOX_HOME = '/home/user';
-const UPLOADED_ASSETS: CloudBootstrapAssetName[] = ['rp-bootstrap.sh', 'identity-scrub.sh', 'identity-check.sh'];
+const UPLOADED_ASSETS: CloudBootstrapAssetName[] = ['rp-bootstrap.sh', 'identity-scrub.sh', 'identity-check.sh', 'rp-user-startup.sh'];
 const HOSTNAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const PAIRING_PATTERN = /pane-remote:\/\/\S+/gu;
 /** auto transport: HTTPS gets this long before the certificate is checked. */
@@ -342,6 +342,100 @@ export async function applyClaudeModel(
   return { outcome: result.outcome, model: result.model ?? null };
 }
 
+/** The user's startup script's last run, from the sandbox's startup-status.json. */
+export interface StartupScriptStatus {
+  /** null while the script runs. */
+  exitCode: number | null;
+  startedAt: string;
+  /** null while the script runs. */
+  finishedAt: string | null;
+  /** The script that ran. */
+  sha256: string;
+  /** Killed at the 10 minute limit. */
+  timedOut: boolean;
+}
+
+/**
+ * Gives the sandbox the user's startup script (`~/.config/runpane-cloud/startup.sh`, 0700) and the boot unit that runs
+ * it on every start; a blank script removes it. Never runs it. Resolves the installed script's sha256 (null: none).
+ */
+export async function pushStartupScript(
+  sandbox: SandboxHandle,
+  script: string,
+  sandboxHome = DEFAULT_SANDBOX_HOME,
+): Promise<{ sha256: string | null }> {
+  await uploadScripts(sandbox, sandboxHome);
+  let upload = '';
+  if (script.trim()) {
+    // The state dir is 0700; the step moves the content into place and removes the upload.
+    upload = path.posix.join(stateDir(sandboxHome), 'startup.sh.new');
+    await sandbox.writeFile(upload, script);
+  }
+  const installed = await new StepRunner(sandbox, sandboxHome).run('startup-install', [upload], startupInstallStepSchema, { timeoutSeconds: 120 });
+  return { sha256: installed.sha256 ?? null };
+}
+
+interface StartupRunOptions {
+  sandboxHome?: string;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+/** How often a run is checked, and how long one may take: a boot run's 10 minutes, then this run's 10, plus slack. */
+const STARTUP_POLL_MS = 5_000;
+const STARTUP_RUN_TIMEOUT_MS = 22 * 60_000;
+/** A started run that is neither running nor has written its status by now never started. */
+const STARTUP_START_GRACE_MS = 120_000;
+
+/**
+ * Runs the startup script once and follows it until it finishes (up to its 10 minute limit), after any run in
+ * progress, such as the boot run. `if-changed` runs it only when the last run used another script, e.g. when a start
+ * pushed an edit after the boot ran the old one. Short polls, since one boat command lasts at most 10 minutes. The
+ * status is null when no script has run.
+ */
+export async function runStartupScript(
+  sandbox: SandboxHandle,
+  mode: 'always' | 'if-changed',
+  options: StartupRunOptions = {},
+): Promise<{ ran: boolean; status: StartupScriptStatus | null }> {
+  const home = options.sandboxHome ?? DEFAULT_SANDBOX_HOME;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = options.now ?? Date.now;
+  await uploadScripts(sandbox, home);
+  const runner = new StepRunner(sandbox, home);
+  const deadline = now() + STARTUP_RUN_TIMEOUT_MS;
+  const pause = async () => {
+    if (now() >= deadline) throw new Error(`the startup script was still running after ${STARTUP_RUN_TIMEOUT_MS / 60_000} min`);
+    await sleep(STARTUP_POLL_MS);
+  };
+
+  let run = await runner.run('startup-run', [mode], startupRunStepSchema, { timeoutSeconds: 60 });
+  while (run.state === 'busy') {
+    await pause();
+    run = await runner.run('startup-run', [mode], startupRunStepSchema, { timeoutSeconds: 60 });
+  }
+  if (run.state === 'skipped') return { ran: false, status: run.status };
+
+  // The run is ours once the status shows a start other than the one before it.
+  const previousStart = run.status?.startedAt ?? null;
+  const startedAt = now();
+  for (;;) {
+    await pause();
+    const current = await runner.run('startup-status', [], startupStatusStepSchema, { timeoutSeconds: 60 });
+    const ours = current.status !== null && current.status.startedAt !== previousStart;
+    if (ours && !current.active && current.status?.finishedAt) return { ran: true, status: current.status };
+    if (!ours && !current.active && now() - startedAt >= STARTUP_START_GRACE_MS) {
+      throw new Error('the startup script did not start (see journalctl -u rp-user-startup.service in the sandbox)');
+    }
+  }
+}
+
+/** The last 200 lines of the startup script's latest log. It holds whatever the script printed: show it, never log it. */
+export async function readStartupLog(sandbox: SandboxHandle, sandboxHome = DEFAULT_SANDBOX_HOME): Promise<string> {
+  await uploadScripts(sandbox, sandboxHome);
+  return (await new StepRunner(sandbox, sandboxHome).run('startup-log', [], startupLogStepSchema, { timeoutSeconds: 60 })).log;
+}
+
 async function joinTailnet(
   sandbox: SandboxHandle,
   runner: StepRunner,
@@ -425,6 +519,20 @@ const serveGuardStepSchema = boundary.object({
   applied: boundary.optional(boundary.boolean),
   detail: boundary.optional(boundary.string),
 });
+const startupInstallStepSchema = boundary.object({ sha256: boundary.optional(boundary.nullable(boundary.string)) });
+const startupStatusSchema = boundary.object({
+  exitCode: boundary.nullable(boundary.number),
+  startedAt: boundary.string,
+  finishedAt: boundary.nullable(boundary.string),
+  sha256: boundary.string,
+  timedOut: boundary.boolean,
+});
+const startupRunStepSchema = boundary.object({
+  state: boundary.enumeration('started', 'skipped', 'busy'),
+  status: boundary.nullable(startupStatusSchema),
+});
+const startupStatusStepSchema = boundary.object({ active: boundary.boolean, status: boundary.nullable(startupStatusSchema) });
+const startupLogStepSchema = boundary.object({ log: boundary.string });
 const firewallStepSchema = boundary.object({ allowedTcp: boundary.optional(boundary.array(boundary.number)) });
 
 type TailnetStepResult = ReturnType<typeof tailnetStepSchema.decode>;

@@ -5,6 +5,7 @@ import type {
   CloudSandboxCreateRequest,
   CloudSandboxesSnapshot,
   CloudSandboxProgressStep,
+  CloudSandboxStartupScriptView,
   CloudSandboxState,
   CloudSandboxView,
 } from '../../../shared/types/cloudSandboxes';
@@ -15,6 +16,7 @@ import type {
   CloudSandboxes,
   CloudSandboxInfo,
 } from '../../../packages/runpane/src/cloud/api';
+import type { StartupScriptStatus } from '../../../packages/runpane/src/cloud/bootstrap/provision';
 
 /**
  * Cloud sandboxes (experimental). runpane's cloud library (packages/runpane/src/cloud/api.ts) creates,
@@ -25,8 +27,16 @@ import type {
 /** The parts of the cloud library this app calls. */
 export type CloudSandboxLibrary = Pick<
   CloudSandboxes,
-  'setup' | 'getCredentialsStatus' | 'create' | 'list' | 'status' | 'stop' | 'start' | 'update' | 'remove' | 'syncAgentDefaults'
+  | 'setup' | 'getCredentialsStatus' | 'create' | 'list' | 'status' | 'stop' | 'start' | 'update' | 'remove' | 'syncAgentDefaults'
+  | 'runStartupScript' | 'readStartupLog'
 >;
+
+/** The user's one startup script for every sandbox, kept only on this computer. */
+export interface CloudStartupScriptFile {
+  /** Empty when there is none. */
+  read(): Promise<string>;
+  write(script: string): Promise<void>;
+}
 
 /** A Pane .deb the cloud library installs on a running sandbox: https only, checked against sha256. */
 export interface CloudPaneDeb {
@@ -69,6 +79,7 @@ interface CloudSandboxManagerOptions {
   readDefaultClaudeModel: () => Promise<string | null>;
   /** How often a sandbox that is stopping or starting is read again until it settles (default 5 s). */
   pollIntervalMs?: number;
+  startupScriptFile: CloudStartupScriptFile;
 }
 
 type HostAction = Exclude<CloudSandboxAction, 'create'>;
@@ -92,6 +103,10 @@ export class CloudSandboxManager {
   private pollTimer: NodeJS.Timeout | undefined;
   /** Sandboxes whose state could not be read after a failed host action; shown as unknown until read. */
   private readonly unconfirmed = new Set<string>();
+  /** Each sandbox's latest startup script run, by hostname, while this app knows it. */
+  private readonly startupRuns = new Map<string, CloudSandboxStartupScriptView>();
+  /** Counts runs per hostname, so only the latest run's result is shown. */
+  private readonly startupRunIds = new Map<string, number>();
 
   constructor(private readonly options: CloudSandboxManagerOptions) {}
 
@@ -130,6 +145,7 @@ export class CloudSandboxManager {
         stateUnknown: this.unconfirmed.has(summary.hostname) || undefined,
         error: operation?.error ?? (summary.state === 'gone' ? 'boat.dev no longer has this sandbox.' : undefined),
         failedAction: operation?.error ? operation.action : undefined,
+        startupScript: this.startupRuns.get(summary.hostname),
       });
     }
     return {
@@ -191,6 +207,8 @@ export class CloudSandboxManager {
       });
       this.operations.delete(id);
       this.replaceListed(summary.hostname, summary);
+      const startupScript = getStartupScriptView(summary.startupScript ?? null);
+      if (startupScript) this.startupRuns.set(summary.hostname, startupScript);
       if (claudeModel !== null) this.syncedClaudeModels.set(summary.hostname, claudeModel);
       void this.readDaemonVersion(summary);
     } catch (error) {
@@ -200,8 +218,12 @@ export class CloudSandboxManager {
     return this.emit();
   }
 
-  start(id: string): Promise<CloudSandboxesSnapshot> {
-    return this.runHostAction(id, 'start', (library, hostname, onProgress) => library.start(hostname, onProgress));
+  async start(id: string): Promise<CloudSandboxesSnapshot> {
+    const snapshot = await this.runHostAction(id, 'start', (library, hostname, onProgress) => library.start(hostname, onProgress));
+    // The boot ran the script the sandbox had; read how it went, and run the current one if it changed meanwhile.
+    if (this.operations.get(id)?.error) return snapshot;
+    void this.runStartupScript(id, { onlyIfChanged: true });
+    return this.getSnapshot();
   }
 
   stop(id: string): Promise<CloudSandboxesSnapshot> {
@@ -222,6 +244,50 @@ export class CloudSandboxManager {
       await library.remove(hostname, onProgress);
       return null;
     });
+  }
+
+  getStartupScript(): Promise<string> {
+    return this.options.startupScriptFile.read();
+  }
+
+  /**
+   * Saves the user's startup script on this computer (nothing else keeps it), then gives it to every running sandbox
+   * that is not busy and runs it there once. Stopped sandboxes get it when they start.
+   */
+  async saveStartupScript(script: string): Promise<CloudSandboxesSnapshot> {
+    await this.options.startupScriptFile.write(script);
+    for (const summary of this.listed) {
+      if (summary.state === 'running' && !this.operations.get(summary.hostname)?.running) {
+        void this.runStartupScript(summary.hostname, { onlyIfChanged: false });
+      }
+    }
+    return this.emit();
+  }
+
+  /** The last 200 lines of a sandbox's startup log, for View log only: it may hold anything the script printed. */
+  async readStartupLog(id: string): Promise<string> {
+    const library = await this.requireLibrary();
+    const listed = this.listed.find((summary) => summary.hostname === id);
+    if (!listed) throw new Error(`Unknown cloud sandbox "${id}".`);
+    return library.readStartupLog(listed.hostname);
+  }
+
+  /** Runs the startup script on a sandbox in the background; the row shows it running, then how it ended. */
+  private async runStartupScript(hostname: string, options: { onlyIfChanged: boolean }): Promise<void> {
+    const runId = (this.startupRunIds.get(hostname) ?? 0) + 1;
+    this.startupRunIds.set(hostname, runId);
+    this.startupRuns.set(hostname, { state: 'running' });
+    this.emit();
+    let view: CloudSandboxStartupScriptView | undefined;
+    try {
+      view = getStartupScriptView(await (await this.requireLibrary()).runStartupScript(hostname, options));
+    } catch (error) {
+      view = { state: 'error', error: getCloudErrorMessage(error, 'The startup script could not run') };
+    }
+    if (this.startupRunIds.get(hostname) !== runId) return;
+    if (view) this.startupRuns.set(hostname, view);
+    else this.startupRuns.delete(hostname);
+    this.emit();
   }
 
   /** Runs a failed row's action again. */
@@ -271,6 +337,8 @@ export class CloudSandboxManager {
       });
       this.operations.delete(id);
       this.daemonVersions.delete(id);
+      // A stopped or removed sandbox's last run says nothing about its next one.
+      if (action === 'stop' || action === 'remove') this.forgetStartupRun(id);
       if (!summary) this.syncedClaudeModels.delete(id);
       else if (claudeModel) this.syncedClaudeModels.set(id, claudeModel);
       this.replaceListed(id, summary);
@@ -287,6 +355,11 @@ export class CloudSandboxManager {
     }
     this.schedulePoll();
     return this.emit();
+  }
+
+  private forgetStartupRun(hostname: string): void {
+    this.startupRuns.delete(hostname);
+    this.startupRunIds.set(hostname, (this.startupRunIds.get(hostname) ?? 0) + 1);
   }
 
   /** The sandbox's state as the provider reports it now, or null when that can't be read. */
@@ -450,6 +523,14 @@ function applyProgress(steps: CloudSandboxProgressStep[], progress: CloudProgres
   const index = finished.findIndex((step) => step.step === progress.step);
   if (index === -1) return [...finished, current];
   return finished.map((step, stepIndex) => stepIndex === index ? current : step);
+}
+
+/** How a startup script run shows on the row; undefined when no script has run. */
+export function getStartupScriptView(status: StartupScriptStatus | null): CloudSandboxStartupScriptView | undefined {
+  if (!status) return undefined;
+  if (status.exitCode === null || status.finishedAt === null) return { state: 'running' };
+  if (status.timedOut) return { state: 'failed', exitCode: status.exitCode, timedOut: true };
+  return { state: status.exitCode === 0 ? 'succeeded' : 'failed', exitCode: status.exitCode };
 }
 
 function toCredentialStatus(status: CloudCredentialsStatus): CloudCredentialStatus {

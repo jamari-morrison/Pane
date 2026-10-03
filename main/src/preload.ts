@@ -654,6 +654,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     removeCloudSandbox: (id: string): Promise<IPCResponse<CloudSandboxesSnapshot>> => invokeIpc('remote-daemon:remove-cloud-sandbox', id),
     retryCloudSandbox: (id: string): Promise<IPCResponse<CloudSandboxesSnapshot>> => invokeIpc('remote-daemon:retry-cloud-sandbox', id),
     dismissCloudSandbox: (id: string): Promise<IPCResponse<CloudSandboxesSnapshot>> => invokeIpc('remote-daemon:dismiss-cloud-sandbox', id),
+    getCloudStartupScript: (): Promise<IPCResponse<{ script: string }>> => invokeIpc('remote-daemon:get-cloud-startup-script'),
+    saveCloudStartupScript: (script: string): Promise<IPCResponse<CloudSandboxesSnapshot>> =>
+      invokeIpc('remote-daemon:save-cloud-startup-script', script),
+    readCloudSandboxStartupLog: (id: string): Promise<IPCResponse<{ log: string }>> =>
+      invokeIpc('remote-daemon:read-cloud-sandbox-startup-log', id),
     onCloudSandboxesChanged: (callback: (snapshot: CloudSandboxesSnapshot) => void) => {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, snapshot: CloudSandboxesSnapshot) => callback(snapshot);
       ipcRenderer.on('remote-daemon:cloud-sandboxes-changed', wrappedCallback);

@@ -777,6 +777,21 @@ export class API {
       return window.electronAPI.remoteDaemon.dismissCloudSandbox(id);
     },
 
+    async getCloudStartupScript() {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.getCloudStartupScript();
+    },
+
+    async saveCloudStartupScript(script: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.saveCloudStartupScript(script);
+    },
+
+    async readCloudSandboxStartupLog(id: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.readCloudSandboxStartupLog(id);
+    },
+
     onCloudSandboxesChanged(callback: (snapshot: CloudSandboxesSnapshot) => void) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.remoteDaemon.onCloudSandboxesChanged(callback);
