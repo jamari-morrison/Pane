@@ -409,6 +409,18 @@ jobs:
         if ($console -notmatch 'wallet') { throw 'the run did not reach the wallet check' }
         if ($console -match 'boat start') { throw 'a start was counted: must never happen here' }
         if (-not (Test-Path "$out\results.json")) { throw 'no results.json' }
+        # Run 8 must run every step and sub-check by DEFAULT (STEPS empty): Run 8 f2c32d2a silently lacked DW7.
+        $plan = ($console -split "`n" | Where-Object { $_ -match 'plan: steps=' } | Select-Object -First 1)
+        if (-not $plan) { throw 'no plan line' }
+        $steps = ([regex]::Match($plan, 'steps=(\S+)')).Groups[1].Value
+        if ($steps -ne 'D0,D1,D3,D2,D4,D5,DW7,D6,D7,D8,D9') { throw "default steps are '$steps', not D0,D1,D3,D2,D4,D5,DW7,D6,D7,D8,D9" }
+        foreach ($flag in 'd7-refresh=on', 'd7-doppler-noop=on', 'd7-failing-chip=on', 'dw7-doppler=on', 'd6-agent-env=on') {
+          if ($plan -notmatch [regex]::Escape($flag)) { throw "plan lacks $flag" }
+        }
+        foreach ($end in 'end: restore-local-start-script', 'end: restore-startup-script') {
+          if ($console -notmatch [regex]::Escape($end)) { throw "the run never reached '$end'" }
+        }
+        "default plan OK: $steps; D7 refresh/no-op/failing chip, DW7 Doppler, D6 agent env all on; both restores reached"
         "launcher smoke PASS: live console, relay mode, stopped at the wallet check, results.json + zip written"
 
     - uses: actions/upload-artifact@v7

@@ -85,7 +85,8 @@ const DOPPLER_BLOCK = Buffer.from('Y29tbWFuZCAtdiBkb3BwbGVyID4vZGV2L251bGwgMj4mM
 if (sha256Of(Buffer.from(DOPPLER_BLOCK)) !== 'a438951c6671a91ea9e7aee2b31897821dd446723bb8778c5e9708a18faafcb0') throw new Error('real-user: the embedded Doppler block is not byte-identical');
 const startupScript = `# cs-e2e marker (Run 8): one line per run\necho "${MARKER} $(date -Is)" >> ${STARTUP_MARKER_LOG}\necho ${MARKER}\n${env.STARTUP_DOPPLER === '1' ? DOPPLER_BLOCK : ''}`;
 
-const allSteps = ['D0', 'D1', 'D3', 'D2', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9'];
+// DW7 (done-when 7, E7's variable on the sandbox and in a Pane terminal) runs after D5, which it needs.
+const allSteps = ['D0', 'D1', 'D3', 'D2', 'D4', 'D5', 'DW7', 'D6', 'D7', 'D8', 'D9'];
 const wanted = new Set(env.STEPS ? env.STEPS.split(',') : allSteps);
 // NO_REMOVE=1: the sandbox stays for a report first; Remove is a later STEPS=D9 run (orchestrator, rehearsal 2).
 if (env.NO_REMOVE !== '1') wanted.add('D9');
@@ -987,6 +988,7 @@ async function dopplerInstalled(hostPanelId) {
 }
 
 async function restoreLocalStartScript() {
+  log('end: restore-local-start-script');
   if (!original.localStart) return;
   const wanted = original.localStart.sha;
   await openCloud().catch(() => undefined);
@@ -2064,6 +2066,7 @@ function restoreStartupScriptLocally() {
 }
 
 async function restoreStartupScript() {
+  log('end: restore-startup-script');
   if (!cloud || original.startupScript === undefined) return;
   let how = 'ui';
   await openCloud().catch(() => undefined);
@@ -2158,6 +2161,10 @@ async function main() {
   fs.mkdirSync(flagDir, { recursive: true });
   for (const name of ['gh-signed-in', 'codex-signed-in']) fs.rmSync(path.join(flagDir, name), { force: true });
   log(`mode ${mode}, steps ${[...wanted].join(',')}, flags in ${flagDir}`);
+  // One machine-checkable line (the launcher smoke asserts it): the steps in order and D7's sub-checks, from the same
+  // conditions the code uses.
+  const d7Refresh = cloud && env.E7 !== '0';
+  log(`plan: steps=${[...wanted].join(',')} d7-refresh=${d7Refresh ? 'on' : 'off'} d7-doppler-noop=${env.STARTUP_DOPPLER === '1' ? 'on' : 'off'} d7-failing-chip=${cloud ? 'on' : 'off'} dw7-doppler=${env.STARTUP_DOPPLER === '1' ? 'on' : 'off'} d6-agent-env=${cloud && env.E7 !== '0' ? 'on' : 'off'}`);
   if (mode === 'live') await liveCredentials();
   if (mode === 'fake') {
     const payload = fakeSetup();
