@@ -802,8 +802,27 @@ async function waitForFlag(name, instructions, timeoutMs = Number(env.PAUSE_TIME
 }
 
 // ---------------------------------------------------------------- D0: startup script + Add cloud sandbox
+// E5 has ONE startup script for every sandbox and saving it runs it on every running sandbox: with another sandbox up
+// (Red's testina) a save would run the kit's script there. Every save is refused while any other row is active.
+async function otherActiveSandboxes() {
+  const rows = page.getByRole('listitem', { name: /^Cloud sandbox / });
+  const active = [];
+  for (const row of await rows.all()) {
+    const label = ((await row.getAttribute('aria-label').catch(() => '')) ?? '').replace(/^Cloud sandbox /, '');
+    const text = ((await row.innerText().catch(() => '')) ?? '').replace(/\s+/g, ' ');
+    if (label && label !== state.label && /(^|\s)(Running|Starting|Stopping|Creating|Updating|Saving)(\s|$)/.test(text)) active.push(label);
+  }
+  return active;
+}
+async function guardStartupScriptSave(what) {
+  const others = await otherActiveSandboxes();
+  check(`no-other-sandbox-running-before-${what}`, others.length === 0, others.length ? `refusing to save the startup script: it would run on ${others.join(', ')}` : 'no other sandbox is active');
+  if (others.length) throw new Error(`another sandbox is active (${others.join(', ')}); the startup script was NOT saved (stop it first)`);
+}
+
 async function d0() {
   await openCloud();
+  await guardStartupScriptSave('d0');
   if (relay) {
     const status = await ui.credentialStatus().allTextContents();
     check('wallet-is-test', status[1]?.trim() === 'test', `the saved boat wallet is "${status[1] ?? ''}"`);
@@ -1603,6 +1622,7 @@ async function d7() {
 
 async function d7FailingVariant() {
   await openCloud();
+  await guardStartupScriptSave('failing-variant');
   await ui.startupScript().fill(`${startupScript}exit 1\n`);
   await ui.saveStartupScript().click();
   const chip = await until(async () => (await visible(ui.startupChip(state.label), 500)) && await ui.startupChip(state.label).innerText(), 660_000, 3000);
@@ -1781,6 +1801,10 @@ async function d9() {
 async function restoreStartupScript() {
   if (!cloud || original.startupScript === undefined) return;
   await openCloud();
+  if ((await otherActiveSandboxes()).length > 0) {
+    results.regression.push({ name: 'startup-script-restored', verdict: 'FAIL', detail: 'NOT restored: another sandbox is active and a save would run it there; restore it by hand once it is stopped' });
+    return;
+  }
   await ui.startupScript().fill(original.startupScript);
   await ui.saveStartupScript().click();
   const ok = await visible(ui.settingsDialog().getByText('Saved', { exact: true }), 10_000);
