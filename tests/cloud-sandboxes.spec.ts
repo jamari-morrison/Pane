@@ -7,6 +7,7 @@ type CloudMockControls = {
   reportCloudStep(name: string, step: CloudSandboxProgressStep): void;
   finishCloudCreate(name: string, failure?: string): void;
   failNextCloudAction(action: CloudSandboxAction, message: string): void;
+  setCloudSandbox(id: string, updates: Partial<CloudSandboxView>): void;
   getCloudCalls(): Array<{ action: CloudSandboxAction; id: string }>;
   getCloudCredentialUpdateKeys(): string[][];
 };
@@ -210,6 +211,46 @@ test('the host switcher starts a stopped sandbox, then connects to it', async ({
   expect(await cloudMock(page, (mock) => mock.getCloudCalls())).toEqual([{ action: 'start', id: 'rp-beta' }]);
   await page.getByRole('button', { name: 'Agents run on beta. Switch host' }).click();
   await expect(page.getByRole('menuitemradio', { name: /beta/ })).toContainText('Connected · https://rp-beta.tail1234.ts.net');
+});
+
+test('a sandbox boat is still saving shows Stopping in the row and the switcher, then Stopped with Start', async ({ page }, testInfo) => {
+  await installElectronApiMock(page, {
+    cloudSandboxes: {
+      credentials: ALL_CREDENTIALS,
+      sandboxes: [cloudSandbox('beta')],
+      profiles: [cloudProfile('beta')],
+    },
+  });
+  await openRemoteAccess(page);
+  const row = page.getByRole('listitem', { name: 'Cloud sandbox beta' });
+  await expect(row.getByText('Running', { exact: true })).toBeVisible();
+
+  // What main pushes after a Stop that outlived its wait while boat still archives.
+  await cloudMock(page, (mock) => mock.setCloudSandbox('rp-beta', { state: 'stopping', pending: 'stopping', progress: 'Saving the sandbox…' }));
+  await expect(row.getByText('Stopping', { exact: true })).toBeVisible();
+  await expect(row.getByRole('status')).toHaveText('Saving the sandbox…');
+  await expect(row.getByRole('button', { name: /^(Stop|Start) beta$/ })).toHaveCount(0);
+  await row.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('cloud-row-stopping.png') });
+
+  await cloudMock(page, (mock) => mock.setCloudSandbox('rp-beta', { state: 'stopping', pending: undefined, progress: undefined }));
+  await expect(row.getByText('Stopping', { exact: true })).toBeVisible();
+  await expect(row.getByRole('button', { name: /^(Stop|Start) beta$/ })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Close modal' }).click();
+  await page.getByRole('button', { name: 'Agents run on This computer. Switch host' }).click();
+  const switcherRow = page.getByRole('menuitemradio', { name: /beta/ });
+  await expect(switcherRow).toContainText('Stopping cloud sandbox…');
+  await expect(switcherRow).toBeDisabled();
+  await page.screenshot({ path: testInfo.outputPath('switcher-stopping.png') });
+
+  await cloudMock(page, (mock) => mock.setCloudSandbox('rp-beta', { state: 'stopped' }));
+  await expect(switcherRow).toContainText('Stopped · Select to start');
+  await expect(switcherRow).toBeEnabled();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Settings' }).first().click();
+  await page.getByRole('button', { name: 'Remote Access', exact: true }).click();
+  await expect(row.getByText('Stopped', { exact: true })).toBeVisible();
+  await expect(row.getByRole('button', { name: 'Start beta' })).toBeVisible();
 });
 
 test('without the cloud library the section explains itself and remote hosts are unchanged', async ({ page }) => {

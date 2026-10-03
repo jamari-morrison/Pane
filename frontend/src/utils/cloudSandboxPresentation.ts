@@ -6,6 +6,7 @@ interface CloudSandboxBadge {
 }
 
 export function getCloudSandboxBadge(sandbox: CloudSandboxView): CloudSandboxBadge {
+  if (sandbox.stateUnknown) return { label: 'Checking', variant: 'default' };
   if (sandbox.pending === 'starting') return { label: 'Starting', variant: 'info' };
   if (sandbox.pending === 'stopping') return { label: 'Stopping', variant: 'info' };
   if (sandbox.pending === 'removing') return { label: 'Removing', variant: 'warning' };
@@ -51,7 +52,7 @@ export type CloudSandboxRowAction = 'retry' | 'dismiss' | 'start' | 'stop' | 'up
 
 /** The buttons a row offers, in display order. A row with work in flight offers none. */
 export function getCloudSandboxActions(sandbox: CloudSandboxView): CloudSandboxRowAction[] {
-  if (sandbox.pending || sandbox.state === 'creating' || sandbox.state === 'starting' || sandbox.state === 'stopping') return [];
+  if (sandbox.pending || sandbox.stateUnknown || sandbox.state === 'creating' || sandbox.state === 'starting' || sandbox.state === 'stopping') return [];
   const actions: CloudSandboxRowAction[] = sandbox.failedAction ? ['retry', 'dismiss'] : [];
   // A failed create has no sandbox yet: Retry or Dismiss are all it can do.
   if (!sandbox.hostname) return actions;
@@ -74,6 +75,7 @@ export interface CloudHostSwitcherEntry {
 /** How the host switcher shows a saved host that is a cloud sandbox; null keeps the normal row. */
 export function getCloudHostSwitcherEntry(sandbox: CloudSandboxView | undefined): CloudHostSwitcherEntry | null {
   if (!sandbox) return null;
+  if (sandbox.stateUnknown) return { description: 'Checking cloud sandbox…', action: 'wait' };
   if (sandbox.pending === 'starting' || sandbox.state === 'starting') return { description: 'Starting cloud sandbox…', action: 'wait' };
   if (sandbox.pending === 'stopping' || sandbox.state === 'stopping') return { description: 'Stopping cloud sandbox…', action: 'wait' };
   if (sandbox.pending === 'removing') return { description: 'Removing cloud sandbox…', action: 'wait' };

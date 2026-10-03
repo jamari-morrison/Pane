@@ -86,6 +86,39 @@ describe('getCloudSandboxActions', () => {
   });
 });
 
+describe('a sandbox the provider is still stopping (D4)', () => {
+  const stopping = sandbox({ state: 'stopping', progress: undefined });
+
+  it('shows Stopping on the row with neither Stop nor Start', () => {
+    expect(getCloudSandboxBadge(stopping)).toEqual({ label: 'Stopping', variant: 'info' });
+    expect(getCloudSandboxActions(stopping)).toEqual([]);
+  });
+
+  it('shows Stopping in the switcher with no Start', () => {
+    expect(getCloudHostSwitcherEntry(stopping)).toEqual({ description: 'Stopping cloud sandbox…', action: 'wait' });
+  });
+
+  it('offers Start on the row and in the switcher once the provider says stopped', () => {
+    const stopped = sandbox({ state: 'stopped' });
+    expect(getCloudSandboxBadge(stopped).label).toBe('Stopped');
+    expect(getCloudSandboxActions(stopped)).toContain('start');
+    expect(getCloudHostSwitcherEntry(stopped)).toEqual({ description: 'Stopped · Select to start', action: 'start' });
+  });
+
+  it('shows an unreadable state as Checking, with no actions on the row or in the switcher', () => {
+    const unknown = sandbox({ state: 'running', stateUnknown: true, failedAction: 'stop', error: 'did not reach stopped' });
+    expect(getCloudSandboxBadge(unknown)).toEqual({ label: 'Checking', variant: 'default' });
+    expect(getCloudSandboxActions(unknown)).toEqual([]);
+    expect(getCloudHostSwitcherEntry(unknown)).toEqual({ description: 'Checking cloud sandbox…', action: 'wait' });
+  });
+
+  it('shows a failed action on a running sandbox as Running with the error', () => {
+    const failed = sandbox({ state: 'running', failedAction: 'stop', error: 'boat refused the stop' });
+    expect(getCloudSandboxBadge(failed).label).toBe('Running');
+    expect(getCloudSandboxActions(failed)).toEqual(['retry', 'dismiss', 'stop', 'remove']);
+  });
+});
+
 describe('getCloudHostSwitcherEntry', () => {
   it('keeps the normal row for ordinary hosts and running sandboxes', () => {
     expect(getCloudHostSwitcherEntry(undefined)).toBeNull();

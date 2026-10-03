@@ -1281,6 +1281,7 @@ describe('cloud sandbox IPC', () => {
         await hostsRef.current?.remove('session-alpha');
       }),
       syncAgentDefaults: vi.fn(async () => alpha),
+      status: vi.fn(async () => alpha),
       ...overrides,
     };
     return {
@@ -1447,7 +1448,7 @@ describe('cloud sandbox IPC', () => {
     await vi.waitFor(() => expect(readCloudDaemonVersion).toHaveBeenCalledWith(cloudProfile));
     await ipcMain.handlers.get('remote-daemon:update-cloud-sandbox')?.({}, 'rp-alpha');
 
-    expect(cloud.library.update).toHaveBeenCalledWith('rp-alpha', { debUrl: 'https://example.test/2.4.146.deb', sha256: 'f'.repeat(64) });
+    expect(cloud.library.update).toHaveBeenCalledWith('rp-alpha', { debUrl: 'https://example.test/2.4.146.deb', sha256: 'f'.repeat(64) }, expect.any(Function));
   });
 
   it('gives a cloud sandbox the default model when the desktop connects to it, once per connect', async () => {

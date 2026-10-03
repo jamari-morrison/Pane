@@ -11,6 +11,7 @@ import type {
 import type {
   CloudCredentialsStatus,
   CloudProgress,
+  CloudProgressListener,
   CloudSandboxes,
   CloudSandboxInfo,
 } from '../../../packages/runpane/src/cloud/api';
@@ -24,7 +25,7 @@ import type {
 /** The parts of the cloud library this app calls. */
 export type CloudSandboxLibrary = Pick<
   CloudSandboxes,
-  'setup' | 'getCredentialsStatus' | 'create' | 'list' | 'stop' | 'start' | 'update' | 'remove' | 'syncAgentDefaults'
+  'setup' | 'getCredentialsStatus' | 'create' | 'list' | 'status' | 'stop' | 'start' | 'update' | 'remove' | 'syncAgentDefaults'
 >;
 
 /** A Pane .deb the cloud library installs on a running sandbox: https only, checked against sha256. */
@@ -46,6 +47,8 @@ interface CloudSandboxOperation {
   /** Set for creates, so Retry can run the same request again. */
   request?: CloudSandboxCreateRequest;
   steps: CloudSandboxProgressStep[];
+  /** The library's latest progress message for a host action in flight. */
+  progress?: string;
   error?: string;
 }
 
@@ -64,11 +67,14 @@ interface CloudSandboxManagerOptions {
    * this only decides when a sandbox needs it again.
    */
   readDefaultClaudeModel: () => Promise<string | null>;
+  /** How often a sandbox that is stopping or starting is read again until it settles (default 5 s). */
+  pollIntervalMs?: number;
 }
 
 type HostAction = Exclude<CloudSandboxAction, 'create'>;
 
 const CREATE_ID_PREFIX = 'create:';
+const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const NO_CREDENTIALS: CloudCredentialStatus = { boat: false, tailscale: false, claude: false };
 
 export class CloudSandboxManager {
@@ -83,6 +89,9 @@ export class CloudSandboxManager {
   /** The default Claude model each sandbox was last given, by hostname; absent means unknown. */
   private readonly syncedClaudeModels = new Map<string, string | null>();
   private readonly syncingClaudeModels = new Set<string>();
+  private pollTimer: NodeJS.Timeout | undefined;
+  /** Sandboxes whose state could not be read after a failed host action; shown as unknown until read. */
+  private readonly unconfirmed = new Set<string>();
 
   constructor(private readonly options: CloudSandboxManagerOptions) {}
 
@@ -117,6 +126,8 @@ export class CloudSandboxManager {
         updateAvailable: Boolean(this.options.appVersion) && daemonVersion !== undefined
           && comparePaneVersions(daemonVersion, this.options.appVersion ?? '') !== 0,
         pending: operation?.running ? getPendingAction(operation.action) : undefined,
+        progress: operation?.running ? operation.progress : undefined,
+        stateUnknown: this.unconfirmed.has(summary.hostname) || undefined,
         error: operation?.error ?? (summary.state === 'gone' ? 'boat.dev no longer has this sandbox.' : undefined),
         failedAction: operation?.error ? operation.action : undefined,
       });
@@ -145,6 +156,7 @@ export class CloudSandboxManager {
     // Versions arrive in a later snapshot so a slow or asleep daemon never holds up the list.
     for (const summary of this.listed) void this.readDaemonVersion(summary);
     void this.syncDefaultClaudeModel();
+    this.schedulePoll();
     return snapshot;
   }
 
@@ -189,25 +201,25 @@ export class CloudSandboxManager {
   }
 
   start(id: string): Promise<CloudSandboxesSnapshot> {
-    return this.runHostAction(id, 'start', (library, hostname) => library.start(hostname));
+    return this.runHostAction(id, 'start', (library, hostname, onProgress) => library.start(hostname, onProgress));
   }
 
   stop(id: string): Promise<CloudSandboxesSnapshot> {
-    return this.runHostAction(id, 'stop', (library, hostname) => library.stop(hostname));
+    return this.runHostAction(id, 'stop', (library, hostname, onProgress) => library.stop(hostname, onProgress));
   }
 
   /** Installs this app's Pane version on a running sandbox. */
   update(id: string): Promise<CloudSandboxesSnapshot> {
-    return this.runHostAction(id, 'update', async (library, hostname) => {
+    return this.runHostAction(id, 'update', async (library, hostname, onProgress) => {
       const { appVersion } = this.options;
       if (!appVersion) throw new Error('This app does not know its own Pane version.');
-      return library.update(hostname, await this.options.resolvePaneDeb(appVersion));
+      return library.update(hostname, await this.options.resolvePaneDeb(appVersion), onProgress);
     });
   }
 
   remove(id: string): Promise<CloudSandboxesSnapshot> {
-    return this.runHostAction(id, 'remove', async (library, hostname) => {
-      await library.remove(hostname);
+    return this.runHostAction(id, 'remove', async (library, hostname, onProgress) => {
+      await library.remove(hostname, onProgress);
       return null;
     });
   }
@@ -240,7 +252,7 @@ export class CloudSandboxManager {
   private async runHostAction(
     id: string,
     action: HostAction,
-    run: (library: CloudSandboxLibrary, hostname: string) => Promise<CloudSandboxInfo | null>,
+    run: (library: CloudSandboxLibrary, hostname: string, onProgress: CloudProgressListener) => Promise<CloudSandboxInfo | null>,
   ): Promise<CloudSandboxesSnapshot> {
     const library = await this.requireLibrary();
     const listed = this.listed.find((summary) => summary.hostname === id);
@@ -252,7 +264,11 @@ export class CloudSandboxManager {
     try {
       // start and update give the sandbox the user's default model; remember which one it got.
       const claudeModel = action === 'start' || action === 'update' ? await this.readDefaultClaudeModel() : undefined;
-      const summary = await run(library, listed.hostname);
+      const summary = await run(library, listed.hostname, (progress) => {
+        if (progress.step === 'done') return;
+        operation.progress = progress.message;
+        this.emit();
+      });
       this.operations.delete(id);
       this.daemonVersions.delete(id);
       if (!summary) this.syncedClaudeModels.delete(id);
@@ -261,9 +277,64 @@ export class CloudSandboxManager {
       if (summary) void this.readDaemonVersion(summary);
     } catch (error) {
       operation.running = false;
-      operation.error = getCloudErrorMessage(error, `Failed to ${action} ${listed.label}`);
+      const message = getCloudErrorMessage(error, `Failed to ${action} ${listed.label}`);
+      // Never keep the pre-action summary: show what the provider says now.
+      const current = await this.readProviderState(library, listed.hostname);
+      operation.error = message;
+      if (current) this.applyProviderState(current);
+      // Unreadable too: the old summary is not the state any more, so show it as unknown and keep asking.
+      else this.unconfirmed.add(id);
     }
+    this.schedulePoll();
     return this.emit();
+  }
+
+  /** The sandbox's state as the provider reports it now, or null when that can't be read. */
+  private async readProviderState(library: CloudSandboxLibrary, hostname: string): Promise<CloudSandboxInfo | null> {
+    try {
+      return await library.status(hostname);
+    } catch (error) {
+      console.warn(`[CloudSandboxes] Could not read ${hostname}'s state:`, getCloudErrorMessage(error, 'status failed'));
+      return null;
+    }
+  }
+
+  /** Reads sandboxes that are stopping or starting again, every poll interval, until they settle. */
+  private schedulePoll(): void {
+    if (this.pollTimer || !this.listed.some((summary) => this.isSettling(summary))) return;
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = undefined;
+      void this.pollSettling();
+    }, this.options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
+    this.pollTimer.unref();
+  }
+
+  /** Takes what the provider says as the row's state; a Stop it is still saving, or has saved, is not a failure. */
+  private applyProviderState(current: CloudSandboxInfo): void {
+    this.unconfirmed.delete(current.hostname);
+    this.replaceListed(current.hostname, current);
+    const operation = this.operations.get(current.hostname);
+    if (operation?.action === 'stop' && !operation.running && (current.state === 'stopping' || current.state === 'stopped')) {
+      this.operations.delete(current.hostname);
+    }
+  }
+
+  private isSettling(summary: CloudSandboxInfo): boolean {
+    if (this.operations.get(summary.hostname)?.running) return false;
+    return summary.state === 'stopping' || summary.state === 'starting' || this.unconfirmed.has(summary.hostname);
+  }
+
+  private async pollSettling(): Promise<void> {
+    const library = await this.getLibrary();
+    if (!library) return;
+    const settling = this.listed.filter((summary) => this.isSettling(summary));
+    const read = await Promise.all(settling.map((summary) => this.readProviderState(library, summary.hostname)));
+    for (const current of read) {
+      // A host action started meanwhile owns the row; its result replaces it.
+      if (current && !this.operations.get(current.hostname)?.running) this.applyProviderState(current);
+    }
+    this.emit();
+    this.schedulePoll();
   }
 
   /**
@@ -309,6 +380,7 @@ export class CloudSandboxManager {
   }
 
   private replaceListed(hostname: string, summary: CloudSandboxInfo | null): void {
+    if (!summary) this.unconfirmed.delete(hostname);
     const others = this.listed.filter((current) => current.hostname !== hostname);
     const index = this.listed.findIndex((current) => current.hostname === hostname);
     if (!summary) {

@@ -41,6 +41,7 @@ function createLibrary(overrides: Partial<CloudSandboxLibrary> = {}): CloudSandb
     update: vi.fn(async () => summary()),
     remove: vi.fn(async () => undefined),
     syncAgentDefaults: vi.fn(async (host: string) => summary({ hostname: host })),
+    status: vi.fn(async (host: string) => summary({ hostname: host })),
     ...overrides,
   };
 }
@@ -49,6 +50,7 @@ function createManager(library: CloudSandboxLibrary | Error, options: {
   appVersion?: string;
   readDaemonVersion?: (profileId: string) => Promise<string | undefined>;
   readDefaultClaudeModel?: () => Promise<string | null>;
+  pollIntervalMs?: number;
 } = {}) {
   const snapshots: CloudSandboxesSnapshot[] = [];
   const resolvePaneDeb = vi.fn(async (version: string) => ({
@@ -62,6 +64,7 @@ function createManager(library: CloudSandboxLibrary | Error, options: {
     readDaemonVersion: options.readDaemonVersion ?? (async () => '2.4.146'),
     resolvePaneDeb,
     readDefaultClaudeModel: options.readDefaultClaudeModel ?? (async () => null),
+    pollIntervalMs: options.pollIntervalMs ?? 10,
   });
   return { manager, snapshots, resolvePaneDeb };
 }
@@ -193,7 +196,9 @@ describe('CloudSandboxManager', () => {
     const start = vi.fn<CloudSandboxLibrary['start']>()
       .mockRejectedValueOnce(new Error('boat resume timed out'))
       .mockResolvedValueOnce(summary());
-    const { manager } = createManager(createLibrary({ list: vi.fn(async () => [summary({ state: 'stopped' })]), start }));
+    // The provider still has it stopped after the failed resume.
+    const status = vi.fn<CloudSandboxLibrary['status']>().mockResolvedValue(summary({ state: 'stopped' }));
+    const { manager } = createManager(createLibrary({ list: vi.fn(async () => [summary({ state: 'stopped' })]), start, status }));
     await manager.refresh();
 
     const failed = await manager.start('rp-alpha');
@@ -211,7 +216,7 @@ describe('CloudSandboxManager', () => {
 
     const snapshot = await manager.remove('rp-alpha');
 
-    expect(library.remove).toHaveBeenCalledWith('rp-alpha');
+    expect(library.remove).toHaveBeenCalledWith('rp-alpha', expect.any(Function));
     expect(snapshot.sandboxes).toEqual([]);
   });
 
@@ -234,7 +239,7 @@ describe('CloudSandboxManager', () => {
     expect(library.update).toHaveBeenCalledWith('rp-alpha', {
       debUrl: 'https://example.test/Pane-2.4.146-linux-amd64.deb',
       sha256: 'a'.repeat(64),
-    });
+    }, expect.any(Function));
     await vi.waitFor(() => expect(snapshots.at(-1)?.sandboxes[0]).toMatchObject({
       daemonVersion: '2.4.146',
       updateAvailable: false,
@@ -454,6 +459,132 @@ describe('CloudSandboxManager default Claude model', () => {
 
     expect(library.syncAgentDefaults).toHaveBeenCalledTimes(1);
     expect(library.syncAgentDefaults).toHaveBeenCalledWith('rp-beta');
+  });
+});
+
+describe('CloudSandboxManager after a slow or failed host action (D4)', () => {
+  const stopTimeout = () => new Error('Sandbox bx_1 did not reach stopped within 120 s (still archiving).');
+
+  it('shows Stopping, with no error, when a Stop fails while the provider is still saving the sandbox', async () => {
+    const library = createLibrary({
+      list: vi.fn(async () => [summary()]),
+      stop: vi.fn(async () => { throw stopTimeout(); }),
+      status: vi.fn(async () => summary({ state: 'stopping', providerState: 'archiving', startedAt: undefined })),
+    });
+    const { manager } = createManager(library, { pollIntervalMs: 60_000 });
+    await manager.refresh();
+
+    const snapshot = await manager.stop('rp-alpha');
+
+    expect(library.status).toHaveBeenCalledWith('rp-alpha');
+    expect(snapshot.sandboxes[0]).toMatchObject({ state: 'stopping', pending: undefined, error: undefined, failedAction: undefined });
+  });
+
+  it('keeps reading a stopping sandbox until it is stopped', async () => {
+    const status = vi.fn<CloudSandboxLibrary['status']>()
+      .mockResolvedValueOnce(summary({ state: 'stopping', providerState: 'archiving' }))
+      .mockResolvedValueOnce(summary({ state: 'stopping', providerState: 'archiving' }))
+      .mockResolvedValue(summary({ state: 'stopped', providerState: 'archived', startedAt: undefined }));
+    const library = createLibrary({
+      list: vi.fn(async () => [summary()]),
+      stop: vi.fn(async () => { throw stopTimeout(); }),
+      status,
+    });
+    const { manager, snapshots } = createManager(library);
+    await manager.refresh();
+
+    await manager.stop('rp-alpha');
+    await vi.waitFor(() => expect(snapshots.at(-1)?.sandboxes[0]?.state).toBe('stopped'));
+    const callsWhenStopped = status.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(callsWhenStopped).toBeGreaterThanOrEqual(3);
+    expect(status).toHaveBeenCalledTimes(callsWhenStopped);
+    expect(snapshots.at(-1)?.sandboxes[0]).toMatchObject({ state: 'stopped', error: undefined });
+  });
+
+  it('also follows a sandbox the list reports as stopping', async () => {
+    const status = vi.fn<CloudSandboxLibrary['status']>().mockResolvedValue(summary({ state: 'stopped' }));
+    const library = createLibrary({ list: vi.fn(async () => [summary({ state: 'stopping' })]), status });
+    const { manager, snapshots } = createManager(library);
+
+    await manager.refresh();
+
+    await vi.waitFor(() => expect(snapshots.at(-1)?.sandboxes[0]?.state).toBe('stopped'));
+  });
+
+  it('shows the provider\'s real state plus the error when a failed action left the sandbox running', async () => {
+    const library = createLibrary({
+      list: vi.fn(async () => [summary({ startedAt: '2026-10-01T10:00:00.000Z' })]),
+      stop: vi.fn(async () => { throw new Error('boat refused the stop: busy'); }),
+      // The re-read is real: it brings a different start time than the row had.
+      status: vi.fn(async () => summary({ startedAt: '2026-10-02T09:00:00.000Z' })),
+    });
+    const { manager } = createManager(library, { pollIntervalMs: 60_000 });
+    await manager.refresh();
+
+    const snapshot = await manager.stop('rp-alpha');
+
+    expect(snapshot.sandboxes[0]).toMatchObject({
+      state: 'running',
+      startedAt: '2026-10-02T09:00:00.000Z',
+      error: 'boat refused the stop: busy',
+      failedAction: 'stop',
+    });
+  });
+
+  it('keeps the error of a failed Start even when the sandbox runs (its daemon may not answer)', async () => {
+    const library = createLibrary({
+      list: vi.fn(async () => [summary({ state: 'stopped' })]),
+      start: vi.fn(async () => { throw new Error('Pane did not answer within 90 s'); }),
+      status: vi.fn(async () => summary()),
+    });
+    const { manager } = createManager(library, { pollIntervalMs: 60_000 });
+    await manager.refresh();
+
+    const snapshot = await manager.start('rp-alpha');
+
+    expect(snapshot.sandboxes[0]).toMatchObject({ state: 'running', error: 'Pane did not answer within 90 s', failedAction: 'start' });
+  });
+
+  it('never shows the pre-Stop Running row when the provider cannot be read either, and keeps asking', async () => {
+    const status = vi.fn<CloudSandboxLibrary['status']>()
+      .mockRejectedValueOnce(new Error('boat.dev is unreachable'))
+      .mockRejectedValueOnce(new Error('boat.dev is unreachable'))
+      .mockResolvedValue(summary({ state: 'stopping', providerState: 'archiving' }));
+    const library = createLibrary({
+      list: vi.fn(async () => [summary()]),
+      stop: vi.fn(async () => { throw stopTimeout(); }),
+      status,
+    });
+    const { manager, snapshots } = createManager(library);
+    await manager.refresh();
+
+    const snapshot = await manager.stop('rp-alpha');
+
+    expect(snapshot.sandboxes[0]).toMatchObject({ stateUnknown: true, failedAction: 'stop' });
+    expect(snapshot.sandboxes[0]?.error).toContain('did not reach stopped');
+    // Once the provider answers, the row is what it says: still saving, so Stopping and no error.
+    await vi.waitFor(() => expect(snapshots.at(-1)?.sandboxes[0]).toMatchObject({ state: 'stopping', stateUnknown: undefined, error: undefined }));
+  });
+
+  it('shows the library\'s progress, such as "Saving the sandbox…", while a Stop is in flight', async () => {
+    let finish: ((value: CloudSandboxInfo) => void) | undefined;
+    const library = createLibrary({
+      list: vi.fn(async () => [summary()]),
+      stop: vi.fn((_host: string, onProgress?: CloudProgressListener) => {
+        onProgress?.({ step: 'stopping', message: 'Saving the sandbox…' });
+        return new Promise<CloudSandboxInfo>((resolve) => { finish = resolve; });
+      }),
+    });
+    const { manager, snapshots } = createManager(library, { pollIntervalMs: 60_000 });
+    await manager.refresh();
+
+    const stopped = manager.stop('rp-alpha');
+    await vi.waitFor(() => expect(snapshots.at(-1)?.sandboxes[0]).toMatchObject({ pending: 'stopping', progress: 'Saving the sandbox…' }));
+    finish?.(summary({ state: 'stopped' }));
+
+    expect((await stopped).sandboxes[0]).toMatchObject({ state: 'stopped', pending: undefined, progress: undefined });
   });
 });
 

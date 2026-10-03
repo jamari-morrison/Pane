@@ -62,6 +62,10 @@ export interface CloudSandboxView {
   /** The daemon runs a different Pane version than this app; Update Pane installs this app's. */
   updateAvailable?: boolean;
   pending?: CloudSandboxPendingAction;
+  /** The library's latest progress message while `pending`, e.g. "Saving the sandbox…" during a Stop. */
+  progress?: string;
+  /** The provider could not be read after a failed action, so `state` may be out of date; it is being read again. */
+  stateUnknown?: boolean;
   /** Provisioning steps so far, while creating or after a failed create. */
   steps?: CloudSandboxProgressStep[];
   error?: string;

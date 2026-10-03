@@ -300,6 +300,9 @@ function CloudSandboxRow({ sandbox, now, onAction }: {
             <Badge size="sm" variant={badge.variant}>{badge.label}</Badge>
           </p>
           {details && <p className="mt-1 truncate text-xs text-text-tertiary">{details}</p>}
+          {sandbox.progress && (
+            <p className="mt-1 truncate text-xs text-text-secondary" role="status">{sandbox.progress}</p>
+          )}
         </div>
         <div className="flex flex-none flex-wrap justify-end gap-1">
           {sandbox.pending && <Loader2 className="h-4 w-4 animate-spin text-text-tertiary" aria-hidden="true" />}
