@@ -21,6 +21,9 @@ import { addSecret, loadSecret, redact, scanForSecrets, scanForTokenShapes, secr
 import { boatExec, boatSandbox, daemonInvoke, health, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
 
 const env = process.env;
+function sha256Of(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
 // Video needs Playwright's ffmpeg: the Windows kit ships it in kit/ms-playwright (cs-desktop.yml). Playwright reads this
 // when it loads, so it is imported after.
 const kitBrowsers = fileURLToPath(new URL('./ms-playwright', import.meta.url));
@@ -76,7 +79,11 @@ const DUMMY_GITHUB_TOKEN = 'e2e-dummy-not-a-real-token-0000';
 const GH_PREFILL = env.GH_PREFILL ?? 'BROWSER=false gh auth login --web --git-protocol https && gh auth setup-git';
 const MARKER = 'E2E_MARKER';
 const STARTUP_MARKER_LOG = '~/e2e-startup-marker.log';
-const startupScript = `# cs-e2e marker (Run 8): one line per run\necho "${MARKER} $(date -Is)" >> ${STARTUP_MARKER_LOG}\necho ${MARKER}\n`;
+// STARTUP_DOPPLER=1 (drop-10 rehearsal, relay 1:46): the startup script also carries EXACTLY Red's Doppler block
+// (~/rc-loop/briefs/real/msgs/doppler-block.sh, byte for byte: embedded and hash-checked). Doppler login stays the user's job.
+const DOPPLER_BLOCK = Buffer.from('Y29tbWFuZCAtdiBkb3BwbGVyID4vZGV2L251bGwgMj4mMSB8fCB7CiAgc3VkbyBhcHQtZ2V0IHVwZGF0ZSAmJiBzdWRvIGFwdC1nZXQgaW5zdGFsbCAteSBhcHQtdHJhbnNwb3J0LWh0dHBzIGNhLWNlcnRpZmljYXRlcyBjdXJsIGdudXBnICYmCiAgY3VybCAtc0xmIC0tcmV0cnkgMyAtLXRsc3YxLjIgLS1wcm90byAiPWh0dHBzIiAnaHR0cHM6Ly9wYWNrYWdlcy5kb3BwbGVyLmNvbS9wdWJsaWMvY2xpL2dwZy5ERTJBNzc0MUEzOTdDMTI5LmtleScgfCBzdWRvIGdwZyAtLWRlYXJtb3IgLS15ZXMgLW8gL3Vzci9zaGFyZS9rZXlyaW5ncy9kb3BwbGVyLWFyY2hpdmUta2V5cmluZy5ncGcgJiYKICBlY2hvICJkZWIgW3NpZ25lZC1ieT0vdXNyL3NoYXJlL2tleXJpbmdzL2RvcHBsZXItYXJjaGl2ZS1rZXlyaW5nLmdwZ10gaHR0cHM6Ly9wYWNrYWdlcy5kb3BwbGVyLmNvbS9wdWJsaWMvY2xpL2RlYi9kZWJpYW4gYW55LXZlcnNpb24gbWFpbiIgfCBzdWRvIHRlZSAvZXRjL2FwdC9zb3VyY2VzLmxpc3QuZC9kb3BwbGVyLWNsaS5saXN0ID4vZGV2L251bGwgJiYKICBzdWRvIGFwdC1nZXQgdXBkYXRlICYmIHN1ZG8gYXB0LWdldCBpbnN0YWxsIC15IGRvcHBsZXIKfQo=', 'base64').toString('utf8');
+if (sha256Of(Buffer.from(DOPPLER_BLOCK)) !== 'a438951c6671a91ea9e7aee2b31897821dd446723bb8778c5e9708a18faafcb0') throw new Error('real-user: the embedded Doppler block is not byte-identical');
+const startupScript = `# cs-e2e marker (Run 8): one line per run\necho "${MARKER} $(date -Is)" >> ${STARTUP_MARKER_LOG}\necho ${MARKER}\n${env.STARTUP_DOPPLER === '1' ? DOPPLER_BLOCK : ''}`;
 
 const allSteps = ['D0', 'D1', 'D3', 'D2', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9'];
 const wanted = new Set(env.STEPS ? env.STEPS.split(',') : allSteps);
@@ -837,10 +844,13 @@ const LOCAL_RESERVED = 'GH_E2E_RESERVED';
 // Start to prove the env is refreshed (E7-A); a reserved name (GH_ prefix) must be dropped (E7-B).
 const localValueFile = path.join(os.tmpdir(), `rp-e2e-local-${crypto.randomBytes(4).toString('hex')}`);
 const localValues = [crypto.randomBytes(12).toString('hex'), crypto.randomBytes(12).toString('hex')];
+// A dummy Doppler token supplied by E7 (relay 1:46): present by NAME only; never used to log in.
+const DUMMY_DOPPLER_TOKEN = `e2e-dummy-doppler-${crypto.randomBytes(6).toString('hex')}`;
+addSecret('dummyDopplerToken', DUMMY_DOPPLER_TOKEN);
 localValues.forEach((value, index) => addSecret(`localStartValue${index + 1}`, value));
 const localScript = windows ? `type "${localValueFile}"` : `cat '${localValueFile}'`;
 function writeLocalValue(index) {
-  fs.writeFileSync(localValueFile, `${LOCAL_VAR}=${localValues[index]}\n${LOCAL_RESERVED}=reserved-name-check\n`, { mode: 0o600 });
+  fs.writeFileSync(localValueFile, `${LOCAL_VAR}=${localValues[index]}\n${LOCAL_RESERVED}=reserved-name-check\n${env.STARTUP_DOPPLER === '1' ? `DOPPLER_TOKEN=${DUMMY_DOPPLER_TOKEN}\n` : ''}`, { mode: 0o600 });
   state.localValueIndex = index;
   saveState();
 }
@@ -921,6 +931,44 @@ async function dw7() {
   const { lines: paneLines } = await runInTerminal(state.pane.terminalPanelId, `test -n "$${LOCAL_VAR}" && echo ${LOCAL_VAR}_present || echo ${LOCAL_VAR}_missing`);
   check('local-env-in-pane-terminal', paneLines.some((line) => line.trim() === `${LOCAL_VAR}_present`), paneLines.join(' | '));
   await shot('local-env-in-pane', { result: true, oracle: { lines: paneLines } });
+  if (env.STARTUP_DOPPLER === '1') await dopplerInstalled(panelId);
+}
+
+// The startup script's Doppler line on Create: wait for its run to end, status exit 0, sudo not denied (startup log,
+// names only), then `doppler --version` in the Pane terminal. Never `doppler login`.
+async function dopplerInstalled(hostPanelId) {
+  await ui.openPane(state.repoName ?? repoName, state.pane.name).click().catch(() => undefined);
+  await openHostTerminalFromSwitcher(state.label);
+  const finished = await until(async () => {
+    const { lines } = await runInTerminal(hostPanelId, "echo STARTUP_EXIT=$(grep -o '\"exitCode\":[-0-9]*' ~/.local/state/runpane-cloud/startup-status.json 2>/dev/null | cut -d: -f2) SUDO_DENIED=$(grep -ciE 'sudo: .*(not allowed|password is required|incorrect password|not in the sudoers)|a terminal is required' ~/.local/state/runpane-cloud/startup.log 2>/dev/null || echo 0) DOPPLER_PATH=$(command -v doppler >/dev/null && echo yes || echo no)");
+    const text = lines.join(' ');
+    return /STARTUP_EXIT=-?\d+/.test(text) ? text : undefined;
+  }, 600_000, 20_000) ?? '';
+  const exitCode = finished.match(/STARTUP_EXIT=(-?\d+)/)?.[1];
+  const sudoDenied = Number(finished.match(/SUDO_DENIED=(\d+)/)?.[1] ?? 0) > 0;
+  check('doppler-startup-exit-0', exitCode === '0', `startup status exitCode ${exitCode ?? 'unread'}`);
+  check('doppler-sudo-not-denied', !sudoDenied, sudoDenied ? 'SUDO DENIED in the startup log (the open SUDO question)' : 'no sudo denial in the startup log');
+  if (sudoDenied) log('FINDING sudo was denied for the Doppler install in the startup script (report at once: the open SUDO question)');
+  check('doppler-on-path', /DOPPLER_PATH=yes/.test(finished), finished.match(/DOPPLER_PATH=\S+/)?.[0] ?? 'unread');
+  // E7 supplied a dummy DOPPLER_TOKEN: present by NAME only.
+  const { lines: tokenLines } = await runInTerminal(hostPanelId, "echo DOPPLER_TOKEN_LINES=$(grep -cE '^(export )?DOPPLER_TOKEN=' ~/.config/runpane-cloud/local-env 2>/dev/null || echo 0)");
+  check('doppler-token-name-in-local-env', /DOPPLER_TOKEN_LINES=1\b/.test(tokenLines.join(' ')), tokenLines.join(' ').match(/DOPPLER_TOKEN_LINES=\S+/)?.[0] ?? 'unread');
+  await shot('doppler-startup-status', { oracle: { exitCode, sudoDenied, tokenLines } });
+  if (exitCode !== '0') {
+    // A failed block shows the E5 chip on the row (if it succeeded this is not forced).
+    await openCloud();
+    const chip = await visible(ui.startupChip(state.label), 10_000);
+    check('doppler-failure-chip', chip, chip ? await ui.startupChip(state.label).innerText() : 'no chip although the startup script failed');
+    await inView('doppler-failure-chip', ui.row(state.label));
+    await shot('doppler-failure-chip', { result: chip });
+    await closeSettings();
+  }
+  await ui.openPane(state.repoName ?? repoName, state.pane.name).click();
+  await ui.panelTab('Terminal').click();
+  const { lines } = await runInTerminal(state.pane.terminalPanelId, 'doppler --version');
+  const version = lines.find((line) => /\bv?\d+\.\d+\.\d+/.test(line));
+  check('doppler-version-in-pane', Boolean(version), version ? `doppler --version: ${version.trim()}` : lines.join(' | '));
+  await shot('doppler-version-in-pane', { result: Boolean(version), oracle: { lines } });
 }
 
 async function restoreLocalStartScript() {
@@ -969,6 +1017,10 @@ async function d0() {
   await editor.fill(startupScript);
   await ui.saveStartupScript().click();
   maskStartupEditor = false;
+  if (env.STARTUP_DOPPLER === '1') {
+    const saved = await until(async () => readStartupFile().includes(Buffer.from(DOPPLER_BLOCK)), 10_000, 500);
+    check('doppler-block-saved-byte-exact', Boolean(saved), `the saved startup.sh holds the Doppler block (sha256 ${sha256Of(Buffer.from(DOPPLER_BLOCK)).slice(0, 12)}) byte for byte`);
+  }
   check('startup-script-saved', await visible(ui.settingsDialog().getByText('Saved', { exact: true }), 10_000), 'the editor says Saved');
   await shot('startup-script-saved', { result: true });
   if (cloud) {
@@ -1761,6 +1813,13 @@ async function d7() {
   }, 600_000, 15_000) ?? await startupStatus(panelId);
   check('startup-ran-again-on-start', second.runs >= first.runs + 1 && second.exitCode === 0, `marker lines ${first.runs} → ${second.runs}, exitCode ${second.exitCode}`);
   await shot('startup-status-after-start', { result: true, oracle: second });
+  // The Doppler block's guard: on the second run doppler is already there, so that run's log section has no apt work.
+  if (env.STARTUP_DOPPLER === '1') {
+    const { lines: lastRun } = await runInTerminal(panelId, "echo APT_LINES=$(tac ~/.local/state/runpane-cloud/startup.log | sed '/^== startup script run at/q' | grep -cE 'apt-get|^(Get|Hit|Ign):|Setting up|Unpacking') LAST_EXIT=\"$(tac ~/.local/state/runpane-cloud/startup.log | grep -m1 -oE 'exit -?[0-9]+ after [0-9]+ s')\"");
+    const text = lastRun.join(' ');
+    check('doppler-second-run-no-apt', /APT_LINES=0\b/.test(text), `${text.match(/APT_LINES=\S+/)?.[0] ?? 'unread'}; last run: ${text.match(/LAST_EXIT=(.*)$/)?.[1]?.trim() || 'unread'}`);
+    await shot('doppler-second-run', { result: true, oracle: { lastRun } });
+  }
   if (cloud && env.E7 !== '0' && state.localValueIndex === 1) {
     const { lines: refreshed, text } = await localEnvOnSandbox(panelId);
     check('local-env-refreshed-on-start', text.includes(`LOCALENV_SHA=${valueSha(1)}`) && /LOCALENV_HAS=1\b/.test(text), `sha256[:12] of the sourced value after Start vs the kit's new value: ${text.match(/LOCALENV_SHA=\S+/)?.[0] ?? 'unread'} (want ${valueSha(1)})`);
@@ -1956,7 +2015,6 @@ async function d9() {
 // The desktop reads <pane data dir>/cloud-sandboxes/startup.sh fresh on every push (cloudStartupScriptFile.read, no
 // in-memory copy), so that file is what any sandbox's next Start gets. A missing file is an empty script.
 const startupScriptFile = path.join(paneDir, 'cloud-sandboxes', 'startup.sh');
-const sha256Of = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 const readStartupFile = () => (fs.existsSync(startupScriptFile) ? fs.readFileSync(startupScriptFile) : Buffer.alloc(0));
 function saveOriginalStartupScript() {
   const bytes = readStartupFile();
