@@ -14,8 +14,30 @@ const FQDN = 'rp-test.tail1234.ts.net';
 const SECRETS = ['boat-key-SECRET', 'ts-client-SECRET', 'claude-token-SECRET', 'paired-token-SECRET'];
 
 /** An in-memory boat: sandboxes start, stop and resume instantly; calls are logged. */
-function fakeProvider(orgs: ListedBoatOrg[] = [{ id: 'team_test', name: 'test', active: false }]) {
+/** Time that passes only when the code under test sleeps, so a 15 min wait runs instantly. */
+class FakeClock {
+  time = Date.now();
+  now = () => this.time;
+  sleep = async (ms: number) => {
+    this.time += ms;
+  };
+}
+
+/** How boat handles an accepted Stop: archiving for a while, then stopped, its error state, gone, or never done. */
+interface SlowStop {
+  archivingMs: number;
+  then: 'stopped' | 'error' | 'gone' | 'stuck';
+}
+
+/** Set `stop` to make the fake boat archive slowly after it accepts a Stop. */
+class SlowBoat {
+  stop?: SlowStop;
+  acceptedAt?: number;
+}
+
+function fakeProvider(clock: FakeClock, orgs: ListedBoatOrg[] = [{ id: 'team_test', name: 'test', active: false }]) {
   const sandboxes = new Map<string, CloudSandbox>();
+  const slow = new SlowBoat();
   const calls: string[] = [];
   const creates: CreateSandboxRequest[] = [];
   const keys: Array<{ apiKey: string; org?: string }> = [];
@@ -37,12 +59,25 @@ function fakeProvider(orgs: ListedBoatOrg[] = [{ id: 'team_test', name: 'test', 
         sandboxes.set(id, created);
         return { ...created, state: 'starting', providerState: 'provisioning' };
       },
-      get: async (id) => sandboxes.get(id) ?? { id, name: '', state: 'gone', providerState: 'not_found' },
+      async get(id) {
+        const current = sandboxes.get(id);
+        if (current?.state === 'stopping' && slow.stop && slow.acceptedAt !== undefined && clock.now() - slow.acceptedAt >= slow.stop.archivingMs) {
+          if (slow.stop.then === 'stopped') set(id, 'stopped', 'archived');
+          if (slow.stop.then === 'error') sandboxes.set(id, { ...current, state: 'error', providerState: 'failed', error: 'snapshot failed' });
+          if (slow.stop.then === 'gone') sandboxes.delete(id);
+        }
+        return sandboxes.get(id) ?? { id, name: '', state: 'gone', providerState: 'not_found' };
+      },
       list: async () => [...sandboxes.values()],
       rename: async () => undefined,
       async stop(id) {
         calls.push(`stop ${id}`);
-        set(id, 'stopped', 'archived');
+        if (slow.stop) {
+          slow.acceptedAt = clock.now();
+          set(id, 'stopping', 'archiving');
+        } else {
+          set(id, 'stopped', 'archived');
+        }
       },
       async resume(id) {
         calls.push(`resume ${id}`);
@@ -62,7 +97,7 @@ function fakeProvider(orgs: ListedBoatOrg[] = [{ id: 'team_test', name: 'test', 
       }),
     };
   };
-  return { factory, sandboxes, calls, creates, keys };
+  return { factory, sandboxes, calls, creates, keys, slow };
 }
 
 function fakeTailnet() {
@@ -140,7 +175,8 @@ class LocalClaudeDefault {
 
 function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-cloud-'));
-  const provider = fakeProvider();
+  const clock = new FakeClock();
+  const provider = fakeProvider(clock);
   const tailnet = fakeTailnet();
   const boot = fakeBootstrap(tailnet, script);
   const saved = new Map<string, CloudHostProfile>();
@@ -159,12 +195,13 @@ function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}) {
         saved.delete(sessionId);
       },
     },
-    sleep: async () => undefined,
+    sleep: clock.sleep,
+    now: clock.now,
     env,
     localClaudeModel: async () => local.model,
   });
   const onProgress = (update: CloudProgress) => progress.push(update);
-  return { dir, cloud, provider, tailnet, boot, saved, progress, onProgress, local };
+  return { dir, cloud, provider, tailnet, boot, saved, progress, onProgress, local, clock };
 }
 
 async function withCredentials(h: ReturnType<typeof harness>) {
@@ -387,4 +424,52 @@ test('a start whose model update fails still succeeds and says so', async () => 
   assert.equal(info.state, 'running');
   assert.equal(info.claudeModel, undefined);
   assert.ok(failing.progress.some((update) => /kept its Claude model: cloud bootstrap step "claude-model" failed/u.test(update.message)));
+});
+
+test('a Stop boat accepted waits through a long archive (over 120 s) and reports "Saving the sandbox…"', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname, sandboxId } = await h.cloud.create();
+  h.provider.slow.stop = { archivingMs: 307_000, then: 'stopped' };
+  const started = h.clock.now();
+  const stopped = await h.cloud.stop(hostname, h.onProgress);
+  assert.equal(stopped.state, 'stopped');
+  assert.ok(h.clock.now() - started >= 307_000, 'it waited the whole archive');
+  assert.deepEqual(h.progress.filter((update) => update.step === 'stopping').map((update) => update.message),
+    [`Stopping ${stopped.label}...`, 'Saving the sandbox…']);
+  assert.equal(h.progress.at(-1)?.step, 'done');
+  assert.equal(h.provider.calls.filter((call) => call === `stop ${sandboxId}`).length, 1, 'one stop request');
+});
+
+test('a Stop fails clearly when boat errors, loses the sandbox, or is still archiving at the 15 min ceiling', async () => {
+  for (const [then, expected] of [
+    ['error', /^boat reported an error while stopping rp-[a-z0-9]{8} \(failed: snapshot failed\)\.$/u],
+    ['gone', /^boat no longer has rp-[a-z0-9]{8}'s sandbox bx_1; it was removed while stopping\.$/u],
+    ['stuck', /^rp-[a-z0-9]{8} was still archiving after 15 min; boat may still finish stopping it\. Check its state again later\.$/u],
+  ] as const) {
+    const h = harness();
+    await withCredentials(h);
+    const { hostname } = await h.cloud.create();
+    h.provider.slow.stop = { archivingMs: 200_000, then };
+    const started = h.clock.now();
+    await assert.rejects(h.cloud.stop(hostname, h.onProgress), (error: Error) => {
+      assert.match(error.message, expected);
+      for (const secret of SECRETS) assert.ok(!error.message.includes(secret));
+      return true;
+    });
+    if (then === 'stuck') assert.ok(h.clock.now() - started >= 15 * 60_000, 'the ceiling is 15 min, not 120 s');
+    else assert.ok(h.clock.now() - started < 15 * 60_000);
+  }
+});
+
+test('Start waits through a Stop that boat is still archiving, then resumes', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname, sandboxId } = await h.cloud.create();
+  h.provider.slow.stop = { archivingMs: 300_000, then: 'stopped' };
+  // A Stop boat accepted, still archiving when the user presses Start.
+  await h.provider.factory('k').stop(sandboxId);
+  const started = await h.cloud.start(hostname);
+  assert.equal(started.state, 'running');
+  assert.equal(h.provider.calls.at(-1), `resume ${sandboxId}`);
 });

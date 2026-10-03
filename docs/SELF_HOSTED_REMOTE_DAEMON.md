@@ -314,7 +314,8 @@ Detection is best effort. Known limits:
 ### Stop, start, update and remove
 
 - **Stop** syncs the disk, then boat snapshots the sandbox and powers it off. Billing stops; the disk and the
-  tailnet name are kept.
+  tailnet name are kept. Stop can take a few minutes when boat is slow to save the sandbox: Pane shows
+  "Saving the sandbox…" and waits up to 15 minutes.
 - **Start** resumes the sandbox and waits until the daemon answers. A resume has been seen to bring the
   Tailscale node back logged out, or without its Serve config. Start repairs either: it re-applies Serve, or
   re-enrolls the node under the same name, so the saved host keeps working.

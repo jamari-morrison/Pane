@@ -173,7 +173,13 @@ export interface CloudBootstrap {
 }
 
 const SANDBOX_READY_TIMEOUT_MS = 180_000;
-const STOP_TIMEOUT_MS = 120_000;
+/**
+ * How long a Stop boat accepted may take. boat snapshots the disk before it powers off ("archiving"), and has taken
+ * over 5 minutes; until it is stopped that is progress, not a failure.
+ */
+const STOP_TIMEOUT_MS = 15 * 60_000;
+/** The progress text while boat saves the sandbox (desktop shows it as is). */
+const SAVING_MESSAGE = 'Saving the sandbox…';
 const START_HEALTH_CHECK_MS = 30_000;
 const REPAIRED_HEALTH_TIMEOUT_MS = 90_000;
 const CREATE_HEALTH_TIMEOUT_MS = 180_000;
@@ -250,6 +256,33 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
     const loaded = await loadCloud();
     const record = findHost(await store.listHosts(), host);
     return { ...loaded, record, provider: createProvider(loaded.boatKey, record.meta.boatOrg?.id) };
+  }
+
+  /**
+   * Waits for a Stop boat accepted. `archiving` (stopping) is the normal way to stopped and only reports progress;
+   * boat's error state, a sandbox boat no longer has, or the long ceiling fail the Stop.
+   */
+  async function waitForStopped(provider: CloudProvider, record: CloudHostRecord, onProgress?: CloudProgressListener): Promise<CloudSandbox> {
+    const { sandboxId } = record.profile.cloud;
+    const { label } = record.profile;
+    const deadline = now() + STOP_TIMEOUT_MS;
+    let saving = false;
+    for (;;) {
+      const sandbox = await provider.get(sandboxId);
+      if (sandbox.state === 'stopped') return sandbox;
+      if (sandbox.state === 'gone') throw new Error(`boat no longer has ${label}'s sandbox ${sandboxId}; it was removed while stopping.`);
+      if (sandbox.state === 'error') {
+        throw new Error(`boat reported an error while stopping ${label} (${sandbox.providerState}${sandbox.error ? `: ${sandbox.error}` : ''}).`);
+      }
+      if (sandbox.state === 'stopping' && !saving) {
+        saving = true;
+        onProgress?.({ step: 'stopping', message: SAVING_MESSAGE });
+      }
+      if (now() >= deadline) {
+        throw new Error(`${label} was still ${sandbox.providerState} after ${Math.round(STOP_TIMEOUT_MS / 60_000)} min; boat may still finish stopping it. Check its state again later.`);
+      }
+      await sleep(POLL_INTERVAL_MS);
+    }
   }
 
   async function waitForSandbox(provider: CloudProvider, sandboxId: string, wanted: 'running' | 'stopped', timeoutMs: number): Promise<CloudSandbox> {
@@ -444,7 +477,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
         await provider.handle(sandboxId).runScript('sync; sleep 0.2; sync', { timeoutSeconds: 30 }).catch(() => undefined);
       }
       if (sandbox.state !== 'stopping') await provider.stop(sandboxId);
-      const stopped = await waitForSandbox(provider, sandboxId, 'stopped', STOP_TIMEOUT_MS);
+      const stopped = await waitForStopped(provider, record, onProgress);
       onProgress?.({ step: 'done', message: `${record.profile.label} is stopped.` });
       return sandboxInfo(record, stopped);
     },
