@@ -9,6 +9,7 @@ import { SettingRow } from './SettingRow';
 import { SegmentedControl } from './SettingsControls';
 import { API, type IPCResponse } from '../../utils/api';
 import { useCloudSandboxes } from '../../hooks/useCloudSandboxes';
+import { getActiveHostId, getHostTerminalPresentation, openHostTerminal } from '../../utils/hostTerminal';
 import {
   formatCloudUptime,
   getCloudSandboxActions,
@@ -38,13 +39,14 @@ const ACTION_LABELS = new Map<CloudSandboxRowAction, string>([
   ['retry', 'Retry'],
   ['dismiss', 'Dismiss'],
   ['start', 'Start'],
+  ['terminal', 'Open terminal'],
   ['stop', 'Stop'],
   ['update', 'Update Pane'],
   ['remove', 'Remove'],
 ]);
 
 /** Cloud sandboxes (experimental): Pane on a provider sandbox, joined to the user's tailnet. */
-export function CloudSandboxesSettings() {
+export function CloudSandboxesSettings({ onTerminalOpened }: { onTerminalOpened: () => void }) {
   const { snapshot, loaded, request } = useCloudSandboxes();
   const [requestError, setRequestError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<CloudSandboxView | null>(null);
@@ -57,9 +59,28 @@ export function CloudSandboxesSettings() {
     return result.ok;
   };
 
+  // The same terminal as the host switcher's: switch this window to the sandbox first if needed.
+  const openTerminal = async (profileId: string) => {
+    setRequestError(null);
+    try {
+      if (await getActiveHostId() !== profileId) {
+        const response = await API.remoteDaemon.updateClientState({ activeProfileId: profileId, mode: 'remote' });
+        if (!response.success) throw new Error(response.error ?? 'Could not connect to the sandbox');
+      }
+      await openHostTerminal();
+      onTerminalOpened();
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const runAction = (sandbox: CloudSandboxView, action: CloudSandboxRowAction) => {
     if (action === 'remove') {
       setRemoving(sandbox);
+      return;
+    }
+    if (action === 'terminal') {
+      if (sandbox.profileId) void openTerminal(sandbox.profileId);
       return;
     }
     void send(() => {
@@ -312,7 +333,9 @@ function CloudSandboxRow({ sandbox, now, onAction }: {
               type="button"
               size="sm"
               variant={action === 'remove' ? 'ghost' : action === 'update' || action === 'retry' ? 'primary' : 'secondary'}
-              aria-label={`${ACTION_LABELS.get(action)} ${sandbox.label}`}
+              aria-label={action === 'terminal'
+                ? getHostTerminalPresentation({ label: sandbox.label }).openLabel
+                : `${ACTION_LABELS.get(action)} ${sandbox.label}`}
               onClick={() => onAction(sandbox, action)}
             >
               {ACTION_LABELS.get(action)}
