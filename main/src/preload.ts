@@ -659,6 +659,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       invokeIpc('remote-daemon:save-cloud-startup-script', script),
     readCloudSandboxStartupLog: (id: string): Promise<IPCResponse<{ log: string }>> =>
       invokeIpc('remote-daemon:read-cloud-sandbox-startup-log', id),
+    onProfilesChanged: (callback: () => void) => {
+      const wrappedCallback = () => callback();
+      ipcRenderer.on('remote-daemon:profiles-changed', wrappedCallback);
+      return () => ipcRenderer.removeListener('remote-daemon:profiles-changed', wrappedCallback);
+    },
     onCloudSandboxesChanged: (callback: (snapshot: CloudSandboxesSnapshot) => void) => {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, snapshot: CloudSandboxesSnapshot) => callback(snapshot);
       ipcRenderer.on('remote-daemon:cloud-sandboxes-changed', wrappedCallback);

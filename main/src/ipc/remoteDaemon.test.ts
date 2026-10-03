@@ -1454,6 +1454,30 @@ describe('cloud sandbox IPC', () => {
     expect(result).toMatchObject({ success: true, data: { sandboxes: [{ id: 'rp-alpha', state: 'stopped' }] } });
   });
 
+  it('tells the renderer when the cloud library saves or forgets a host, so the host switcher updates', async () => {
+    const ipcMain = createIpcMainStub();
+    const configManager = createConfigManagerStub();
+    const send = vi.fn();
+    const hostsRef: DesktopHostsRef = {};
+    registerTestRemoteDaemonHandlers(ipcMain, {
+      configManager,
+      // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
+      getMainWindow: () => ({ isDestroyed: () => false, webContents: { send } }) as never,
+    }, createCloudLibrary(hostsRef));
+    const profileEvents = () => send.mock.calls.filter(([channel]) => channel === 'remote-daemon:profiles-changed');
+
+    await ipcMain.handlers.get('remote-daemon:create-cloud-sandbox')?.({}, { name: 'alpha', size: 'default' });
+    expect(profileEvents()).toEqual([['remote-daemon:profiles-changed']]);
+
+    // Saving the same host again changes nothing the renderer shows.
+    await hostsRef.current?.upsert(cloudProfile);
+    expect(profileEvents()).toHaveLength(1);
+
+    await ipcMain.handlers.get('remote-daemon:remove-cloud-sandbox')?.({}, 'rp-alpha');
+    expect(configManager.getConfig().remoteDaemon?.client.profiles).toEqual([]);
+    expect(profileEvents()).toHaveLength(2);
+  });
+
   it('forgets the saved profile and leaves remote mode when the connected sandbox is removed', async () => {
     const ipcMain = createIpcMainStub();
     const initialConfig = createDefaultRemoteDaemonConfig();

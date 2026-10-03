@@ -201,6 +201,11 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
   useEffect(() => {
     void fetchConfig().catch(() => undefined);
   }, [fetchConfig, remoteConnectionState.mode, remoteConnectionState.activeProfileId]);
+  // Hosts main saves or forgets on its own (a cloud sandbox being added or removed) arrive the same way,
+  // so the switcher appears with the first saved host and goes away with the last.
+  useEffect(() => API.remoteDaemon.onProfilesChanged(() => {
+    void fetchConfig().catch(() => undefined);
+  }), [fetchConfig]);
   // Only a saved cloud host needs sandbox state; everyone else never asks the cloud library.
   const hasCloudProfile = (remoteProfiles ?? []).some((profile) => profile.cloud);
   const { snapshot: cloudSandboxesSnapshot } = useCloudSandboxes(hasCloudProfile);

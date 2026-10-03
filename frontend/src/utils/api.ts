@@ -792,6 +792,10 @@ export class API {
       return window.electronAPI.remoteDaemon.readCloudSandboxStartupLog(id);
     },
 
+    onProfilesChanged(callback: () => void) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.onProfilesChanged(callback);
+    },
     onCloudSandboxesChanged(callback: (snapshot: CloudSandboxesSnapshot) => void) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.remoteDaemon.onCloudSandboxesChanged(callback);

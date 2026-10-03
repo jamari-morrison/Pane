@@ -356,3 +356,26 @@ test('a sandbox row shows a running script, then a failure chip whose View log s
   await row.getByRole('button', { name: 'Startup script beta' }).click();
   await expect(page.getByRole('textbox', { name: 'Startup script' })).toBeFocused();
 });
+
+test('the first cloud sandbox brings up the host switcher, and removing the last one hides it', async ({ page }) => {
+  await installElectronApiMock(page, { cloudSandboxes: { credentials: ALL_CREDENTIALS, sandboxes: [] } });
+  await openRemoteAccess(page);
+  const switcher = page.getByRole('button', { name: 'Agents run on This computer. Switch host' });
+
+  await page.getByLabel('Name', { exact: true }).fill('alpha');
+  await page.getByRole('button', { name: 'Add Cloud Sandbox' }).click();
+  // A create takes minutes: the user closes Settings and keeps working.
+  await page.getByRole('button', { name: 'Close modal' }).click();
+  await expect(switcher).toHaveCount(0);
+
+  await cloudMock(page, (mock) => mock.finishCloudCreate('alpha'));
+  await expect(switcher).toBeVisible();
+
+  await page.getByRole('button', { name: 'Settings' }).first().click();
+  await page.getByRole('button', { name: 'Remote Access', exact: true }).click();
+  await page.getByRole('button', { name: 'Remove alpha' }).click();
+  await page.getByRole('dialog', { name: 'Remove alpha?' }).getByRole('button', { name: 'Remove' }).click();
+  await expect(page.getByRole('listitem', { name: 'Cloud sandbox alpha' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Close modal' }).click();
+  await expect(switcher).toHaveCount(0);
+});
