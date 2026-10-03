@@ -577,6 +577,7 @@ export function ProjectSessionList({
       {/* Add Project Dialog */}
       <AddProjectDialog
         isOpen={showAddProjectDialog}
+        mode="open"
         onClose={() => setShowAddProjectDialog(false)}
       />
 
