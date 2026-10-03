@@ -1,0 +1,59 @@
+import { describe, expect, it } from 'vitest';
+import { Cloud, Laptop, Server } from 'lucide-react';
+import { describeHost, HOST_ICONS } from './hostKind';
+import { normalizeRemoteDaemonConfig, type RemotePaneConnectionProfile } from '../../../shared/types/remoteDaemon';
+
+function profile(overrides: Partial<RemotePaneConnectionProfile> = {}): RemotePaneConnectionProfile {
+  return {
+    id: 'profile-1',
+    label: 'devbox',
+    baseUrl: 'http://100.64.0.1:42137',
+    token: 'token',
+    transport: 'http+sse',
+    ...overrides,
+  };
+}
+
+describe('describeHost', () => {
+  it('names the local runtime "This computer"', () => {
+    expect(describeHost(null)).toEqual({ name: 'This computer', kindLabel: null, icon: 'local' });
+    expect(describeHost(undefined)).toEqual({ name: 'This computer', kindLabel: null, icon: 'local' });
+  });
+
+  it('treats a profile without a host kind as a self-hosted server', () => {
+    expect(describeHost(profile())).toEqual({ name: 'devbox', kindLabel: 'remote host', icon: 'server' });
+  });
+
+  it('uses the label and icon the profile was saved with', () => {
+    expect(describeHost(profile({ label: 'testina', hostKind: { label: 'cloud sandbox', icon: 'cloud' } })))
+      .toEqual({ name: 'testina', kindLabel: 'cloud sandbox', icon: 'cloud' });
+  });
+
+  it('draws each icon kind', () => {
+    expect(HOST_ICONS).toEqual({ local: Laptop, server: Server, cloud: Cloud });
+  });
+});
+
+describe('saved host kind', () => {
+  it('survives config normalization', () => {
+    const hostKind = { label: 'cloud sandbox', icon: 'cloud' as const };
+    const config = normalizeRemoteDaemonConfig({ client: { profiles: [profile({ hostKind })], activeProfileId: null, mode: 'local' } });
+    expect(config.client.profiles[0].hostKind).toEqual(hostKind);
+  });
+
+  it('reads a cloud sandbox saved before host kinds existed as a cloud sandbox', () => {
+    const cloud = { provider: 'boat' as const, sandboxId: 'bx_1', sessionId: 's1', nodeId: 'n1', hostname: 'rp-s1', version: 1 };
+    const config = normalizeRemoteDaemonConfig({
+      client: { profiles: [profile({ label: 'testina', cloud }), profile({ id: 'plain', label: 'devbox' })], activeProfileId: null, mode: 'local' },
+    });
+    expect(describeHost(config.client.profiles[0])).toEqual({ name: 'testina', kindLabel: 'cloud sandbox', icon: 'cloud' });
+    expect(describeHost(config.client.profiles[1])).toEqual({ name: 'devbox', kindLabel: 'remote host', icon: 'server' });
+  });
+
+  it('drops a profile whose host kind has an unknown icon', () => {
+    const config = normalizeRemoteDaemonConfig({
+      client: { profiles: [{ ...profile(), hostKind: { label: 'x', icon: 'rocket' } }], activeProfileId: null, mode: 'local' },
+    });
+    expect(config.client.profiles).toEqual([]);
+  });
+});

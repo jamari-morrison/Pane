@@ -59,9 +59,19 @@ describe('formatCloudUptime', () => {
 });
 
 describe('getCloudSandboxActions', () => {
-  it('offers Stop and Remove while running, and Update Pane first when versions differ', () => {
-    expect(getCloudSandboxActions(sandbox())).toEqual(['stop', 'remove']);
-    expect(getCloudSandboxActions(sandbox({ updateAvailable: true }))).toEqual(['update', 'stop', 'remove']);
+  it('offers Open terminal, Stop and Remove while running, and Update Pane first when versions differ', () => {
+    expect(getCloudSandboxActions(sandbox())).toEqual(['terminal', 'stop', 'remove']);
+    expect(getCloudSandboxActions(sandbox({ updateAvailable: true }))).toEqual(['update', 'terminal', 'stop', 'remove']);
+  });
+
+  it('offers Open terminal only while running', () => {
+    for (const state of ['stopped', 'starting', 'stopping', 'creating', 'error'] as const) {
+      expect(getCloudSandboxActions(sandbox({ state }))).not.toContain('terminal');
+    }
+    expect(getCloudSandboxActions(sandbox({ pending: 'stopping' }))).not.toContain('terminal');
+    expect(getCloudSandboxActions(sandbox({ state: 'stopped', pending: 'starting' }))).not.toContain('terminal');
+    expect(getCloudSandboxActions(sandbox({ stateUnknown: true }))).not.toContain('terminal');
+    expect(getCloudSandboxActions(sandbox({ profileId: undefined }))).not.toContain('terminal');
   });
 
   it('offers Start and Remove while stopped', () => {
@@ -115,7 +125,7 @@ describe('a sandbox the provider is still stopping (D4)', () => {
   it('shows a failed action on a running sandbox as Running with the error', () => {
     const failed = sandbox({ state: 'running', failedAction: 'stop', error: 'boat refused the stop' });
     expect(getCloudSandboxBadge(failed).label).toBe('Running');
-    expect(getCloudSandboxActions(failed)).toEqual(['retry', 'dismiss', 'stop', 'remove']);
+    expect(getCloudSandboxActions(failed)).toEqual(['retry', 'dismiss', 'terminal', 'stop', 'remove']);
   });
 });
 

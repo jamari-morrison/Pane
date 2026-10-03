@@ -48,7 +48,7 @@ export function formatCloudUptime(startedAt: string | undefined, now: number): s
   return `running for ${Math.floor(hours / 24)}d`;
 }
 
-export type CloudSandboxRowAction = 'retry' | 'dismiss' | 'start' | 'stop' | 'update' | 'remove';
+export type CloudSandboxRowAction = 'retry' | 'dismiss' | 'start' | 'terminal' | 'stop' | 'update' | 'remove';
 
 /** The buttons a row offers, in display order. A row with work in flight offers none. */
 export function getCloudSandboxActions(sandbox: CloudSandboxView): CloudSandboxRowAction[] {
@@ -59,6 +59,8 @@ export function getCloudSandboxActions(sandbox: CloudSandboxView): CloudSandboxR
   if (sandbox.state === 'stopped') actions.push('start');
   if (sandbox.state === 'running') {
     if (sandbox.updateAvailable) actions.push('update');
+    // The host terminal needs the saved host to connect to.
+    if (sandbox.profileId) actions.push('terminal');
     actions.push('stop');
   }
   actions.push('remove');

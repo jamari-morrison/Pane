@@ -1246,6 +1246,9 @@ describe('cloud sandbox IPC', () => {
     },
   };
 
+  // What the desktop keeps: a sandbox profile always reads with the cloud host kind.
+  const savedCloudProfile = { ...cloudProfile, hostKind: { label: 'cloud sandbox', icon: 'cloud' as const } };
+
   const alpha: CloudSandboxInfo = {
     hostname: 'rp-alpha',
     label: 'alpha',
@@ -1353,7 +1356,7 @@ describe('cloud sandbox IPC', () => {
 
     expect(cloud.library.create).toHaveBeenCalledWith({ label: 'alpha', size: 'default' }, expect.anything());
     expect(result).toMatchObject({ success: true, data: { sandboxes: [{ id: 'rp-alpha', state: 'running' }] } });
-    expect(configManager.getConfig().remoteDaemon?.client.profiles).toEqual([cloudProfile]);
+    expect(configManager.getConfig().remoteDaemon?.client.profiles).toEqual([savedCloudProfile]);
     expect(send).toHaveBeenCalledWith('remote-daemon:cloud-sandboxes-changed', expect.objectContaining({ available: true }));
   });
 
@@ -1368,7 +1371,7 @@ describe('cloud sandbox IPC', () => {
     await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
     await hostsRef.current?.upsert(cloudProfile);
 
-    expect(configManager.getConfig().remoteDaemon?.client.profiles).toEqual([{ ...cloudProfile, id: 'desktop-id' }]);
+    expect(configManager.getConfig().remoteDaemon?.client.profiles).toEqual([{ ...savedCloudProfile, id: 'desktop-id' }]);
   });
 
   it('rejects an invalid sandbox name before calling the library', async () => {
@@ -1445,7 +1448,7 @@ describe('cloud sandbox IPC', () => {
     }, { ...cloud, readCloudDaemonVersion, resolvePaneReleaseDeb });
 
     await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
-    await vi.waitFor(() => expect(readCloudDaemonVersion).toHaveBeenCalledWith(cloudProfile));
+    await vi.waitFor(() => expect(readCloudDaemonVersion).toHaveBeenCalledWith(savedCloudProfile));
     await ipcMain.handlers.get('remote-daemon:update-cloud-sandbox')?.({}, 'rp-alpha');
 
     expect(cloud.library.update).toHaveBeenCalledWith('rp-alpha', { debUrl: 'https://example.test/2.4.146.deb', sha256: 'f'.repeat(64) }, expect.any(Function));

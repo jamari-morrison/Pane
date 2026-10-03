@@ -115,6 +115,8 @@ function profileJson(profile: CloudHostProfile, id: string): JsonObject {
     token: profile.token,
     transport: profile.transport,
     cloud: { ...profile.cloud },
+    // The desktop names and draws saved hosts from this (shared/types/remoteDaemon.ts RemoteHostKind).
+    hostKind: { label: 'cloud sandbox', icon: 'cloud' },
   };
   if (profile.tunnel) {
     const tunnel: JsonObject = { kind: profile.tunnel.kind, selected: profile.tunnel.selected };

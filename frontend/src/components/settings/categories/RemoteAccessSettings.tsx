@@ -76,7 +76,7 @@ export function RemoteAccessSettings({ controller, onOpenSubview }: RemoteAccess
           </div>
         </SettingRow>
       </SettingsSection>
-      <CloudSandboxesSettings />
+      <CloudSandboxesSettings onTerminalOpened={controller.closeSettings} />
     </SettingsPage>
   );
 }
