@@ -252,7 +252,8 @@ if (relay && !state.existingHosts) {
   state.existingHosts = savedHosts(paneDir).map((host) => ({ ...host, tokenSha256: crypto.createHash('sha256').update(savedHostToken(paneDir, host.id) ?? '').digest('hex') }));
   saveState();
 }
-if (!relay && !state.existingRemote) {
+// NO_EXISTING_REMOTE=1: no pre-seeded remote, like SOBECK (removing the sandbox then leaves no remote host at all).
+if (!relay && !state.existingRemote && env.NO_EXISTING_REMOTE !== '1') {
   const token = crypto.randomBytes(24).toString('base64url');
   state.existingRemote = { id: crypto.randomUUID(), label: 'existing-remote', baseUrl: 'http://127.0.0.1:9', token, transport: 'http+sse' };
   const configPath = path.join(paneDir, 'config.json');
@@ -363,7 +364,8 @@ function fakeDaemonKill() {
 
 function fakeSaveHost(payload) {
   const configPath = path.join(paneDir, 'config.json');
-  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
+  config.remoteDaemon = { ...config.remoteDaemon, client: { profiles: [], activeProfileId: null, mode: 'local', ...config.remoteDaemon?.client } };
   const profiles = config.remoteDaemon.client.profiles.filter((profile) => profile.label !== payload.label);
   profiles.push({ id: crypto.randomUUID(), label: payload.label, baseUrl: fakeBaseUrl, token: payload.token, transport: 'http+sse' });
   config.remoteDaemon.client.profiles = profiles;
@@ -955,7 +957,19 @@ async function phaseStop() {
     await page.waitForTimeout(1500);
     await openCloud();
     await ui.rowAction('Stop', state.label).click();
-    const stopped = await until(async () => rowBadge(await rowText(state.label), 'Stopped'), 300_000, 2000);
+    // Every change of the row while stopping, with its time (SOBECK Run 6: a 307 s stop left no timeline).
+    let lastStopRow;
+    const stopTimeline = [];
+    const stopped = await until(async () => {
+      const row = await rowText(state.label);
+      if (row !== lastStopRow) {
+        stopTimeline.push(`${Math.round((Date.now() - startedAt) / 1000)} s ${row}`);
+        log(`row: ${row}`);
+      }
+      lastStopRow = row;
+      return rowBadge(row, 'Stopped');
+    }, 300_000, 2000);
+    fs.writeFileSync(path.join(out, 'stop-timeline.txt'), `${redact(stopTimeline.join('\n'))}\n`);
     timing('stop', startedAt);
     check('row-stopped', Boolean(stopped), `row "${state.label}" shows stopped`);
     await shot('row-stopped');
@@ -1406,8 +1420,14 @@ async function phaseRemove() {
     state.removed = true;
     saveState();
   }
-  await openSwitcher();
-  check('switcher-no-longer-lists', !(await visible(ui.hostItem(state.label), 2000)), state.label);
+  // With no saved remote host left the app shows no host switcher at all (SOBECK Run 6: nothing else was saved).
+  await closeSettings();
+  if (!(await visible(ui.switcherChip(), 5000))) {
+    check('switcher-no-longer-lists', true, `no host switcher at all: no remote host is saved any more, so ${state.label} isn't listed`);
+  } else {
+    await openSwitcher();
+    check('switcher-no-longer-lists', !(await visible(ui.hostItem(state.label), 2000)), state.label);
+  }
   await closeMenus();
   await shot('removed');
   state.removed = true;
@@ -1424,10 +1444,17 @@ async function phaseHygiene() {
   const token = state.existingRemote && savedHostToken(paneDir, state.existingRemote.id);
   if (state.existingRemote) check('existing-remote-unchanged', existing?.label === state.existingRemote.label && existing?.baseUrl === state.existingRemote.baseUrl && token === state.existingRemote.token,
     JSON.stringify(existing ?? null));
-  await openSwitcher();
-  await ui.localItem().click();
-  const local = await visible(page.getByRole('button', { name: /This computer.*Switch host|Agents run on this computer/i }), 15_000);
-  check('local-runtime-works', local, 'switched back to This computer');
+  await closeSettings();
+  if (!(await visible(ui.switcherChip(), 5000))) {
+    // No switcher means no remote host: the app can only be on This computer. Its local sidebar must be there.
+    const local = await visible(page.getByRole('button', { name: 'Add repository' }), 15_000);
+    check('local-runtime-works', local, 'no remote host saved: the app runs on This computer (no host switcher shown)');
+  } else {
+    await openSwitcher();
+    await ui.localItem().click();
+    const local = await visible(page.getByRole('button', { name: /This computer.*Switch host|Agents run on this computer/i }), 15_000);
+    check('local-runtime-works', local, 'switched back to This computer');
+  }
   await shot('back-on-local');
 }
 
