@@ -20,6 +20,10 @@ on:
         description: Commit to build (default the sha in .github/cs-e2e/app-ref)
         type: string
         default: ''
+      side_by_side:
+        description: Side-by-side build (cloudsandbox; .github/cs-e2e/side-by-side.patch), published as cs-sbs-<sha8>
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -49,6 +53,8 @@ jobs:
       run: |
         set -euo pipefail
         ref="${INPUT_REF:-$(tr -d '[:space:]' < harness/.github/cs-e2e/app-ref)}"
+        # Kept outside the workspace: the app checkout below cleans it.
+        cp harness/.github/cs-e2e/side-by-side.patch "$RUNNER_TEMP/side-by-side.patch"
         echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
     # The app at the workspace root (this clean checkout removes harness/, which is no longer needed).
@@ -63,7 +69,8 @@ jobs:
         sha=$(git rev-parse HEAD)
         stamp=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d%H%M%S HEAD)
         version="$(node -p 'require("./package.json").version')-cs.${stamp}.g${sha:0:8}"
-        { echo "sha=$sha"; echo "version=$version"; echo "tag=cs-${sha:0:8}"; } >> "$GITHUB_OUTPUT"
+        prefix=cs; [ "${{ inputs.side_by_side }}" = true ] && prefix=cs-sbs
+        { echo "sha=$sha"; echo "version=$version"; echo "tag=${prefix}-${sha:0:8}"; } >> "$GITHUB_OUTPUT"
         echo "Building $version from $sha" >> "$GITHUB_STEP_SUMMARY"
 
     - uses: actions/setup-python@v6
@@ -76,15 +83,20 @@ jobs:
     - name: Install dependencies
       run: pnpm install
 
+    - name: Side-by-side support (rc/integration's, unchanged)
+      if: ${{ inputs.side_by_side }}
+      run: git apply --verbose "$RUNNER_TEMP/side-by-side.patch"
+
     - name: Build the .deb
       run: |
         set -euo pipefail
+        sbs=""; [ "${{ inputs.side_by_side }}" = true ] && sbs="-c.extraMetadata.paneSideBySide=cloudsandbox"
         pnpm run build:frontend
         pnpm run build:main
         pnpm run inject-build-info
         pnpm run generate-notices
         pnpm exec electron-builder --linux deb --x64 --publish never \
-          -c.extraMetadata.version=${{ steps.version.outputs.version }}
+          -c.extraMetadata.version=${{ steps.version.outputs.version }} $sbs
         mkdir -p release
         cp dist-electron/*.deb release/
         (cd release && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
