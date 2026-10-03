@@ -146,6 +146,7 @@ Main area tab:   [☁ testina · Terminal ×]
 
 - **Where:** Settings > Cloud sandboxes > "Local start script". The user writes a script there. It runs on the user's LOCAL machine (Windows: PowerShell or cmd; macOS/Linux: sh).
 - **When:** on every sandbox Create and Start, BEFORE the remote startup script (E5).
+- **Ordering vs E5 (E7-A ruling, relay 1:43 PM PT; the parent agent's ruling, within Red's direction):** E5's boot run stays. After the desktop installs the fresh local-env on Create/Start, E5 RE-RUNS ONCE if the startup-script sha OR the local-env sha differs from what the boot run used. Nothing runs twice when nothing changed.
 - **Output:** stdout lines in KEY=VALUE form are sent to the sandbox as an owner-only env file, e.g. `~/.config/runpane-cloud/local-env`, mode 0600.
 - **Use:** the remote startup script (E5) and agent/terminal shells source that file.
 - **Secrets:** values are never logged or printed. Logs show key names only.
