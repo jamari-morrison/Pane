@@ -77,6 +77,11 @@ interface IpcMainHandleLike {
   ): void;
 }
 
+/** What the renderer shows of the saved hosts (never their tokens), to tell when it needs a refetch. */
+function describeSavedHosts(profiles: RemotePaneConnectionProfile[]): string {
+  return JSON.stringify(profiles.map((profile) => [profile.id, profile.label, profile.baseUrl, profile.hostKind?.label, profile.hostKind?.icon]));
+}
+
 interface RemoteDaemonHandlerServices {
   app?: Pick<AppServices['app'], 'isPackaged' | 'getVersion'>;
   getMainWindow?: AppServices['getMainWindow'];
@@ -167,6 +172,15 @@ export function registerRemoteDaemonHandlers(
     }
   }
 
+  // The renderer reads saved hosts from its config store, which only refetches when told; a host saved
+  // or forgotten here (the cloud library's saved hosts) would otherwise not reach the host switcher.
+  function notifyRendererProfilesChanged(): void {
+    const mainWindow = getMainWindow?.();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('remote-daemon:profiles-changed');
+    }
+  }
+
   async function applyRemoteClientTransition(
     transition: (current: RemoteDaemonConfig) => Promise<{
       next: RemoteDaemonConfig;
@@ -183,6 +197,9 @@ export function registerRemoteDaemonHandlers(
     await configManager.updateConfig({ remoteDaemon: next });
     if (result.resyncRenderer) {
       requestRendererRemoteResync();
+    }
+    if (describeSavedHosts(current.client.profiles) !== describeSavedHosts(next.client.profiles)) {
+      notifyRendererProfilesChanged();
     }
 
     return next;

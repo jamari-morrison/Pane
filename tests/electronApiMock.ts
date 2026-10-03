@@ -403,6 +403,8 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
             };
             remoteDaemonConfig.client.profiles.push(profile);
             syncRemoteDaemonConfig();
+            // Like main: a host the cloud library saves is announced, not returned.
+            emit('remote-daemon:profiles-changed');
             cloud.sandboxes = [...cloud.sandboxes.filter((sandbox) => sandbox.id !== id), {
               id: hostname,
               label: request.name,
@@ -1333,6 +1335,7 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           const profileId = findCloudSandbox(id)?.profileId;
           remoteDaemonConfig.client.profiles = remoteDaemonConfig.client.profiles.filter((profile) => profile.id !== profileId);
           syncRemoteDaemonConfig();
+          emit('remote-daemon:profiles-changed');
           cloud.sandboxes = cloud.sandboxes.filter((sandbox) => sandbox.id !== id);
         }),
         retryCloudSandbox: (id: string) => {
@@ -1360,6 +1363,8 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           return emitCloud();
         },
         readCloudSandboxStartupLog: (id: string) => success({ log: cloud.startupLogs.get(id) ?? '' }),
+        onProfilesChanged: (callback: MockEventCallback) =>
+          subscribe('remote-daemon:profiles-changed', callback),
         onCloudSandboxesChanged: (callback: MockEventCallback) =>
           subscribe('remote-daemon:cloud-sandboxes-changed', callback),
       }),

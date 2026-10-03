@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { API, type IPCResponse } from '../utils/api';
-import { useConfigStore } from '../stores/configStore';
 import {
   createDefaultCloudSandboxesSnapshot,
   type CloudSandboxesSnapshot,
@@ -13,19 +12,12 @@ type CloudSandboxRequestResult = { ok: true; snapshot: CloudSandboxesSnapshot } 
 export function useCloudSandboxes(enabled = true) {
   const [snapshot, setSnapshot] = useState<CloudSandboxesSnapshot>(createDefaultCloudSandboxesSnapshot);
   const [loaded, setLoaded] = useState(false);
-  const fetchConfig = useConfigStore((state) => state.fetchConfig);
-  const profileKeyRef = useRef<string | null>(null);
 
+  // Saved host profiles reach the config store through remote-daemon:profiles-changed (see Sidebar).
   const applySnapshot = useCallback((next: CloudSandboxesSnapshot) => {
     setSnapshot(next);
     setLoaded(true);
-    // The library saves and forgets host profiles; the switcher reads them from the config store.
-    const profileKey = next.sandboxes.map((sandbox) => sandbox.profileId ?? '').join('\n');
-    if (profileKeyRef.current !== null && profileKeyRef.current !== profileKey) {
-      void fetchConfig().catch(() => undefined);
-    }
-    profileKeyRef.current = profileKey;
-  }, [fetchConfig]);
+  }, []);
 
   useEffect(() => {
     if (!enabled) return;

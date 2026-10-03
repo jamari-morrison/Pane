@@ -371,6 +371,8 @@ interface ElectronAPI {
     getCloudStartupScript: () => Promise<IPCResponse<{ script: string }>>;
     saveCloudStartupScript: (script: string) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
     readCloudSandboxStartupLog: (id: string) => Promise<IPCResponse<{ log: string }>>;
+    /** Main saved or forgot a host on its own (e.g. a cloud sandbox); refetch the config. */
+    onProfilesChanged: (callback: () => void) => () => void;
     onCloudSandboxesChanged: (callback: (snapshot: CloudSandboxesSnapshot) => void) => () => void;
   };
 
