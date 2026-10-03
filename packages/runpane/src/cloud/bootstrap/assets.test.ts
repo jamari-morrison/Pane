@@ -437,7 +437,10 @@ test('startup-run starts the unit without waiting; if-changed skips a script the
   };
   const idle = '[ "$1" = is-active ] && echo inactive; return 0;';
 
-  const first = runStartupStep(home, 'startup-run', ['if-changed'], idle);
+  // Seen live: the unit can write its new status before the step reports. The step reports the status from BEFORE it
+  // started the run, or the caller would take the new run for the old one.
+  const startsAtOnce = `[ "$1" = start ] && { mkdir -p '${startupState(home)}'; echo '{"exitCode":null,"startedAt":"new","finishedAt":null,"sha256":"x","timedOut":false}' > '${statusFile}'; return 0; }; ${idle}`;
+  const first = runStartupStep(home, 'startup-run', ['if-changed'], startsAtOnce);
   assert.equal(first.status, 0, first.stdout + first.stderr);
   assert.match(first.calls, /systemctl start --no-block rp-user-startup\.service/u);
   assert.deepEqual(first.payload, { ok: true, state: 'started', status: null });
@@ -448,7 +451,10 @@ test('startup-run starts the unit without waiting; if-changed skips a script the
   assert.equal(unchanged.payload.status.exitCode, 3);
   assert.doesNotMatch(unchanged.calls, /systemctl start/u);
 
-  assert.equal(runStartupStep(home, 'startup-run', ['always'], idle).payload.state, 'started');
+  const again = runStartupStep(home, 'startup-run', ['always'], startsAtOnce);
+  assert.equal(again.payload.state, 'started');
+  assert.equal(again.payload.status.startedAt, '2026-10-03T10:00:00Z', 'the status before this run');
+  writeStatus(sha256Of('echo v1\n'));
   fs.writeFileSync(script, 'echo v2\n');
   assert.equal(runStartupStep(home, 'startup-run', ['if-changed'], idle).payload.state, 'started');
 
