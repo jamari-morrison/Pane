@@ -357,7 +357,7 @@ function StartupLogDialog({ sandbox, onClose }: { sandbox: CloudSandboxView; onC
   const title = `Startup log: ${sandbox.label}`;
   return (
     <Modal isOpen onClose={onClose} size="lg" ariaLabel={title}>
-      <ModalHeader title={title} description="The last 200 lines of the latest run." onClose={onClose} />
+      <ModalHeader title={title} description="The last 200 lines of the latest run." />
       <ModalBody>
         {error && <p className="text-sm text-status-error" role="alert">{error}</p>}
         {!error && log === null && <p className="text-sm text-text-tertiary" aria-live="polite">Loading the log...</p>}
