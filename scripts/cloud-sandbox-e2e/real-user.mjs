@@ -657,11 +657,21 @@ const hostPath = (...parts) => (hostIsWindows ? path.win32.join(...parts) : path
 const samePath = (a, b) => (hostIsWindows ? String(a ?? '').replace(/\\/g, '/').toLowerCase() === String(b ?? '').replace(/\\/g, '/').toLowerCase() : a === b);
 
 // Types into the terminal that is on screen, like a user, then waits until the command's output ends in a prompt.
-async function typeInVisibleTerminal(text, { enter = true } = {}) {
+async function typeInVisibleTerminal(text, { enter = true, panelId } = {}) {
   const terminal = page.locator('.xterm:visible').last();
   await terminal.waitFor({ timeout: 30_000 });
   await terminal.click();
-  await page.keyboard.type(text, { delay: 15 });
+  // A keystroke right after the focus can be lost (windows-latest: "hoami"); type, check the line, retype once.
+  await sleep(400);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await page.keyboard.type(text, { delay: 15 });
+    if (!panelId) break;
+    const typed = await until(async () => squeeze(nonEmpty(await screenText(panelId)).slice(-4).join('')).endsWith(squeeze(text)), 3000, 200);
+    if (typed) break;
+    log(`the typed line didn't arrive whole; retyping (attempt ${attempt + 2})`);
+    await page.keyboard.press('Control+C');
+    await sleep(800);
+  }
   if (enter) await page.keyboard.press('Enter');
 }
 // The last screen row where `command` ends. A long prompt plus command wraps over several rows (DROP 1 D5: the
@@ -690,7 +700,7 @@ async function runInTerminal(panelId, command, { timeoutMs = 60_000, done } = {}
     await page.keyboard.press('Control+C');
     await until(async () => promptLine.test(nonEmpty(await screenText(panelId)).at(-1) ?? ''), 10_000, 300);
   }
-  await typeInVisibleTerminal(command);
+  await typeInVisibleTerminal(command, { panelId });
   let last = '';
   let stableSince = 0;
   const output = await until(async () => {
@@ -906,10 +916,12 @@ async function d1() {
   check('host-terminal-heading', await visible(ui.hostTerminalHeading(state.label), 2000), `"Terminal on ${state.label}"`);
   const { lines } = await runInTerminal(panelId, 'whoami; hostname; pwd');
   if (hostIsWindows) {
-    // PowerShell: whoami is DOMAIN\user and pwd prints a Path table.
-    check('whoami', lines.some((line) => line.trim().toLowerCase().endsWith(`\\${expected.user.toLowerCase()}`)), lines.join(' | '));
+    // A Windows host's terminal may be PowerShell (DOMAIN\user, a Path table) or Git Bash (user, /d/a/... paths).
+    const posix = (text) => text.trim().replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`).toLowerCase();
+    const user = expected.user.toLowerCase();
+    check('whoami', lines.some((line) => [user].includes(line.trim().toLowerCase()) || line.trim().toLowerCase().endsWith(`\\${user}`)), lines.join(' | '));
     check('hostname', lines.some((line) => expected.hostname.test(line.trim())), lines.join(' | '));
-    check('pwd-home', lines.some((line) => line.trim().toLowerCase() === expected.home.toLowerCase()), lines.join(' | '));
+    check('pwd-home', lines.some((line) => posix(line) === posix(expected.home)), lines.join(' | '));
   } else {
     const [user, hostname, cwd] = lines;
     check('whoami', user?.trim() === expected.user, `${user} (want ${expected.user})`);
@@ -1003,7 +1015,10 @@ async function d3() {
 
   // E3 v2: back to Home > GitHub (the draft and the notice are kept), then the in-app sign-in.
   const again = await openCloneDialog();
-  check('draft-kept-after-terminal', (await again.getByLabel('Repository URL').inputValue()) === PRIVATE_REPO && await visible(ui.signInAlert(page, state.label), 5000), 'URL and notice back');
+  const urlKept = (await again.getByLabel('Repository URL').inputValue()) === PRIVATE_REPO;
+  const noticeKept = await visible(ui.signInAlert(page, state.label), 15_000);
+  check('draft-kept-after-terminal', urlKept && noticeKept, `URL kept ${urlKept}, notice back ${noticeKept}`);
+  if (!(urlKept && noticeKept)) await shot('draft-after-terminal');
   if (!(await visible(ui.signInGitHub(), 3000))) {
     // Before E3 v2 (drop 6): only the fallback exists. Run 8 needs it.
     check('sign-in-to-github-offered', relay ? false : null, 'no "Sign in to GitHub" in this build');
@@ -1383,9 +1398,15 @@ async function d4OpenAndNew() {
   check('open-repo-cloned-on-host', cloneLines.some((line) => /clone_exit=(0|True)\b/.test(line)), cloneLines.join(' | '));
   await shot('open-repo-on-host');
   const add = await openRepositoryDialog();
+  await sleep(500);
   await add.getByRole('button', { name: /^Browse/ }).click();
   const openPicker = ui.picker(state.label);
-  await openPicker.waitFor({ timeout: 10_000 });
+  // windows-latest: the first click during the dialog's opening didn't show the browser within 10 s.
+  if (!(await visible(openPicker, 10_000))) {
+    log('the folder browser did not open; clicking Browse again');
+    await add.getByRole('button', { name: /^Browse/ }).click();
+  }
+  await openPicker.waitFor({ timeout: 30_000 });
   check('open-picker-no-new-folder', (await ui.pickerNewFolder(openPicker).count()) === 0, 'no "New folder" in the Open browser (A8)');
   check('open-picker-marks-repo', await visible(ui.pickerEntry(openPicker, openRepoDir, true), 10_000), `"${openRepoDir}, git repo"`);
   await shot('open-picker-home');
@@ -1564,6 +1585,10 @@ async function d7() {
   await shot('hostname-after-start', { oracle: { lines: afterBoot } });
 
   // A failing script, set through the editor, surfaces in the row.
+  await d7FailingVariant();
+}
+
+async function d7FailingVariant() {
   await openCloud();
   await ui.startupScript().fill(`${startupScript}exit 1\n`);
   await ui.saveStartupScript().click();
@@ -1580,6 +1605,7 @@ async function d7() {
     return /Loading the log/i.test(text) ? undefined : text;
   }, 60_000, 500) ?? '';
   check('view-log-shows-run', logText.includes(MARKER), `${logText.split('\n').length} lines, marker ${logText.includes(MARKER)}`);
+  check('view-log-no-token', tokenShapes(logText).length === 0, `token shapes in the shown log: ${JSON.stringify(tokenShapes(logText))}`);
   await shot('startup-log', { result: true });
   await page.keyboard.press('Escape');
 }
@@ -1833,6 +1859,8 @@ async function main() {
     await step('D6', 'Claude Code (and Codex) print pwd and branch = D5', d6);
     await step('D7', 'Startup status, Stop/Start re-runs it, a failing script shows the chip', d7, { applies: cloud, why: 'cloud sandboxes only' });
     // STEPS=D7LOG: only the row's View log, read again on a running sandbox (no edit, no start).
+    // STEPS=D7FAIL: only the failing-script variant (an edit in the UI, no start).
+    await step('D7FAIL', 'Failing startup script via the editor -> chip -> View log (loaded)', d7FailingVariant, { applies: cloud, why: 'cloud sandboxes only' });
     await step('D7LOG', 'View log on the row (re-observed: no edit, no start)', d7ViewLogOnly);
     await step('D8', 'Claude edits, commits, pushes and opens a draft PR', d8, { applies: relay || env.D8 === '1', why: 'needs Red\'s GitHub sign-in (SOBECK only)' });
   } finally {
