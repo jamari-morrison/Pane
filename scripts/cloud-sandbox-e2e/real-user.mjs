@@ -1031,7 +1031,7 @@ async function d3AddToken() {
   await shot('clone-add-token-notice', { result: true });
   await ui.openSettingsForToken().click();
   check('open-settings-shows-token-field', await visible(ui.settingsDialog(), 10_000) && await inView('github-token-field', ui.githubTokenField()), 'Settings opened at the GitHub token');
-  const focused = await ui.githubTokenField().evaluate((element) => element === document.activeElement).catch(() => false);
+  const focused = Boolean(await until(() => ui.githubTokenField().evaluate((element) => element === document.activeElement), 3000, 200));
   check('open-settings-focuses-token-field', focused, focused ? 'the GitHub token box has the focus' : 'not focused');
   await shot('settings-github-token', { result: true });
   if (relay || env.DUMMY_GITHUB_TOKEN === '0') return;
@@ -1379,8 +1379,8 @@ async function d4OpenAndNew() {
   // (c) An existing repo on the host (put there from the host terminal) opened through the remote picker.
   const panelId = await openHostTerminalFromSwitcher(state.label);
   // `"$HOME/…"` and `;` mean the same in bash and PowerShell (a Windows self-hosted host).
-  const { lines: cloneLines } = await runInTerminal(panelId, `git clone -q ${OPEN_REPO_URL} "$HOME/${openRepoDir}"; echo CLONE-EXIT-$?`, { timeoutMs: 180_000, done: (text) => /CLONE-EXIT-/.test(text) });
-  check('open-repo-cloned-on-host', cloneLines.some((line) => /CLONE-EXIT-(0|True)\b/.test(line)), cloneLines.join(' | '));
+  const { lines: cloneLines } = await runInTerminal(panelId, `git clone -q ${OPEN_REPO_URL} "$HOME/${openRepoDir}"; echo clone_exit=$?`, { timeoutMs: 180_000, done: (text) => /clone_exit=/.test(text) });
+  check('open-repo-cloned-on-host', cloneLines.some((line) => /clone_exit=(0|True)\b/.test(line)), cloneLines.join(' | '));
   await shot('open-repo-on-host');
   const add = await openRepositoryDialog();
   await add.getByRole('button', { name: /^Browse/ }).click();
@@ -1574,9 +1574,34 @@ async function d7() {
   await ui.viewLog(state.label).click();
   const logDialog = ui.startupLog(state.label);
   check('view-log-dialog', await visible(logDialog, 10_000), `"Startup log: ${state.label}"`);
-  const logText = (await logDialog.innerText().catch(() => '')) ?? '';
+  // The dialog first says "Loading the log..." (rehearsal 2 read it then): wait for the log itself.
+  const logText = await until(async () => {
+    const text = (await logDialog.innerText().catch(() => '')) ?? '';
+    return /Loading the log/i.test(text) ? undefined : text;
+  }, 60_000, 500) ?? '';
   check('view-log-shows-run', logText.includes(MARKER), `${logText.split('\n').length} lines, marker ${logText.includes(MARKER)}`);
   await shot('startup-log', { result: true });
+  await page.keyboard.press('Escape');
+}
+
+async function d7ViewLogOnly() {
+  await openCloud();
+  const chip = (await visible(ui.startupChip(state.label), 3000)) ? await ui.startupChip(state.label).innerText() : '';
+  check('chip-now', true, `chip: ${chip || 'none'}`);
+  await inView('row', ui.row(state.label));
+  await shot('row-now', { result: true, oracle: { chip } });
+  if (!(await visible(ui.viewLog(state.label), 2000))) {
+    check('view-log-available', false, 'no View log on the row now');
+    return;
+  }
+  await ui.viewLog(state.label).click();
+  const logDialog = ui.startupLog(state.label);
+  const logText = await until(async () => {
+    const text = (await logDialog.innerText().catch(() => '')) ?? '';
+    return /Loading the log/i.test(text) ? undefined : text;
+  }, 60_000, 500) ?? '';
+  check('view-log-loaded', Boolean(logText), `${logText.split('\n').length} lines, marker ${logText.includes(MARKER)}, exit-1 run ${/exit 1|exit code 1|exited with 1/i.test(logText)}`);
+  await shot('startup-log-loaded', { result: Boolean(logText), oracle: { lines: logText.split('\n').length, marker: logText.includes(MARKER) } });
   await page.keyboard.press('Escape');
 }
 
@@ -1807,6 +1832,8 @@ async function main() {
     await step('D5', 'New Pane: its terminal is in the Pane\'s worktree', d5);
     await step('D6', 'Claude Code (and Codex) print pwd and branch = D5', d6);
     await step('D7', 'Startup status, Stop/Start re-runs it, a failing script shows the chip', d7, { applies: cloud, why: 'cloud sandboxes only' });
+    // STEPS=D7LOG: only the row's View log, read again on a running sandbox (no edit, no start).
+    await step('D7LOG', 'View log on the row (re-observed: no edit, no start)', d7ViewLogOnly);
     await step('D8', 'Claude edits, commits, pushes and opens a draft PR', d8, { applies: relay || env.D8 === '1', why: 'needs Red\'s GitHub sign-in (SOBECK only)' });
   } finally {
     stopBrowserSampler();
