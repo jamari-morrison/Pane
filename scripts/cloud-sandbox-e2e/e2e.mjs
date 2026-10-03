@@ -957,9 +957,13 @@ async function phaseStop() {
     await page.waitForTimeout(1500);
     await openCloud();
     await ui.rowAction('Stop', state.label).click();
-    // Every change of the row while stopping, with its time (SOBECK Run 6: a 307 s stop left no timeline).
+    // D4: from the accepted Stop on, the row never says Running again; while stopping, the row AND the switcher say
+    // Stopping with no Stop/Start; at the end Stopped with Start. Every row change is timed (stop-timeline.txt).
     let lastStopRow;
     const stopTimeline = [];
+    let sawRunning = '';
+    let accepted = false;
+    let stoppingChecked = false;
     const stopped = await until(async () => {
       const row = await rowText(state.label);
       if (row !== lastStopRow) {
@@ -967,11 +971,37 @@ async function phaseStop() {
         log(`row: ${row}`);
       }
       lastStopRow = row;
+      // Accepted = the row has left Running once (Stopping or Stopped); a Running after that is a stale or wrong state.
+      if (rowBadge(row, 'Stopping') || rowBadge(row, 'Stopped')) accepted = true;
+      if (accepted && rowBadge(row, 'Running') && !sawRunning) sawRunning = `${Math.round((Date.now() - startedAt) / 1000)} s: ${row}`;
+      if (rowBadge(row, 'Stopping') && !stoppingChecked) {
+        stoppingChecked = true;
+        const stopShown = await visible(ui.rowAction('Stop', state.label), 300);
+        const startShown = await visible(ui.rowAction('Start', state.label), 300);
+        check('stopping-hides-actions', !stopShown && !startShown, `row while stopping: ${row}; Stop button ${stopShown}, Start button ${startShown}`);
+        await shot('row-stopping');
+        // The switcher, while still stopping: closes Settings, reads the entry, comes back.
+        await closeSettings();
+        await openSwitcher();
+        const entry = ((await ui.hostItem(state.label).textContent().catch(() => '')) ?? '').replace(/\s+/g, ' ');
+        const startOffered = await visible(ui.switcherStart(state.label), 500);
+        const stillStopping = rowBadge(await (async () => { await closeMenus(); await openCloud(); return rowText(state.label); })(), 'Stopping');
+        if (/Stopping/i.test(entry) || stillStopping) {
+          check('switcher-shows-stopping', /Stopping/i.test(entry) && !startOffered, `switcher entry while stopping: "${entry}"; Start offered ${startOffered}`);
+        } else {
+          check('switcher-shows-stopping', null, `the stop finished before the switcher was read ("${entry}")`);
+        }
+      }
       return rowBadge(row, 'Stopped');
-    }, 300_000, 2000);
+    }, Number(env.STOP_WAIT_MS ?? 1_000_000), 2000);
     fs.writeFileSync(path.join(out, 'stop-timeline.txt'), `${redact(stopTimeline.join('\n'))}\n`);
     timing('stop', startedAt);
+    check('no-running-after-stop', !sawRunning, sawRunning ? `the row said Running after Stop was accepted (${sawRunning})` : `never Running after Stop; ${stopTimeline.length} row states`);
+    if (!stoppingChecked) check('stopping-hides-actions', null, 'the row went to Stopped before a Stopping state was seen (fast stop)');
     check('row-stopped', Boolean(stopped), `row "${state.label}" shows stopped`);
+    const startInRow = await visible(ui.rowAction('Start', state.label), 2000);
+    const stopInRow = await visible(ui.rowAction('Stop', state.label), 300);
+    check('row-stopped-offers-start', startInRow && !stopInRow, `Stopped row: Start ${startInRow}, Stop ${stopInRow}`);
     await shot('row-stopped');
     const sandbox = relay ? { exists: true, state: 'not checked on SOBECK' } : await boatSandbox(state.cloud.sandboxId, boatOrg);
     if (!relay) check('boat-stopped', sandbox.exists && !/running|active/i.test(sandbox.state ?? ''), `boat state ${sandbox.state}`);
