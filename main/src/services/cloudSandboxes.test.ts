@@ -806,7 +806,7 @@ describe('CloudSandboxManager GitHub token', () => {
 describe('CloudSandboxManager create row', () => {
   it('shows a sandbox being created once, as its progress, even when a refresh already lists it', async () => {
     let finish: ((value: CloudSandboxInfo) => void) | undefined;
-    const list = vi.fn(async () => [] as CloudSandboxInfo[]);
+    const list = vi.fn<CloudSandboxLibrary['list']>(async () => []);
     const library = createLibrary({
       list,
       create: vi.fn(() => new Promise<CloudSandboxInfo>((resolve) => { finish = resolve; })),
