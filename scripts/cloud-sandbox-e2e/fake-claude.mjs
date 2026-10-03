@@ -5,12 +5,14 @@
 // the app (panel, terminal, resume), never Claude itself.
 //   SUM:  "...compute 123+456..."             -> SUM=579
 //   WORD: "The code word is X." then later "What was the code word..." -> WORD=X (from the transcript)
+//   WHERE: "...`pwd` and `git branch --show-current`..."  -> PWD=<its cwd> and BRANCH=<git's answer there> (real-user kit D6)
 // Its model is resolved the way Claude Code resolves it (--model, ANTHROPIC_MODEL, ~/.claude/settings.json
 // `model`, else its own default) and written as `message.model` on each assistant line, like a real transcript.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { execFileSync } from 'node:child_process';
 
 const args = process.argv.slice(2);
 const flag = (name) => {
@@ -49,6 +51,15 @@ input.on('line', (line) => {
     const said = fs.readFileSync(transcript, 'utf8').split('\n').filter(Boolean).map((entry) => JSON.parse(entry))
       .map((entry) => entry.role === 'user' && entry.text.match(/code word is (\S+?)\./i)?.[1]).filter(Boolean).at(-1);
     answer = said ? `WORD=${said}` : 'No code word in this conversation.';
+  }
+  if (/`pwd`.*git branch --show-current/.test(line)) {
+    let branch = '';
+    try {
+      branch = execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim();
+    } catch {
+      branch = '(not a git repo)';
+    }
+    answer = `PWD=${process.cwd().replace(/\\/g, '/')}\nBRANCH=${branch}`;
   }
   append('assistant', answer);
   process.stdout.write(`\n* ${answer}\n`);

@@ -17,6 +17,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { addSecret, loadSecret, redact, scanForSecrets, scanForTokenShapes, secretNames, secretValue, tokenShapes } from './secrets.mjs';
 import { boatSandbox, daemonInvoke, health, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
 
@@ -176,24 +177,44 @@ const fakeDir = path.join(fakeHome, '.pane');
 const fakePort = Number(env.FAKE_PORT ?? 42198);
 const fakeBaseUrl = `http://127.0.0.1:${fakePort}`;
 const fakeLabel = env.FAKE_LABEL ?? 'agentbox-selfhosted';
-const fakeEnv = () => cleanEnv({
-  HOME: fakeHome,
-  XDG_CONFIG_HOME: path.join(fakeHome, '.config'),
-  XDG_DATA_HOME: path.join(fakeHome, '.local/share'),
-  XDG_CACHE_HOME: path.join(fakeHome, '.cache'),
-  DISPLAY: '',
-  // A signed-in Claude like a provisioned host; never a GitHub or Codex credential.
-  ...(env.FAKE_CLAUDE === '1' ? {} : { CLAUDE_CODE_OAUTH_TOKEN: secretValue('claudeToken') }),
-  CLAUDE_CODE_SANDBOXED: '1',
-  // No terminal prompt for git credentials, as on a host nobody is watching (a sandbox behaves the same).
-  GIT_TERMINAL_PROMPT: '0',
-});
+const fakeBin = path.join(fakeHome, 'bin');
+const fakeEnv = () => {
+  const base = cleanEnv({
+    HOME: fakeHome,
+    ...(windows
+      ? { USERPROFILE: fakeHome, APPDATA: path.join(fakeHome, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(fakeHome, 'AppData', 'Local') }
+      : { XDG_CONFIG_HOME: path.join(fakeHome, '.config'), XDG_DATA_HOME: path.join(fakeHome, '.local/share'), XDG_CACHE_HOME: path.join(fakeHome, '.cache'), DISPLAY: '' }),
+    // A signed-in Claude like a provisioned host; never a GitHub or Codex credential.
+    ...(env.FAKE_CLAUDE === '1' ? {} : { CLAUDE_CODE_OAUTH_TOKEN: secretValue('claudeToken') }),
+    CLAUDE_CODE_SANDBOXED: '1',
+    // No credential prompt of any kind, as on a host nobody is watching (a sandbox behaves the same).
+    GIT_TERMINAL_PROMPT: '0',
+    GCM_INTERACTIVE: 'never',
+  });
+  for (const name of ['GH_TOKEN', 'GITHUB_TOKEN']) delete base[name];
+  if (env.FAKE_CLAUDE === '1') {
+    // The stand-in first on PATH, whatever case the PATH variable has (Windows spells it Path).
+    const key = Object.keys(base).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH';
+    const value = base[key] ?? '';
+    delete base[key];
+    base.PATH = `${fakeBin}${path.delimiter}${value}`;
+  }
+  return base;
+};
+function installFakeClaude() {
+  fs.mkdirSync(fakeBin, { recursive: true });
+  const script = fileURLToPath(new URL('./fake-claude.mjs', import.meta.url));
+  fs.writeFileSync(path.join(fakeBin, 'claude.cmd'), `@"${process.execPath}" "${script}" %*\r\n`);
+  fs.writeFileSync(path.join(fakeBin, 'claude'), `#!/bin/sh\nexec "${process.execPath.replace(/\\/g, '/')}" "${script.replace(/\\/g, '/')}" "$@"\n`, { mode: 0o755 });
+  finding('FAKE_CLAUDE=1: the self-hosted host runs a Claude stand-in (fake-claude.mjs), not Claude Code');
+}
 
 function fakeSetup() {
   fs.mkdirSync(fakeDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(fakeHome, '.claude.json'), `${JSON.stringify({ hasCompletedOnboarding: true, bypassPermissionsModeAccepted: true, projects: { [fakeHome]: { hasTrustDialogAccepted: true } } })}\n`, { mode: 0o600 });
   // A plain host has a git identity of its own (the user's); without one a new project's first commit fails.
   fs.writeFileSync(path.join(fakeHome, '.gitconfig'), '[user]\n\tname = cs-e2e\n\temail = cs-e2e@localhost\n');
+  if (env.FAKE_CLAUDE === '1') installFakeClaude();
   const setup = spawnSync(paneBin, ['--ozone-platform=headless', '--disable-gpu', '--no-sandbox', '--remote-setup', '--label', fakeLabel, '--pane-dir', fakeDir,
     '--listen-port', String(fakePort), '--prefer-tunnel', 'manual', '--base-url', fakeBaseUrl, '--no-install-service'], { env: fakeEnv(), encoding: 'utf8', timeout: 120_000 });
   const code = (setup.stdout ?? '').match(/pane-remote:\/\/[A-Za-z0-9_-]+/)?.[0];
@@ -205,13 +226,19 @@ function fakeSetup() {
 function fakeDaemonStart() {
   const daemonLog = fs.openSync(path.join(work, 'fake-daemon.log'), 'a');
   const child = spawn(paneBin, ['--ozone-platform=headless', '--disable-gpu', '--no-sandbox', '--daemon-headless', '--pane-dir', fakeDir],
-    { env: fakeEnv(), stdio: ['ignore', daemonLog, daemonLog], detached: true });
+    { env: fakeEnv(), stdio: ['ignore', daemonLog, daemonLog], detached: true, windowsHide: true });
   child.unref();
   state.fakePid = child.pid;
   saveState();
 }
 function fakeDaemonKill() {
   if (!state.fakePid) return;
+  if (windows) {
+    spawnSync('taskkill', ['/PID', String(state.fakePid), '/T', '/F']);
+    delete state.fakePid;
+    saveState();
+    return;
+  }
   try {
     process.kill(-state.fakePid, 'SIGKILL');
   } catch {
@@ -346,11 +373,12 @@ const ui = {
   hostTerminalTab: (label) => page.getByRole('tab', { name: new RegExp(`${escapeRegExp(label)} · Terminal`) }),
   hostTerminalHeading: (label) => page.getByText(`Terminal on ${label}`, { exact: true }),
   hostChip: (scope, label, kind) => scope.getByText(label ? `On: ${label} (${kind})` : 'On: This computer', { exact: true }),
-  // Folder browser (cs-repo-ui; names to be settled in the ledger).
+  // Folder browser (cs-repo-ui HostFolderBrowser): a click on an entry opens it; "Select this folder" picks the current one.
   picker: (label) => page.getByRole('dialog', { name: new RegExp(`^Choose a folder on ${escapeRegExp(label)}`) }),
-  pickerEntry: (picker, name) => picker.getByRole('button', { name: new RegExp(`(^|\\s)${escapeRegExp(name)}(\\s|$)`) }).first(),
+  pickerCurrent: (picker) => picker.getByLabel('Current folder'),
+  pickerEntry: (picker, name, isGitRepo) => picker.getByRole('button', { name: isGitRepo ? `${name}, git repo` : name, exact: true }),
   pickerNewFolder: (picker) => picker.getByRole('button', { name: /^New folder/ }),
-  pickerConfirm: (picker) => picker.getByRole('button', { name: /^(Select this folder|Select|Choose)/ }).first(),
+  pickerConfirm: (picker) => picker.getByRole('button', { name: 'Select this folder', exact: true }),
   signInAlert: (scope, label) => scope.getByRole('alert').filter({ hasText: `${label} isn't signed in to GitHub.` }),
   signInOpenTerminal: (label) => page.getByRole('button', { name: `Open terminal on ${label} to sign in`, exact: true }),
   tryAgain: () => page.getByRole('button', { name: 'Try again', exact: true }),
@@ -468,11 +496,16 @@ async function screenText(panelId, limit = 120) {
 const nonEmpty = (text) => text.split('\n').map((line) => line.replace(/\s+$/, '')).filter((line) => line.trim() !== '');
 const promptLine = /[$#>%]\s*$/;
 const hostKind = cloud ? 'cloud sandbox' : 'remote host';
+// The self-hosted host is this machine: on a Windows runner it is a Windows host (PowerShell, C:\ paths, and a
+// typed Windows path is valid there), which the Linux-only checks account for.
+const hostIsWindows = !cloud && windows;
 const expected = {
   user: cloud ? 'user' : os.userInfo().username,
-  hostname: cloud ? /^rp-[a-z0-9-]+$/ : new RegExp(`^${escapeRegExp(os.hostname())}$`),
+  hostname: cloud ? /^rp-[a-z0-9-]+$/ : new RegExp(`^${escapeRegExp(os.hostname())}$`, 'i'),
   home: cloud ? '/home/user' : fakeHome,
 };
+const hostPath = (...parts) => (hostIsWindows ? path.win32.join(...parts) : path.posix.join(...parts));
+const samePath = (a, b) => (hostIsWindows ? String(a ?? '').replace(/\\/g, '/').toLowerCase() === String(b ?? '').replace(/\\/g, '/').toLowerCase() : a === b);
 
 // Types into the terminal that is on screen, like a user, then waits until the command's output ends in a prompt.
 async function typeInVisibleTerminal(text, { enter = true } = {}) {
@@ -653,10 +686,17 @@ async function d1() {
   check('host-terminal-tab', await visible(ui.hostTerminalTab(state.label), 2000), `tab "${state.label} · Terminal"`);
   check('host-terminal-heading', await visible(ui.hostTerminalHeading(state.label), 2000), `"Terminal on ${state.label}"`);
   const { lines } = await runInTerminal(panelId, 'whoami; hostname; pwd');
-  const [user, hostname, cwd] = lines;
-  check('whoami', user?.trim() === expected.user, `${user} (want ${expected.user})`);
-  check('hostname', expected.hostname.test(hostname?.trim() ?? ''), `${hostname} (want ${expected.hostname})`);
-  check('pwd-home', cwd?.trim() === expected.home, `${cwd} (want ${expected.home})`);
+  if (hostIsWindows) {
+    // PowerShell: whoami is DOMAIN\user and pwd prints a Path table.
+    check('whoami', lines.some((line) => line.trim().toLowerCase().endsWith(`\\${expected.user.toLowerCase()}`)), lines.join(' | '));
+    check('hostname', lines.some((line) => expected.hostname.test(line.trim())), lines.join(' | '));
+    check('pwd-home', lines.some((line) => line.trim().toLowerCase() === expected.home.toLowerCase()), lines.join(' | '));
+  } else {
+    const [user, hostname, cwd] = lines;
+    check('whoami', user?.trim() === expected.user, `${user} (want ${expected.user})`);
+    check('hostname', expected.hostname.test(hostname?.trim() ?? ''), `${hostname} (want ${expected.hostname})`);
+    check('pwd-home', cwd?.trim() === expected.home, `${cwd} (want ${expected.home})`);
+  }
   await shot('host-terminal-whoami', { result: true, oracle: { panelId, lines } });
   // No repo is needed for it: the host's project list has nothing called host-terminal.
   const projects = (await hostInvoke('projects:get-all').catch(() => [])) ?? [];
@@ -756,7 +796,11 @@ async function d4() {
   await dialog.getByRole('button', { name: /^Browse/ }).click();
   const picker = ui.picker(state.label);
   check('remote-picker-opens', await visible(picker, 10_000), `in-app folder browser on ${state.label}`);
-  check('remote-picker-at-home', await visible(picker.getByText(expected.home, { exact: false }), 5000), `shows ${expected.home}`);
+  const pickerPath = async (want) => until(async () => {
+    const shown = (await ui.pickerCurrent(picker).first().innerText().catch(() => '')) || await ui.pickerCurrent(picker).first().inputValue().catch(() => '');
+    return shown.trim() === want ? shown.trim() : undefined;
+  }, 10_000, 300);
+  check('remote-picker-at-home', Boolean(await pickerPath(expected.home)), `Current folder ${expected.home}`);
   check('native-dialog-not-used-remote', (await app.evaluate(() => globalThis.__e2eNativeDialogs.length)) === 0, 'no native dialog for a remote host');
   await shot('clone-remote-picker', { result: true, oracle: await hostInvoke('fs:browse-directories', { path: '~' }).then((listing) => ({ path: listing?.path, home: listing?.home, entries: listing?.entries?.length })).catch((error) => ({ error: String(error) })) });
   await ui.pickerConfirm(picker).click();
@@ -765,48 +809,65 @@ async function d4() {
   check('clone-destination-home', destination === '~' || destination === expected.home, `destination "${destination}"`);
   await shot('clone-filled');
   await dialog.getByRole('button', { name: /^Clone/ }).last().click();
-  const cloned = await until(async () => (await projectsOnHost()).find((project) => project.path === `${expected.home}/${repoName}`), 300_000, 2000);
+  const cloned = await until(async () => (await projectsOnHost()).find((project) => samePath(project.path, hostPath(expected.home, repoName))), 300_000, 2000);
   check('cloned-onto-host', Boolean(cloned), `project at ${expected.home}/${repoName}: ${JSON.stringify(cloned ?? null)}`);
   check('repo-open', await visible(ui.openMainWorkspace(repoName), 30_000), `${repoName} in the sidebar`);
   await shot('cloned-project', { result: true, oracle: { projects: await projectsOnHost() } });
   state.repoName = repoName;
   saveState();
 
-  // (b) Open project with a typed Windows path is rejected, in the dialog.
+  // (b) Open project with a typed Windows path is rejected, in the dialog (a Windows host accepts it).
+  if (hostIsWindows) check('windows-path-rejected', null, 'the self-hosted host is Windows itself');
+  else await windowsPathRejected();
+  await d4OpenAndNew();
+}
+
+async function openRepositoryDialog() {
   await goHome();
   await ui.homeCard('Open Project').click();
   await ui.addRepositoryFooter().click();
-  const add = ui.dialog(/Add (New )?Repository|Open/);
+  const add = ui.dialog(/^Open Repository/);
   await add.waitFor({ timeout: 10_000 });
+  return add;
+}
+async function windowsPathRejected() {
+  const add = await openRepositoryDialog();
   check('open-host-chip', await visible(ui.hostChip(add, state.label, hostKind), 3000), `"On: ${state.label} (${hostKind})"`);
   const before = await projectsOnHost();
+  await add.getByLabel('Project Name').fill('montlakev2-windows-path');
   await add.getByLabel('Repository Path').fill(WINDOWS_PATH);
-  await add.getByRole('button', { name: /^(Add|Open)/ }).last().click();
+  await add.getByRole('button', { name: 'Open', exact: true }).click().catch(() => undefined);
   const sentence = `That's a path on this computer; ${state.label} is a Linux host. Pick a folder on ${state.label}.`;
   check('windows-path-rejected', await visible(add.getByText(sentence, { exact: false }), 15_000), sentence);
   const after = await projectsOnHost();
   check('windows-path-created-nothing', after.length === before.length, `projects ${before.length} → ${after.length}`);
   await shot('windows-path-rejected', { result: true, oracle: { projectsBefore: before.length, projectsAfter: after.length } });
-  await closeMenus();
+  await add.getByRole('button', { name: 'Cancel', exact: true }).click();
+}
 
+async function d4OpenAndNew() {
   // (c) An existing repo on the host (put there from the host terminal) opened through the remote picker.
   const panelId = await openHostTerminalFromSwitcher(state.label);
   await runInTerminal(panelId, `git clone -q ${OPEN_REPO_URL} ~/${openRepoDir} && echo CLONED-OK`, { timeoutMs: 180_000, done: (text) => /CLONED-OK|fatal:/.test(text) });
   await shot('open-repo-on-host');
-  await goHome();
-  await ui.homeCard('Open Project').click();
-  await ui.addRepositoryFooter().click();
-  await add.waitFor({ timeout: 10_000 });
+  const add = await openRepositoryDialog();
   await add.getByRole('button', { name: /^Browse/ }).click();
   const openPicker = ui.picker(state.label);
   await openPicker.waitFor({ timeout: 10_000 });
   check('open-picker-no-new-folder', (await ui.pickerNewFolder(openPicker).count()) === 0, 'no "New folder" in the Open browser (A8)');
-  await ui.pickerEntry(openPicker, openRepoDir).dblclick();
-  await openPicker.getByText(`${expected.home}/${openRepoDir}`, { exact: false }).first().waitFor({ timeout: 10_000 }).catch(() => undefined);
+  check('open-picker-marks-repo', await visible(ui.pickerEntry(openPicker, openRepoDir, true), 10_000), `"${openRepoDir}, git repo"`);
+  await shot('open-picker-home');
+  await ui.pickerEntry(openPicker, openRepoDir, true).click();
+  const inRepo = await until(async () => ((await ui.pickerCurrent(openPicker).first().innerText().catch(() => '')) || '').trim() === hostPath(expected.home, openRepoDir), 10_000, 300);
+  check('open-picker-entered-repo', Boolean(inRepo), `Current folder ${expected.home}/${openRepoDir}`);
   await shot('open-picker-repo');
   await ui.pickerConfirm(openPicker).click();
-  await add.getByRole('button', { name: /^(Add|Open)/ }).last().click();
-  const opened = await until(async () => (await projectsOnHost()).find((project) => project.path === `${expected.home}/${openRepoDir}`), 60_000, 2000);
+  await openPicker.waitFor({ state: 'hidden', timeout: 5000 });
+  if (!(await add.getByLabel('Project Name').inputValue())) await add.getByLabel('Project Name').fill(openRepoDir);
+  check('open-path-from-picker', (await add.getByLabel('Repository Path').inputValue()) === hostPath(expected.home, openRepoDir), await add.getByLabel('Repository Path').inputValue());
+  await shot('open-filled');
+  await add.getByRole('button', { name: 'Open', exact: true }).click();
+  const opened = await until(async () => (await projectsOnHost()).find((project) => samePath(project.path, hostPath(expected.home, openRepoDir))), 60_000, 2000);
   check('open-existing-repo', Boolean(opened), JSON.stringify(opened ?? null));
   check('open-repo-in-sidebar', await visible(ui.openMainWorkspace(opened?.name ?? openRepoDir), 30_000), openRepoDir);
   await shot('open-existing-repo', { result: true, oracle: { projects: await projectsOnHost() } });
@@ -814,13 +875,13 @@ async function d4() {
   // (d) New project creates the folder on the host (extra; not in the bar).
   await goHome();
   await ui.homeCard('New Project').click();
-  const created = ui.dialog(/Add New Repository|New Project/);
+  const created = ui.dialog(/^New Project/);
   await created.waitFor({ timeout: 10_000 });
   const newName = `e2e-new-${stamp}`;
   await created.getByLabel('Project Name').fill(newName);
   await created.getByLabel('Repository Path').fill(`~/${newName}`);
-  await created.getByRole('button', { name: /^(Create|Add)/ }).last().click();
-  const made = await until(async () => (await projectsOnHost()).find((project) => project.path === `${expected.home}/${newName}`), 60_000, 2000);
+  await created.getByRole('button', { name: 'Create', exact: true }).click();
+  const made = await until(async () => (await projectsOnHost()).find((project) => samePath(project.path, hostPath(expected.home, newName))), 60_000, 2000);
   check('new-project-created', Boolean(made), JSON.stringify(made ?? null));
   await shot('new-project', { result: Boolean(made), oracle: { made } });
 }
@@ -857,7 +918,7 @@ async function d5() {
   state.pane.branch = branch;
   saveState();
   check('pane-terminal-in-worktree', cwd === session.worktreePath && top === session.worktreePath, `pwd ${cwd}, toplevel ${top}, worktree ${session.worktreePath}`);
-  check('pane-worktree-not-main', session.worktreePath !== `${expected.home}/${repo}`, 'the Pane has its own worktree');
+  check('pane-worktree-not-main', session.worktreePath !== hostPath(expected.home, repo), 'the Pane has its own worktree');
   check('pane-branch', Boolean(branch) && worktrees.some((line) => line.startsWith(session.worktreePath) && line.includes(`[${branch}]`)), `branch ${branch}; worktree list ${JSON.stringify(worktrees)}`);
   await shot('pane-terminal-worktree', { result: true, oracle: { session: state.pane, lines } });
 }
@@ -870,7 +931,7 @@ async function agentWhere(agent, toolName) {
   await shot(`${agent}-ready`);
   const prompt = 'Run the shell commands `pwd` and `git branch --show-current` here, then reply with exactly two lines: PWD=<pwd output> and BRANCH=<branch output>.';
   const answer = await askAgent(panelId, prompt, (text) => {
-    const pwd = text.match(/^\s*[⏺●]?\s*PWD=(\S+)\s*$/m)?.[1];
+    const pwd = text.match(/^\s*[⏺●*•]?\s*PWD=(.+?)\s*$/m)?.[1];
     const branch = text.match(/^\s*BRANCH=(\S+)\s*$/m)?.[1];
     return pwd && branch ? { pwd, branch } : undefined;
   });
@@ -1084,7 +1145,7 @@ async function regressionLocalBrowse() {
   await sleep(2000);
   await goHome();
   await ui.homeCard('New Project').click();
-  const dialog = ui.dialog(/Add New Repository|New Project/);
+  const dialog = ui.dialog(/^New Project/);
   await dialog.waitFor({ timeout: 10_000 });
   const chip = await visible(ui.hostChip(dialog, null), 3000);
   const asked = await app.evaluate(() => globalThis.__e2eNativeDialogs.length);
