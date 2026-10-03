@@ -23,6 +23,7 @@ function cloudProfile(name: string): RemotePaneConnectionProfile {
     token: 'synthetic-cloud-token',
     transport: 'http+sse',
     cloud: { provider: 'boat', sandboxId: `sbx-${name}`, sessionId: name, nodeId: `node-${name}`, hostname: `rp-${name}`, version: 1 },
+    hostKind: { label: 'cloud sandbox', icon: 'cloud' },
   };
 }
 
@@ -147,7 +148,7 @@ test('cloud rows stop, start, update Pane and remove after confirmation', async 
   const alpha = page.getByRole('listitem', { name: 'Cloud sandbox alpha' });
   const beta = page.getByRole('listitem', { name: 'Cloud sandbox beta' });
   await expect(alpha.getByText('rp-alpha · default · running for 5h · Pane 2.4.140 (differs from this app)')).toBeVisible();
-  await expect(alpha.getByRole('button')).toHaveText(['Update Pane', 'Stop', 'Remove']);
+  await expect(alpha.getByRole('button')).toHaveText(['Update Pane', 'Open terminal', 'Stop', 'Remove']);
   await expect(beta.getByText('Stopped', { exact: true })).toBeVisible();
   await expect(beta.getByRole('button')).toHaveText(['Start', 'Remove']);
   await alpha.scrollIntoViewIfNeeded();
@@ -156,7 +157,7 @@ test('cloud rows stop, start, update Pane and remove after confirmation', async 
   await alpha.getByRole('button', { name: 'Update Pane alpha' }).click();
   await expect(alpha.getByText('Updating', { exact: true })).toBeVisible();
   await expect(alpha.getByText('Running', { exact: true })).toBeVisible();
-  await expect(alpha.getByRole('button')).toHaveText(['Stop', 'Remove']);
+  await expect(alpha.getByRole('button')).toHaveText(['Open terminal', 'Stop', 'Remove']);
 
   await alpha.getByRole('button', { name: 'Stop alpha' }).click();
   await expect(alpha.getByText('Stopping', { exact: true })).toBeVisible();
@@ -261,4 +262,48 @@ test('without the cloud library the section explains itself and remote hosts are
   await expect(page.getByRole('button', { name: 'Add Cloud Sandbox' })).toHaveCount(0);
   await expect(page.getByText('Using local runtime')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Set Up Host' })).toBeVisible();
+});
+
+test('a running sandbox row opens the same terminal as the host switcher', async ({ page }, testInfo) => {
+  await installElectronApiMock(page, {
+    cloudSandboxes: {
+      credentials: ALL_CREDENTIALS,
+      sandboxes: [
+        cloudSandbox('alpha'),
+        cloudSandbox('beta', { state: 'stopped' }),
+        cloudSandbox('gamma', { state: 'starting' }),
+        cloudSandbox('delta', { pending: 'stopping' }),
+      ],
+      profiles: [cloudProfile('alpha'), cloudProfile('beta'), cloudProfile('gamma'), cloudProfile('delta')],
+    },
+  });
+  await openRemoteAccess(page);
+
+  const alpha = page.getByRole('listitem', { name: 'Cloud sandbox alpha' });
+  await expect(alpha.getByRole('button', { name: 'Open terminal on alpha' })).toHaveText('Open terminal');
+  for (const name of ['beta', 'gamma', 'delta']) {
+    await expect(page.getByRole('listitem', { name: `Cloud sandbox ${name}` }).getByRole('button', { name: /Open terminal/ })).toHaveCount(0);
+  }
+  await alpha.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('cloud-row-open-terminal.png') });
+
+  // This window is on this computer: the row connects to alpha first.
+  await alpha.getByRole('button', { name: 'Open terminal on alpha' }).click();
+  const tab = page.getByRole('tab', { name: 'alpha · Terminal' });
+  await expect(tab).toBeVisible();
+  await expect(tab.locator('..').locator('svg.lucide-cloud')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Agents run on alpha. Switch host' })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('cloud-row-terminal-tab.png') });
+
+  await page.getByRole('button', { name: 'Agents run on alpha. Switch host' }).click();
+  await page.getByRole('menuitem', { name: 'Open terminal on alpha' }).click();
+  await expect(tab).toBeVisible();
+  const opened = await page.evaluate(() => {
+    // SAFETY: installElectronApiMock defines __paneTestElectronMock with getInvokeCalls.
+    const mock = (window as typeof window & { __paneTestElectronMock: {
+      getInvokeCalls: (channel: string) => Array<{ args: unknown[] }>;
+    } }).__paneTestElectronMock;
+    return mock.getInvokeCalls('host-terminal:open').length;
+  });
+  expect(opened).toBe(2);
 });

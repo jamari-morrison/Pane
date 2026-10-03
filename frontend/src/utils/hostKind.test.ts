@@ -41,6 +41,15 @@ describe('saved host kind', () => {
     expect(config.client.profiles[0].hostKind).toEqual(hostKind);
   });
 
+  it('reads a cloud sandbox saved before host kinds existed as a cloud sandbox', () => {
+    const cloud = { provider: 'boat' as const, sandboxId: 'bx_1', sessionId: 's1', nodeId: 'n1', hostname: 'rp-s1', version: 1 };
+    const config = normalizeRemoteDaemonConfig({
+      client: { profiles: [profile({ label: 'testina', cloud }), profile({ id: 'plain', label: 'devbox' })], activeProfileId: null, mode: 'local' },
+    });
+    expect(describeHost(config.client.profiles[0])).toEqual({ name: 'testina', kindLabel: 'cloud sandbox', icon: 'cloud' });
+    expect(describeHost(config.client.profiles[1])).toEqual({ name: 'devbox', kindLabel: 'remote host', icon: 'server' });
+  });
+
   it('drops a profile whose host kind has an unknown icon', () => {
     const config = normalizeRemoteDaemonConfig({
       client: { profiles: [{ ...profile(), hostKind: { label: 'x', icon: 'rocket' } }], activeProfileId: null, mode: 'local' },

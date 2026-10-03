@@ -1,5 +1,5 @@
 import { useState, type ReactElement } from 'react';
-import { Cloud, Laptop, Plug, Radio, SquareTerminal } from 'lucide-react';
+import { Laptop, Plug, Radio, SquareTerminal } from 'lucide-react';
 import { Dropdown, DropdownMenuItem, type DropdownItem, type DropdownProps } from './ui/Dropdown';
 import { API } from '../utils/api';
 import { useConfigStore } from '../stores/configStore';
@@ -89,15 +89,15 @@ export function RemoteHostSwitcher({
         id: profile.id,
         label: profile.label,
         description,
-        // WIP drop: a saved sandbox without hostKind still draws a cloud until hostKind is backfilled (A1).
-        icon: profile.cloud ? Cloud : HOST_ICONS[describeHost(profile).icon],
+        icon: HOST_ICONS[describeHost(profile).icon],
         disabled: switching || cloudEntry?.action === 'wait',
         onClick: () => {
           if (sandbox && cloudEntry?.action === 'start') void startAndSwitchTo(sandbox, profile.id);
           else void switchTo(profile.id);
         },
         // Only the active host's terminal can open: the window talks to one host at a time.
-        action: active ? {
+        // A sandbox that is not running has no shell to open.
+        action: active && !cloudEntry ? {
           label: getHostTerminalPresentation(profile).openLabel,
           icon: SquareTerminal,
           onClick: () => {
