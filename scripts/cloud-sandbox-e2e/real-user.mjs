@@ -653,9 +653,12 @@ async function hostInvoke(channel, ...args) {
   const host = activeHost();
   return daemonInvoke(host.baseUrl, host.token, channel, ...args);
 }
+// The last screen read, raw (never written anywhere): the leak checks look for a value in it.
+let screenTextCache = '';
 async function screenText(panelId, limit = 120) {
   const screen = await hostInvoke('runpane:panels:screen', { panelId, limit });
-  return String(screen?.text ?? '').replace(/\u00a0/g, ' ');
+  screenTextCache = String(screen?.text ?? '').replace(/\u00a0/g, ' ');
+  return screenTextCache;
 }
 const nonEmpty = (text) => text.split('\n').map((line) => line.replace(/\s+$/, '')).filter((line) => line.trim() !== '');
 const promptLine = /[$#>%]\s*$/;
@@ -1746,6 +1749,16 @@ async function agentWhere(agent, toolName) {
   check(`${agent}-in-pane-worktree`, answer?.pwd === state.pane.worktreePath && answer?.branch === state.pane.branch,
     `${agent}: PWD=${answer?.pwd} BRANCH=${answer?.branch}; D5: ${state.pane.worktreePath} ${state.pane.branch}`);
   await shot(`${agent}-pwd-branch`, { result: true, oracle: { panelId, answer, d5: { worktreePath: state.pane.worktreePath, branch: state.pane.branch } } });
+  // E7 in an AGENT's own shell (Claude's Bash tool / Codex, via BASH_ENV): by NAME only, the value is never asked for.
+  // E7_AGENT_SELFTEST=1 runs it on a self-hosted host too, where the variable is unset (expect "missing").
+  if ((cloud || env.E7_AGENT_SELFTEST === '1') && env.E7 !== '0') {
+    const envPrompt = `Run exactly this shell command and reply with only its output: test -n "$${LOCAL_VAR}" && echo ${LOCAL_VAR}_present || echo ${LOCAL_VAR}_missing . Do not print the variable's value.`;
+    const seen = await askAgent(panelId, envPrompt, (text) => (new RegExp(`^\\s*[⏺●*•]?\\s*${LOCAL_VAR}_(present|missing)\\s*$`, 'm').exec(text)?.[1]), 300_000);
+    const leaked = localValues.some((value) => screenTextCache.includes(value));
+    check(`${agent}-shell-sees-local-env`, seen === 'present', `${agent}'s shell: ${LOCAL_VAR} ${seen ?? 'no answer'}`);
+    check(`${agent}-did-not-print-value`, !leaked, 'the value is not on the agent\'s screen');
+    await shot(`${agent}-local-env`, { result: seen === 'present', oracle: { answer: seen } });
+  }
 }
 async function d6() {
   if (!state.pane) throw new Error('no Pane from D5');

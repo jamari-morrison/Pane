@@ -40,7 +40,8 @@ if ($running.Count -gt 0) {
   Start-Sleep -Seconds 2
 }
 
-$names = @{ MODE = 'relay'; PANE_BIN = $exe; PANE_DATA_DIR = $PaneDir; WORK = $OutDir; OUT = $OutDir; FLAG_DIR = $flags; PANE_DEB_URL = $DebUrl; PANE_DEB_SHA256 = $DebSha256.ToLower(); STEPS = $Steps }
+# STARTUP_DOPPLER: the startup script also carries Red's Doppler install block (orchestrator, Run 8).
+$names = @{ STARTUP_DOPPLER = '1'; MODE = 'relay'; PANE_BIN = $exe; PANE_DATA_DIR = $PaneDir; WORK = $OutDir; OUT = $OutDir; FLAG_DIR = $flags; PANE_DEB_URL = $DebUrl; PANE_DEB_SHA256 = $DebSha256.ToLower(); STEPS = $Steps }
 foreach ($name in $names.Keys) { if ($names[$name]) { Set-Item "Env:\$name" $names[$name] } }
 $env:ELECTRON_RUN_AS_NODE = '1'
 $console = Join-Path $OutDir 'proof.console.txt'
