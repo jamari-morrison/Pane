@@ -14,7 +14,7 @@ const names = Object.keys(cloudBootstrapAssets) as CloudBootstrapAssetName[];
 const PROVISION_STEPS = [
   'identity', 'tailscale-install', 'tailnet-identity', 'check', 'firewall', 'tailscale-up', 'ts-guard', 'agent-env', 'agent-prompts', 'claude-model', 'install-pane',
   'pairing-read', 'health-local', 'cert-status', 'serve-http', 'serve-guard', 'tailscale-reset', 'serve-restore', 'update-pane',
-  'startup-install', 'startup-run', 'startup-status', 'startup-log', 'os-hostname', 'github-auth',
+  'startup-install', 'startup-run', 'startup-status', 'startup-log', 'os-hostname', 'github-auth', 'local-env-install',
 ];
 
 /** Runs one rp-bootstrap.sh step in a temp HOME; `functions` replace commands (exported bash functions win over PATH). */
@@ -289,7 +289,8 @@ test('rp-user-startup records a successful run: status JSON and the script outpu
   const result = runUserStartup(home, script);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const status = readJson(path.join(startupState(home), 'startup-status.json'));
-  assert.deepEqual(Object.keys(status).sort(), ['exitCode', 'finishedAt', 'sha256', 'startedAt', 'timedOut']);
+  assert.deepEqual(Object.keys(status).sort(), ['envSha256', 'exitCode', 'finishedAt', 'sha256', 'startedAt', 'timedOut']);
+  assert.equal(status.envSha256, null, 'no local env');
   assert.equal(status.exitCode, 0);
   assert.equal(status.timedOut, false);
   assert.equal(status.sha256, sha256Of(script));
@@ -674,4 +675,139 @@ test('github-auth calls a token GitHub refuses invalid, and anything else an err
   assert.equal(fs.existsSync(setupGit.tokenFile), false);
 
   assert.match(runStep('github-auth', ['/nonexistent/gh-token']).stdout, /"error": "github-auth: no token file"/u);
+});
+
+/** Values a local start script could print that would run something if the env file were sourced unquoted. */
+const HOSTILE_VALUE = `a b $(touch MARKER-subst) \`touch MARKER-tick\`; touch MARKER-semi ' " \\ end\r`;
+const shQuote = (value: string) => `'${value.replace(/'/gu, `'\\''`)}'`;
+
+/** Runs `local-env-install` against a temp HOME with systemctl recorded; `content` is the uploaded env file (null: none). */
+function runLocalEnvInstall(home: string, content: string | null) {
+  const state = path.join(home, 'state');
+  fs.mkdirSync(state, { recursive: true, mode: 0o700 });
+  let upload = '';
+  if (content !== null) {
+    upload = path.join(state, 'local-env-abc');
+    fs.writeFileSync(upload, content, { mode: 0o644 });
+  }
+  const calls = path.join(home, 'calls');
+  const result = runStep('local-env-install', [upload], new Map([['systemctl', `() { echo "systemctl $*" >> '${calls}'; }`]]), home);
+  const payload = JSON.parse(result.stdout.trim().split('\n').pop()?.replace(/^RP_RESULT /u, '') ?? '{}');
+  return { ...result, payload, upload, calls: fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '' };
+}
+
+const localEnvFile = (home: string) => path.join(home, '.config/runpane-cloud/local-env');
+
+test('local-env-install writes the env file 0600 and every shell kind sources it without running a value', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  fs.writeFileSync(path.join(home, '.bashrc'), '# existing bashrc\n');
+  fs.writeFileSync(path.join(home, '.profile'), '# existing profile\n');
+  const content = `export DOPPLER_TOKEN=${shQuote('FAKE-LOCAL-ENV-SECRET')}\nexport TRICKY=${shQuote(HOSTILE_VALUE)}\n`;
+  const run = runLocalEnvInstall(home, content);
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.deepEqual(run.payload, { ok: true, keys: 2, dropped: 0 });
+  assert.equal(fs.readFileSync(localEnvFile(home), 'utf8'), content);
+  assert.equal(fs.statSync(localEnvFile(home)).mode & 0o777, 0o600);
+  assert.equal(fs.existsSync(run.upload), false, 'the upload is removed');
+  assert.doesNotMatch(run.stdout + run.stderr, /FAKE-LOCAL-ENV-SECRET|MARKER/u, 'no value is printed');
+
+  // One guarded line each, idempotent; the daemon gets BASH_ENV for the bash its agents run.
+  const loader = path.join(home, '.config/runpane-cloud/local-env.sh');
+  for (const rc of ['.bashrc', '.profile']) {
+    const text = fs.readFileSync(path.join(home, rc), 'utf8');
+    assert.equal(text.match(/runpane-cloud local-env/gu)?.length, 1, `${rc} sources the loader once`);
+  }
+  assert.equal(fs.readFileSync(path.join(home, '.config/systemd/user/pane-remote-daemon.service.d/local-env.conf'), 'utf8'),
+    '[Service]\nEnvironment=BASH_ENV=%h/.config/runpane-cloud/local-env.sh\n');
+  assert.match(run.calls, /systemctl --user daemon-reload/u);
+  assert.doesNotMatch(run.calls, /restart/u, 'the daemon keeps running');
+  runLocalEnvInstall(home, content);
+  assert.equal(fs.readFileSync(path.join(home, '.bashrc'), 'utf8').match(/runpane-cloud local-env/gu)?.length, 1, 'a second install adds nothing');
+
+  // Interactive terminals (.bashrc), login shells (.profile) and agents' non-interactive bash (BASH_ENV) all see it.
+  const check = `[ "$TRICKY" = ${shQuote(HOSTILE_VALUE)} ] && [ "$DOPPLER_TOKEN" = 'FAKE-LOCAL-ENV-SECRET' ] && echo SAME`;
+  const env = { ...process.env, HOME: home };
+  for (const [label, args, extra] of [
+    ['interactive', ['-i', '-c', check], {}],
+    ['login', ['-l', '-c', check], {}],
+    ['BASH_ENV', ['-c', check], { BASH_ENV: loader }],
+  ] as const) {
+    const shell = childProcess.spawnSync('bash', [...args], { encoding: 'utf8', cwd: home, env: { ...env, ...extra } });
+    assert.match(shell.stdout, /^SAME$/mu, `${label} shell sees the exact values`);
+  }
+  for (const marker of ['MARKER-subst', 'MARKER-tick', 'MARKER-semi']) assert.equal(fs.existsSync(path.join(home, marker)), false, `${marker}: nothing ran`);
+});
+
+test('local-env-install keeps only safe export lines and drops reserved names, by name', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  const content = [
+    "export GOOD='1'",
+    "export PATH='/evil'",
+    "export LD_PRELOAD='/evil.so'",
+    "export GIT_DIR='/x'",
+    "export RUNPANE_X='1'",
+    "export GITHUB_TOKEN='x'",
+    "export GH_TOKEN='x'",
+    "export CLAUDE_CODE_OAUTH_TOKEN='x'",
+    "export ANTHROPIC_API_KEY='x'",
+    "export BASH_ENV='/x'",
+    "export GITHUB_REPO='kept'",
+    'export RAW=$(touch MARKER-raw)',
+    "NOEXPORT='1'",
+    "export BAD-NAME='1'",
+    "export UNCLOSED='1",
+    '',
+  ].join('\n');
+  const run = runLocalEnvInstall(home, content);
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.deepEqual(run.payload, {
+    ok: true, keys: 2, dropped: 13,
+    reserved: ['ANTHROPIC_API_KEY', 'BASH_ENV', 'CLAUDE_CODE_OAUTH_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN', 'GIT_DIR', 'LD_PRELOAD', 'PATH', 'RUNPANE_X'],
+  });
+  assert.equal(fs.readFileSync(localEnvFile(home), 'utf8'), "export GOOD='1'\nexport GITHUB_REPO='kept'\n");
+  assert.doesNotMatch(run.stdout + run.stderr, /evil|MARKER/u);
+});
+
+test('local-env-install with no file removes the env file, so no stale values stay', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  runLocalEnvInstall(home, "export OLD='stale-SECRET'\n");
+  const run = runLocalEnvInstall(home, null);
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.deepEqual(run.payload, { ok: true, keys: 0, dropped: 0 });
+  assert.equal(fs.existsSync(localEnvFile(home)), false);
+  const shell = childProcess.spawnSync('bash', ['-i', '-c', 'echo "[${OLD:-unset}]"'], { encoding: 'utf8', cwd: home, env: { ...process.env, HOME: home } });
+  assert.match(shell.stdout, /\[unset\]/u, 'shells still start without the file');
+});
+
+test('rp-user-startup runs the startup script with the local env and records which env it used', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  fs.mkdirSync(path.join(home, '.config/runpane-cloud'), { recursive: true });
+  fs.writeFileSync(localEnvFile(home), "export FROM_LOCAL='yes it is'\n", { mode: 0o600 });
+  const result = runUserStartup(home, '[ "$FROM_LOCAL" = "yes it is" ] && echo SAW-LOCAL-ENV\n');
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(fs.readFileSync(path.join(startupState(home), 'startup.log'), 'utf8'), /SAW-LOCAL-ENV/u);
+  const status = () => readJson(path.join(startupState(home), 'startup-status.json'));
+  assert.equal(status().envSha256, sha256Of("export FROM_LOCAL='yes it is'\n"));
+  fs.rmSync(localEnvFile(home));
+  assert.equal(runUserStartup(home, 'echo hi\n').status, 0);
+  assert.equal(status().envSha256, null);
+});
+
+test('startup-run if-changed runs again when the local env changed since the last run', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
+  const script = path.join(home, '.config/runpane-cloud/startup.sh');
+  fs.mkdirSync(path.dirname(script), { recursive: true });
+  fs.writeFileSync(script, 'echo v1\n');
+  fs.mkdirSync(startupState(home), { recursive: true });
+  const writeStatus = (envSha256: string | null) => fs.writeFileSync(path.join(startupState(home), 'startup-status.json'),
+    JSON.stringify({ exitCode: 0, startedAt: 'a', finishedAt: 'b', sha256: sha256Of('echo v1\n'), envSha256, timedOut: false }));
+  const idle = '[ "$1" = is-active ] && echo inactive; return 0;';
+  writeStatus(null);
+  assert.equal(runStartupStep(home, 'startup-run', ['if-changed'], idle).payload.state, 'skipped', 'same script, same (no) env');
+  fs.writeFileSync(localEnvFile(home), "export NEW='1'\n");
+  assert.equal(runStartupStep(home, 'startup-run', ['if-changed'], idle).payload.state, 'started', 'the env changed');
+  writeStatus(sha256Of("export NEW='1'\n"));
+  assert.equal(runStartupStep(home, 'startup-run', ['if-changed'], idle).payload.state, 'skipped');
+  fs.rmSync(localEnvFile(home));
+  assert.equal(runStartupStep(home, 'startup-run', ['if-changed'], idle).payload.state, 'started', 'the env was removed');
 });
