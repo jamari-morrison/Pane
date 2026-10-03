@@ -736,32 +736,40 @@ step_startup_install() {
   result "$(printf '{"ok":true,"sha256":"%s"}' "$(sha256sum "$STARTUP_SCRIPT" | cut -d' ' -f1)")"
 }
 
-# startup-run <always|if-changed>: wait for a run in progress (a boot run), then run the script once more and wait for
-# it; if-changed runs only when the last run used another script. Returns the latest status (null: never ran).
+# The latest status as JSON, or null when there is none (never ran, or unreadable).
+startup_status_json() {
+  python3 -c '
+import json, sys
+try:
+    print(json.dumps(json.load(open(sys.argv[1]))))
+except (OSError, ValueError):
+    print("null")' "$STARTUP_STATUS"
+}
+
+# startup-run <always|if-changed>: start one run of the script without waiting for it (a boat command lasts at most
+# 10 minutes, and so can the script); the caller follows it with startup-status. `busy`: a run (a boot run) is in
+# progress, and systemd would merge a start into it, so ask again later. if-changed `skipped`: the last run used this
+# script. Also `skipped` with no script.
 step_startup_run() {
-  local mode="${1:-}" ran=false i=0
+  local mode="${1:-}" state=skipped
   case "$mode" in always|if-changed) ;; *) fail "startup-run: mode must be always or if-changed" ;; esac
-  while [ "$(systemctl is-active "$STARTUP_UNIT" 2>/dev/null)" = activating ]; do
-    i=$((i+1)); [ "$i" -ge 700 ] && fail "startup-run: the startup script is still running after 700 s"
-    sleep 1
-  done
-  if [ -s "$STARTUP_SCRIPT" ]; then
+  if [ "$(systemctl is-active "$STARTUP_UNIT" 2>/dev/null)" = activating ]; then
+    state=busy
+  elif [ -s "$STARTUP_SCRIPT" ]; then
     if [ "$mode" = always ] || ! python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); sys.exit(0 if s.get("sha256")==sys.argv[2] and s.get("finishedAt") else 1)' \
         "$STARTUP_STATUS" "$(sha256sum "$STARTUP_SCRIPT" | cut -d' ' -f1)" 2>/dev/null; then
-      # The unit fails when the script does; the status says how.
-      sudo systemctl start "$STARTUP_UNIT" || true
-      ran=true
+      sudo systemctl start --no-block "$STARTUP_UNIT" || fail "could not start $STARTUP_UNIT"
+      state=started
     fi
   fi
-  result "$(python3 -c '
-import json, sys
-status = None
-if sys.argv[3] == "1":
-    try:
-        status = json.load(open(sys.argv[1]))
-    except (OSError, ValueError):
-        pass
-print(json.dumps({"ok": True, "ran": sys.argv[2] == "true", "status": status}))' "$STARTUP_STATUS" "$ran" "$([ -s "$STARTUP_SCRIPT" ] && echo 1 || echo 0)")"
+  result "{\"ok\":true,\"state\":\"$state\",\"status\":$(startup_status_json)}"
+}
+
+# startup-status: whether the script runs now, and the latest status (null: none).
+step_startup_status() {
+  local active=false
+  [ "$(systemctl is-active "$STARTUP_UNIT" 2>/dev/null)" = activating ] && active=true
+  result "{\"ok\":true,\"active\":$active,\"status\":$(startup_status_json)}"
 }
 
 # startup-log: the last 200 lines of the latest run's log. Only the desktop's View log shows it; it may hold
@@ -799,6 +807,7 @@ case "$step" in
   serve-guard) step_serve_guard "$@" ;;
   startup-install) step_startup_install "$@" ;;
   startup-run) step_startup_run "$@" ;;
+  startup-status) step_startup_status ;;
   startup-log) step_startup_log ;;
   *) fail "unknown step '$step'" ;;
 esac
