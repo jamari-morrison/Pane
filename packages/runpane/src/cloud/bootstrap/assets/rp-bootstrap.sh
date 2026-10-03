@@ -751,8 +751,11 @@ except (OSError, ValueError):
 # progress, and systemd would merge a start into it, so ask again later. if-changed `skipped`: the last run used this
 # script. Also `skipped` with no script.
 step_startup_run() {
-  local mode="${1:-}" state=skipped
+  local mode="${1:-}" state=skipped before
   case "$mode" in always|if-changed) ;; *) fail "startup-run: mode must be always or if-changed" ;; esac
+  # Read before starting: the new run can write its own status before this step reports, and the caller tells its
+  # run apart by a different startedAt.
+  before="$(startup_status_json)"
   if [ "$(systemctl is-active "$STARTUP_UNIT" 2>/dev/null)" = activating ]; then
     state=busy
   elif [ -s "$STARTUP_SCRIPT" ]; then
@@ -762,7 +765,7 @@ step_startup_run() {
       state=started
     fi
   fi
-  result "{\"ok\":true,\"state\":\"$state\",\"status\":$(startup_status_json)}"
+  result "{\"ok\":true,\"state\":\"$state\",\"status\":$before}"
 }
 
 # startup-status: whether the script runs now, and the latest status (null: none).
