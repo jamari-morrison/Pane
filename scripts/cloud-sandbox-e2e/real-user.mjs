@@ -664,6 +664,14 @@ async function d0() {
   await ui.saveStartupScript().click();
   check('startup-script-saved', await visible(ui.settingsDialog().getByText('Saved', { exact: true }), 10_000), 'the editor says Saved');
   await shot('startup-script-saved', { result: true });
+  // D0_DRY=1: everything up to the Add click (0 starts), to prove the editor and the credentials before spending one.
+  if (env.D0_DRY === '1') {
+    await ui.nameInput().fill('rp-loop-cs-e2e-dry');
+    check('add-button-ready', await ui.addSandbox().isEnabled(), 'Add cloud sandbox enabled (not clicked: D0_DRY)');
+    await shot('dry-before-add');
+    await ui.nameInput().fill('');
+    return;
+  }
 
   state.label = env.LABEL ?? (relay ? `e2e-${stamp}` : `rp-loop-cs-e2e-${stamp}`);
   saveState();
@@ -1246,6 +1254,7 @@ async function main() {
   await shot('launched');
   try {
     await step('D0', 'Startup script through Settings, then Add cloud sandbox', d0, { applies: cloud, why: 'cloud sandboxes only' });
+    if (env.D0_DRY === '1') return;
     if (!state.label) throw new Error('no host to run on');
     await step('D1', 'Host terminal from the switcher: whoami; hostname; pwd', d1);
     await step('D3', 'Clone while not signed in → sign-in error → prefilled terminal', d3);
