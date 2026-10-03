@@ -115,8 +115,11 @@ export class CloudSandboxManager {
 
   getSnapshot(): CloudSandboxesSnapshot {
     const rows: CloudSandboxView[] = [];
+    // The library saves a new sandbox part-way through its create; until the create ends it is shown only as that create.
+    const creating = new Set<string>();
     for (const [id, operation] of this.operations) {
       if (!id.startsWith(CREATE_ID_PREFIX) || !operation.request) continue;
+      if (operation.running) creating.add(operation.request.name);
       rows.push({
         id,
         label: operation.request.name,
@@ -128,6 +131,7 @@ export class CloudSandboxManager {
       });
     }
     for (const summary of this.listed) {
+      if (creating.has(summary.label)) continue;
       const operation = this.operations.get(summary.hostname);
       const daemonVersion = summary.state === 'running'
         ? this.daemonVersions.get(summary.hostname) ?? summary.daemonVersion

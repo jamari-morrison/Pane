@@ -414,3 +414,28 @@ test('the GitHub token is saved masked, shown only as set, and the row shows how
   await expect(page.getByRole('listitem', { name: 'Cloud sandbox delta' })).not.toContainText('GitHub');
   await page.screenshot({ path: testInfo.outputPath('cloud-github-token.png'), fullPage: true });
 });
+
+test('a sandbox being created shows once, with its startup script step visible, even when it is already listed', async ({ page }, testInfo) => {
+  await installElectronApiMock(page, {
+    cloudSandboxes: {
+      credentials: ALL_CREDENTIALS,
+      sandboxes: [
+        {
+          id: 'create:alpha', label: 'alpha', state: 'creating', size: 'default',
+          steps: [{ step: 'saved-host', state: 'done', message: 'Saving alpha as a remote host...' }, { step: 'startup', state: 'start', message: 'Running your startup script…' }],
+        },
+        cloudSandbox('alpha'),
+      ],
+      profiles: [cloudProfile('alpha')],
+    },
+  });
+  await openRemoteAccess(page);
+
+  const entries = page.getByRole('listitem', { name: 'Cloud sandbox alpha' });
+  await expect(entries).toHaveCount(1);
+  await expect(entries.getByText('Creating', { exact: true })).toBeVisible();
+  const step = entries.getByText('Running your startup script…');
+  await step.scrollIntoViewIfNeeded();
+  await expect(step).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('cloud-create-once.png'), fullPage: true });
+});

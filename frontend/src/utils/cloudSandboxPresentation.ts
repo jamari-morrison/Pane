@@ -99,6 +99,12 @@ export function getCloudGitHubNotice(sandbox: CloudSandboxView): { kind: 'ok' | 
   return { kind: 'warning', text: `⚠ GitHub sign-in didn't finish: ${github.message}` };
 }
 
+/** One entry per sandbox: while a sandbox is being created, its create (with the progress) stands for it. */
+export function getCloudSandboxRows(sandboxes: CloudSandboxView[]): CloudSandboxView[] {
+  const creating = new Set(sandboxes.filter((sandbox) => sandbox.state === 'creating' && !sandbox.hostname).map((sandbox) => sandbox.label));
+  return sandboxes.filter((sandbox) => !sandbox.hostname || !creating.has(sandbox.label));
+}
+
 export interface CloudHostSwitcherEntry {
   /** Replaces the profile's address under its name. */
   description: string;

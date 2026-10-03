@@ -17,6 +17,7 @@ import {
   getCloudSandboxActions,
   getCloudGitHubNotice,
   getCloudSandboxBadge,
+  getCloudSandboxRows,
   getCloudStartupScriptNotice,
   getCloudStepLabel,
   STARTUP_SCRIPT_WARNING,
@@ -141,7 +142,7 @@ export function CloudSandboxesSettings({ onTerminalOpened }: { onTerminalOpened:
           <StartupScriptRow textareaRef={startupScriptRef} send={send} />
           {snapshot.sandboxes.length > 0 && (
             <ul className="divide-y divide-border-secondary" aria-label="Cloud sandboxes">
-              {snapshot.sandboxes.map((sandbox) => (
+              {getCloudSandboxRows(snapshot.sandboxes).map((sandbox) => (
                 <CloudSandboxRow key={sandbox.id} sandbox={sandbox} now={now} onAction={runAction} onViewLog={setViewingLog} />
               ))}
             </ul>

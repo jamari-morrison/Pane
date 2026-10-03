@@ -6,6 +6,7 @@ import {
   getCloudSandboxActions,
   getCloudSandboxBadge,
   getCloudGitHubNotice,
+  getCloudSandboxRows,
   getCloudStartupScriptNotice,
   getCloudStepLabel,
   STARTUP_SCRIPT_WARNING,
@@ -186,5 +187,18 @@ describe('getCloudGitHubNotice', () => {
       { kind: 'warning', text: "⚠ GitHub sign-in didn't finish: gh isn't installed on the sandbox." }],
   ] as const)('%s', (_name, github, notice) => {
     expect(getCloudGitHubNotice(sandbox({ github }))).toEqual(notice);
+  });
+});
+
+describe('getCloudSandboxRows', () => {
+  it('shows a sandbox being created once, as its create', () => {
+    const creating = sandbox({ id: 'create:alpha', hostname: undefined, profileId: undefined, state: 'creating' });
+    const listed = sandbox();
+    const other = sandbox({ id: 'rp-beta', label: 'beta', hostname: 'rp-beta' });
+    expect(getCloudSandboxRows([creating, listed, other]).map((row) => row.id)).toEqual(['create:alpha', 'rp-beta']);
+    expect(getCloudSandboxRows([listed, other]).map((row) => row.id)).toEqual(['rp-alpha', 'rp-beta']);
+    // A failed create's row is not a create in progress.
+    const failed = sandbox({ id: 'create:alpha', hostname: undefined, state: 'error', failedAction: 'create' });
+    expect(getCloudSandboxRows([failed, listed]).map((row) => row.id)).toEqual(['create:alpha', 'rp-alpha']);
   });
 });
