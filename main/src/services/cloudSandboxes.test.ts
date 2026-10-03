@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { CloudSandboxesSnapshot } from '../../../shared/types/cloudSandboxes';
+import type { CloudLocalStartScript, CloudSandboxesSnapshot } from '../../../shared/types/cloudSandboxes';
+import type { LocalStartScriptResult } from './cloudLocalStartScript';
 import type { CloudProgressListener, CloudSandboxInfo } from '../../../packages/runpane/src/cloud/api';
 import {
   CloudSandboxManager,
   CloudSandboxesUnavailableError,
+  createLocalStartEnvReader,
   comparePaneVersions,
   getCloudErrorMessage,
   getStartupScriptView,
@@ -42,6 +44,17 @@ function createStartupScriptFile(initial = '') {
   };
 }
 
+/** The user's local start script on this computer, in memory. */
+function createLocalStartScriptFile(script = '') {
+  let saved: CloudLocalStartScript = { shell: 'sh', script };
+  return {
+    read: vi.fn(async () => saved),
+    write: vi.fn(async (next: CloudLocalStartScript) => {
+      saved = next;
+    }),
+  };
+}
+
 const CONFIGURED = { boat: { configured: true, org: { id: 'team_test', name: 'test' } }, tailscale: { configured: true }, claude: { configured: false }, github: { configured: false }, ready: true };
 
 function createLibrary(overrides: Partial<CloudSandboxLibrary> = {}): CloudSandboxLibrary {
@@ -68,7 +81,9 @@ function createManager(library: CloudSandboxLibrary | Error, options: {
   readDefaultClaudeModel?: () => Promise<string | null>;
   pollIntervalMs?: number;
   startupScriptFile?: ReturnType<typeof createStartupScriptFile>;
+  localStartScriptFile?: ReturnType<typeof createLocalStartScriptFile>;
 } = {}) {
+  const localStartScriptFile = options.localStartScriptFile ?? createLocalStartScriptFile();
   const startupScriptFile = options.startupScriptFile ?? createStartupScriptFile();
   const snapshots: CloudSandboxesSnapshot[] = [];
   const resolvePaneDeb = vi.fn(async (version: string) => ({
@@ -84,8 +99,9 @@ function createManager(library: CloudSandboxLibrary | Error, options: {
     readDefaultClaudeModel: options.readDefaultClaudeModel ?? (async () => null),
     pollIntervalMs: options.pollIntervalMs ?? 10,
     startupScriptFile,
+    localStartScriptFile,
   });
-  return { manager, snapshots, resolvePaneDeb, startupScriptFile };
+  return { manager, snapshots, resolvePaneDeb, startupScriptFile, localStartScriptFile };
 }
 
 describe('CloudSandboxManager', () => {
@@ -823,5 +839,98 @@ describe('CloudSandboxManager create row', () => {
     finish?.(summary());
     const after = await created;
     expect(after.sandboxes.map((row) => [row.id, row.state])).toEqual([['rp-alpha', 'running']]);
+  });
+});
+
+const LOCAL_SECRET = 'FAKE-LOCAL-ENV-main-SECRET';
+
+function runnerResult(overrides: Partial<LocalStartScriptResult> = {}): LocalStartScriptResult {
+  return {
+    ok: true, env: new Map([['DOPPLER_TOKEN', LOCAL_SECRET]]), keys: ['DOPPLER_TOKEN'], reservedKeys: [], skippedLines: 0,
+    exitCode: 0, timedOut: false, failureSummary: null, ...overrides,
+  };
+}
+
+describe('createLocalStartEnvReader', () => {
+  const format = (env: Map<string, string>) => [...env].map(([name, value]) => `export ${name}='${value}'\n`).join('');
+
+  it.each([
+    ['ok', runnerResult({ reservedKeys: ['PATH'] }), { status: { state: 'ok', keys: 1, reserved: ['PATH'] }, envFile: `export DOPPLER_TOKEN='${LOCAL_SECRET}'\n` }],
+    ['no variables printed: the sandbox loses the old ones', runnerResult({ env: new Map(), keys: [] }), { status: { state: 'ok', keys: 0, reserved: [] }, envFile: '' }],
+    ['timed out: keep the old ones', runnerResult({ ok: false, timedOut: true, exitCode: null, failureSummary: 'Local start script timed out after 60 s (0 keys read).' }),
+      { status: { state: 'timeout', seconds: 60 }, envFile: null }],
+    ['exit 2: keep the old ones', runnerResult({ ok: false, exitCode: 2, failureSummary: 'Local start script exited with code 2 (1 key read).' }),
+      { status: { state: 'failed', exitCode: 2 }, envFile: null }],
+    ['could not start', runnerResult({ ok: false, exitCode: null, env: new Map(), keys: [], failureSummary: "Couldn't start PowerShell for the local start script." }),
+      { status: { state: 'error', message: "Couldn't start PowerShell for the local start script." }, envFile: null }],
+  ])('%s', async (_name, result, expected) => {
+    const run = vi.fn(async () => result);
+    const read = createLocalStartEnvReader({ file: createLocalStartScriptFile('echo DOPPLER_TOKEN=x'), run, format });
+    const env = await read();
+    expect(env).toEqual(expected);
+    expect(run).toHaveBeenCalledWith('echo DOPPLER_TOKEN=x', { shell: 'sh', timeoutMs: 60_000 });
+    expect(JSON.stringify(env.status)).not.toContain(LOCAL_SECRET);
+  });
+
+  it('runs nothing without a script, and the sandbox loses the old variables', async () => {
+    const run = vi.fn(async () => runnerResult());
+    const read = createLocalStartEnvReader({ file: createLocalStartScriptFile('   \n'), run, format });
+    await expect(read()).resolves.toEqual({ status: { state: 'none' }, envFile: '' });
+    expect(run).not.toHaveBeenCalled();
+  });
+});
+
+describe('CloudSandboxManager local start script', () => {
+  const rowOf = (snapshot: CloudSandboxesSnapshot, id = 'rp-alpha') => snapshot.sandboxes.find((row) => row.id === id);
+
+  it('saves the script on this computer only: nothing reaches any running sandbox', async () => {
+    const library = createLibrary({ list: vi.fn(async () => [summary(), summary({ hostname: 'rp-beta', label: 'beta' })]) });
+    const { manager, localStartScriptFile } = createManager(library);
+    expect((await manager.refresh()).localStartScriptSet).toBe(false);
+
+    const snapshot = await manager.saveLocalStartScript({ shell: 'sh', script: 'echo DOPPLER_TOKEN=$(doppler configure get token --plain)' });
+
+    expect(localStartScriptFile.write).toHaveBeenCalledWith({ shell: 'sh', script: 'echo DOPPLER_TOKEN=$(doppler configure get token --plain)' });
+    expect(snapshot.localStartScriptSet).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    for (const call of [library.start, library.create, library.runStartupScript, library.syncAgentDefaults, library.update]) expect(call).not.toHaveBeenCalled();
+    await expect(manager.getLocalStartScript()).resolves.toEqual({ shell: 'sh', script: 'echo DOPPLER_TOKEN=$(doppler configure get token --plain)' });
+    expect((await manager.saveLocalStartScript({ shell: 'sh', script: '  ' })).localStartScriptSet).toBe(false);
+  });
+
+  it('shows a failed, timed-out or unrun local start script on the row of the sandbox that ran it', async () => {
+    const start = vi.fn(async () => summary({ localStart: { state: 'failed', exitCode: 2 } }));
+    const library = createLibrary({ list: vi.fn(async () => [summary({ state: 'stopped' }), summary({ hostname: 'rp-beta', label: 'beta' })]), start });
+    const { manager } = createManager(library);
+    await manager.refresh();
+
+    const failed = await manager.start('rp-alpha');
+    expect(rowOf(failed)?.localStart).toEqual({ state: 'failed', exitCode: 2 });
+    expect(rowOf(failed, 'rp-beta')?.localStart).toBeUndefined();
+
+    start.mockResolvedValueOnce(summary({ localStart: { state: 'timeout', seconds: 60 } }));
+    expect(rowOf(await manager.start('rp-alpha'))?.localStart).toEqual({ state: 'timeout', seconds: 60 });
+    start.mockResolvedValueOnce(summary({ localStart: { state: 'ok', keys: 1, reserved: ['PATH'] } }));
+    expect(rowOf(await manager.start('rp-alpha'))?.localStart).toEqual({ state: 'ok', reserved: ['PATH'] });
+    start.mockResolvedValueOnce(summary({ localStart: { state: 'ok', keys: 1, reserved: [] } }));
+    expect(rowOf(await manager.start('rp-alpha'))?.localStart).toBeUndefined();
+  });
+});
+
+describe('CloudSandboxManager after a start that reports GitHub and local start states', () => {
+  it('still remembers the Claude model the start gave the sandbox', async () => {
+    const syncAgentDefaults = vi.fn(async (host: string) => summary({ hostname: host }));
+    const library = createLibrary({
+      list: vi.fn(async () => [summary({ state: 'stopped' })]),
+      start: vi.fn(async () => summary({ github: { state: 'signed-in', user: 'octo-cat' }, localStart: { state: 'ok', keys: 1, reserved: [] } })),
+      syncAgentDefaults,
+    });
+    const { manager } = createManager(library, { readDefaultClaudeModel: async () => 'claude-opus-5-5' });
+    await manager.refresh();
+    await manager.start('rp-alpha');
+
+    await manager.syncDefaultClaudeModel();
+
+    expect(syncAgentDefaults).not.toHaveBeenCalled();
   });
 });

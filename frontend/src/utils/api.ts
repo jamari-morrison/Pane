@@ -35,6 +35,7 @@ import type {
 } from '../../../shared/types/remoteDaemon';
 import type {
   CloudCredentialsUpdate,
+  CloudLocalStartScript,
   CloudSandboxCreateRequest,
   CloudSandboxesSnapshot,
 } from '../../../shared/types/cloudSandboxes';
@@ -804,6 +805,16 @@ export class API {
     async saveCloudStartupScript(script: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.remoteDaemon.saveCloudStartupScript(script);
+    },
+
+    async getCloudLocalStartScript() {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.getCloudLocalStartScript();
+    },
+
+    async saveCloudLocalStartScript(settings: CloudLocalStartScript) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.remoteDaemon.saveCloudLocalStartScript(settings);
     },
 
     async readCloudSandboxStartupLog(id: string) {

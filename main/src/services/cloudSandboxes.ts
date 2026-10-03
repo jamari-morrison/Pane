@@ -5,7 +5,9 @@ import type {
   CloudSandboxCreateRequest,
   CloudSandboxesSnapshot,
   CloudSandboxProgressStep,
+  CloudLocalStartScript,
   CloudSandboxGitHubView,
+  CloudSandboxLocalStartView,
   CloudSandboxStartupScriptView,
   CloudSandboxState,
   CloudSandboxView,
@@ -13,11 +15,15 @@ import type {
 import type {
   CloudCredentialsStatus,
   CloudProgress,
+  LocalStartEnv,
+  LocalStartStatus,
   CloudProgressListener,
   CloudSandboxes,
   CloudSandboxInfo,
 } from '../../../packages/runpane/src/cloud/api';
 import type { GitHubAuthStatus, StartupScriptStatus } from '../../../packages/runpane/src/cloud/bootstrap/provision';
+import type { CloudLocalStartScriptFile } from './cloudLocalStartScriptFile';
+import type { formatLocalEnvFile, runLocalStartScript } from './cloudLocalStartScript';
 
 /**
  * Cloud sandboxes (experimental). runpane's cloud library (packages/runpane/src/cloud/api.ts) creates,
@@ -81,6 +87,8 @@ interface CloudSandboxManagerOptions {
   /** How often a sandbox that is stopping or starting is read again until it settles (default 5 s). */
   pollIntervalMs?: number;
   startupScriptFile: CloudStartupScriptFile;
+  /** The local start script; saving it reaches no sandbox (each gets its variables at its own create or start). */
+  localStartScriptFile: CloudLocalStartScriptFile;
 }
 
 type HostAction = Exclude<CloudSandboxAction, 'create'>;
@@ -106,6 +114,9 @@ export class CloudSandboxManager {
   private readonly unconfirmed = new Set<string>();
   /** Each sandbox's latest startup script run, by hostname, while this app knows it. */
   private readonly startupRuns = new Map<string, CloudSandboxStartupScriptView>();
+  /** Each sandbox's local start script run, by hostname, when there is something to show. */
+  private readonly localStartStates = new Map<string, CloudSandboxLocalStartView>();
+  private localStartScriptSet = false;
   /** Each sandbox's GitHub sign-in from its last create or start, by hostname. */
   private readonly githubStates = new Map<string, CloudSandboxGitHubView>();
   /** Counts runs per hostname, so only the latest run's result is shown. */
@@ -154,12 +165,14 @@ export class CloudSandboxManager {
         failedAction: operation?.error ? operation.action : undefined,
         startupScript: this.startupRuns.get(summary.hostname),
         github: this.githubStates.get(summary.hostname),
+        localStart: this.localStartStates.get(summary.hostname),
       });
     }
     return {
       available: this.available,
       credentials: { ...this.credentials },
       sandboxes: rows,
+      localStartScriptSet: this.localStartScriptSet,
       loadError: this.loadError,
     };
   }
@@ -176,6 +189,7 @@ export class CloudSandboxManager {
     } catch (error) {
       this.loadError = getCloudErrorMessage(error, 'Failed to load cloud sandboxes');
     }
+    this.localStartScriptSet = await this.readLocalStartScriptSet();
     const snapshot = this.emit();
     // Versions arrive in a later snapshot so a slow or asleep daemon never holds up the list.
     for (const summary of this.listed) void this.readDaemonVersion(summary);
@@ -217,6 +231,7 @@ export class CloudSandboxManager {
       this.operations.delete(id);
       this.replaceListed(summary.hostname, summary);
       this.applyGitHubState(summary.hostname, summary.github);
+      this.applyLocalStartState(summary.hostname, summary.localStart);
       const startupScript = getStartupScriptView(summary.startupScript ?? null);
       if (startupScript) this.startupRuns.set(summary.hostname, startupScript);
       if (claudeModel !== null) this.syncedClaudeModels.set(summary.hostname, claudeModel);
@@ -271,6 +286,29 @@ export class CloudSandboxManager {
         void this.runStartupScript(summary.hostname, { onlyIfChanged: false });
       }
     }
+    return this.emit();
+  }
+
+  /** Whether a local start script is saved; an unreadable file keeps what was known (the list must still load). */
+  private async readLocalStartScriptSet(): Promise<boolean> {
+    try {
+      return Boolean((await this.options.localStartScriptFile.read()).script.trim());
+    } catch {
+      return this.localStartScriptSet;
+    }
+  }
+
+  getLocalStartScript(): Promise<CloudLocalStartScript> {
+    return this.options.localStartScriptFile.read();
+  }
+
+  /**
+   * Saves the local start script on this computer. It reaches NO sandbox now: each one runs it at its own next create
+   * or start, and only that sandbox gets the variables.
+   */
+  async saveLocalStartScript(settings: CloudLocalStartScript): Promise<CloudSandboxesSnapshot> {
+    await this.options.localStartScriptFile.write(settings);
+    this.localStartScriptSet = Boolean(settings.script.trim());
     return this.emit();
   }
 
@@ -349,10 +387,15 @@ export class CloudSandboxManager {
       this.daemonVersions.delete(id);
       // A stopped or removed sandbox's last run says nothing about its next one.
       if (action === 'stop' || action === 'remove') this.forgetStartupRun(id);
-      if (!summary) this.syncedClaudeModels.delete(id);
-      if (!summary) this.githubStates.delete(id);
-      else if (summary.github) this.applyGitHubState(id, summary.github);
-      else if (claudeModel) this.syncedClaudeModels.set(id, claudeModel);
+      if (!summary) {
+        this.syncedClaudeModels.delete(id);
+        this.githubStates.delete(id);
+        this.localStartStates.delete(id);
+      } else {
+        if (claudeModel) this.syncedClaudeModels.set(id, claudeModel);
+        this.applyGitHubState(id, summary.github);
+        this.applyLocalStartState(id, summary.localStart);
+      }
       this.replaceListed(id, summary);
       if (summary) void this.readDaemonVersion(summary);
     } catch (error) {
@@ -367,6 +410,14 @@ export class CloudSandboxManager {
     }
     this.schedulePoll();
     return this.emit();
+  }
+
+  /** A run that went fine shows nothing (unless it dropped reserved names); a failure shows until the next run. */
+  private applyLocalStartState(hostname: string, localStart: LocalStartStatus | undefined): void {
+    if (!localStart) return;
+    const view = getLocalStartView(localStart);
+    if (view) this.localStartStates.set(hostname, view);
+    else this.localStartStates.delete(hostname);
   }
 
   /** `none` (no token saved) shows nothing; every other state replaces what the row showed. */
@@ -542,6 +593,37 @@ function applyProgress(steps: CloudSandboxProgressStep[], progress: CloudProgres
   const index = finished.findIndex((step) => step.step === progress.step);
   if (index === -1) return [...finished, current];
   return finished.map((step, stepIndex) => stepIndex === index ? current : step);
+}
+
+/** A local start script run as the row shows it: nothing when it ran fine (and dropped no reserved names) or there is none. */
+function getLocalStartView(status: LocalStartStatus): CloudSandboxLocalStartView | undefined {
+  if (status.state === 'none') return undefined;
+  if (status.state === 'ok') return status.reserved.length > 0 ? { state: 'ok', reserved: status.reserved } : undefined;
+  return status;
+}
+
+/** How long the local start script may run on this computer before it is stopped. */
+const LOCAL_START_TIMEOUT_MS = 60_000;
+
+/**
+ * The desktop's local start script for one sandbox create or start: runs it here and turns its output into that
+ * sandbox's env file. A failed run leaves the sandbox's previous variables alone (envFile null); none or no variables
+ * remove them (''). The status never carries a value.
+ */
+export function createLocalStartEnvReader(deps: {
+  file: CloudLocalStartScriptFile;
+  run: typeof runLocalStartScript;
+  format: typeof formatLocalEnvFile;
+}): () => Promise<LocalStartEnv> {
+  return async () => {
+    const { shell, script } = await deps.file.read();
+    if (!script.trim()) return { status: { state: 'none' }, envFile: '' };
+    const result = await deps.run(script, { shell, timeoutMs: LOCAL_START_TIMEOUT_MS });
+    if (result.timedOut) return { status: { state: 'timeout', seconds: LOCAL_START_TIMEOUT_MS / 1000 }, envFile: null };
+    if (!result.ok && result.exitCode !== null) return { status: { state: 'failed', exitCode: result.exitCode }, envFile: null };
+    if (!result.ok) return { status: { state: 'error', message: result.failureSummary ?? "Pane couldn't run the local start script." }, envFile: null };
+    return { status: { state: 'ok', keys: result.keys.length, reserved: result.reservedKeys }, envFile: result.keys.length > 0 ? deps.format(result.env) : '' };
+  };
 }
 
 /** How a startup script run shows on the row; undefined when no script has run. */

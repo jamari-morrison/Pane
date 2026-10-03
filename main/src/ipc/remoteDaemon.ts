@@ -31,8 +31,10 @@ import {
   CLOUD_SANDBOX_SIZES,
   getCloudSandboxNameError,
   type CloudCredentialsUpdate,
+  type CloudLocalStartScript,
   type CloudSandboxCreateRequest,
 } from '../../../shared/types/cloudSandboxes';
+import type { LocalStartEnv } from '../../../packages/runpane/src/cloud/api';
 import type { PaneCommandValue } from '../daemon/commandRegistry';
 import { boundary, decodeBoundary, type JsonObject } from '../../../shared/validation/boundaryDecoder';
 import os from 'os';
@@ -61,10 +63,13 @@ import {
   CloudSandboxManager,
   getCloudErrorMessage,
   resolvePaneReleaseDeb,
+  createLocalStartEnvReader,
   type CloudSandboxLibrary,
   type CloudStartupScriptFile,
 } from '../services/cloudSandboxes';
 import { createCloudStartupScriptFile } from '../services/cloudStartupScriptFile';
+import { createCloudLocalStartScriptFile, type CloudLocalStartScriptFile } from '../services/cloudLocalStartScriptFile';
+import { formatLocalEnvFile, runLocalStartScript } from '../services/cloudLocalStartScript';
 import type { SavedRemoteHosts } from '../../../packages/runpane/src/cloud/savedHosts';
 import { createDefaultClaudeModelSource } from '../../../packages/runpane/src/cloud/claudeDefaults';
 import { getShellPath } from '../utils/shellPath';
@@ -100,6 +105,7 @@ interface RemoteDaemonHandlerDependencies {
     savedHosts: SavedRemoteHosts;
     localClaudeModel: () => Promise<string | null>;
     readStartupScript: () => Promise<string>;
+    readLocalStartEnv: () => Promise<LocalStartEnv>;
   }) => Promise<CloudSandboxLibrary>;
   /** The one source of the user's default Claude model for cloud sandboxes; swap it here to change where it comes from. */
   readDefaultClaudeModel: () => Promise<string | null>;
@@ -109,6 +115,9 @@ interface RemoteDaemonHandlerDependencies {
   resolvePaneReleaseDeb: typeof resolvePaneReleaseDeb;
   /** The user's cloud sandbox startup script on this computer; created when the handlers register (the data dir is known). */
   createCloudStartupScriptFile: () => CloudStartupScriptFile;
+  createCloudLocalStartScriptFile: () => CloudLocalStartScriptFile;
+  /** Runs the local start script on this computer (cloudLocalStartScript.ts). */
+  runLocalStartScript: typeof runLocalStartScript;
 }
 
 const defaultRemoteDaemonHandlerDependencies: RemoteDaemonHandlerDependencies = {
@@ -125,6 +134,8 @@ const defaultRemoteDaemonHandlerDependencies: RemoteDaemonHandlerDependencies = 
   resolvePaneReleaseDeb,
   watchClaudeSettings: (onChange) => watchClaudeSettings(onChange),
   createCloudStartupScriptFile: () => createCloudStartupScriptFile(),
+  createCloudLocalStartScriptFile: () => createCloudLocalStartScriptFile(process.platform === 'win32' ? 'powershell' : 'sh'),
+  runLocalStartScript,
 };
 
 /**
@@ -767,13 +778,18 @@ export function registerRemoteDaemonHandlers(
   };
 
   const startupScriptFile = dependencies.createCloudStartupScriptFile();
+  const localStartScriptFile = dependencies.createCloudLocalStartScriptFile();
+  // Runs on this computer for ONE sandbox, when the library creates or starts it; never on save.
+  const readLocalStartEnv = createLocalStartEnvReader({ file: localStartScriptFile, run: dependencies.runLocalStartScript, format: formatLocalEnvFile });
   const cloudSandboxes = new CloudSandboxManager({
     loadLibrary: () => dependencies.loadCloudSandboxLibrary({
       savedHosts: cloudSavedHosts,
       localClaudeModel: dependencies.readDefaultClaudeModel,
       readStartupScript: () => startupScriptFile.read(),
+      readLocalStartEnv,
     }),
     startupScriptFile,
+    localStartScriptFile,
     readDefaultClaudeModel: dependencies.readDefaultClaudeModel,
     appVersion: app?.getVersion(),
     readDaemonVersion: async (profileId) => {
@@ -913,6 +929,23 @@ export function registerRemoteDaemonHandlers(
     }
   });
 
+  ipcMain.handle('remote-daemon:get-cloud-local-start-script', async () => {
+    try {
+      return { success: true, data: await cloudSandboxes.getLocalStartScript() };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to read the local start script') };
+    }
+  });
+
+  // Saved here only: it runs for each sandbox at that sandbox's next create or start, never on save.
+  ipcMain.handle('remote-daemon:save-cloud-local-start-script', async (_event, input: PaneCommandValue) => {
+    try {
+      return { success: true, data: await cloudSandboxes.saveLocalStartScript(parseCloudLocalStartScript(input)) };
+    } catch (error) {
+      return { success: false, error: getCloudErrorMessage(error, 'Failed to save the local start script') };
+    }
+  });
+
   // The log is whatever the user's script printed: it goes to View log only and is never logged here.
   ipcMain.handle('remote-daemon:read-cloud-sandbox-startup-log', async (_event, id: PaneCommandValue) => {
     try {
@@ -976,6 +1009,15 @@ function parseCloudStartupScript(input: PaneCommandValue): string {
   const script = decodeBoundary(input, boundary.string);
   if (Buffer.byteLength(script, 'utf8') > MAX_STARTUP_SCRIPT_BYTES) throw new Error('The startup script is too long (at most 256 KB).');
   return script;
+}
+
+function parseCloudLocalStartScript(input: PaneCommandValue): CloudLocalStartScript {
+  const decoded = decodeBoundary(input, boundary.object({
+    shell: boundary.enumeration('sh', 'powershell', 'cmd'),
+    script: boundary.string,
+  }));
+  if (Buffer.byteLength(decoded.script, 'utf8') > MAX_STARTUP_SCRIPT_BYTES) throw new Error('The local start script is too long (at most 256 KB).');
+  return decoded;
 }
 
 function parseCloudSandboxCreateRequest(input: PaneCommandValue): CloudSandboxCreateRequest {

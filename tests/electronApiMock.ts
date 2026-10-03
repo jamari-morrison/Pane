@@ -11,6 +11,7 @@ import type {
 import type { SubmitFeedbackRequest } from '../shared/types/feedback';
 import type {
   CloudCredentialsUpdate,
+  CloudLocalStartScript,
   CloudSandboxAction,
   CloudSandboxCreateRequest,
   CloudSandboxesSnapshot,
@@ -348,6 +349,9 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       startupScript: string;
       /** Every script the settings saved, in order. */
       startupScriptSaves: string[];
+      localStartScript: CloudLocalStartScript;
+      /** Every local start script the settings saved, in order. */
+      localStartScriptSaves: CloudLocalStartScript[];
       startupLogs: Map<string, string>;
     }
     const cloud: CloudMockState = {
@@ -360,12 +364,15 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       calls: [],
       startupScript: '',
       startupScriptSaves: [],
+      localStartScript: { shell: 'sh', script: '' },
+      localStartScriptSaves: [],
       startupLogs: new Map(),
     };
     const cloudSnapshot = (): CloudSandboxesSnapshot => clone({
       available: cloud.available,
       credentials: cloud.credentials,
       sandboxes: cloud.sandboxes,
+      localStartScriptSet: Boolean(cloud.localStartScript.script.trim()),
     });
     const emitCloud = () => {
       emit('remote-daemon:cloud-sandboxes-changed', cloudSnapshot());
@@ -1359,6 +1366,14 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           else updateCloudSandbox(id, { error: undefined, failedAction: undefined });
           return emitCloud();
         },
+        getCloudLocalStartScript: () => (cloud.available ? success(clone(cloud.localStartScript)) : cloudUnavailable()),
+        // Like main: saved here only; no sandbox gets anything until its own create or start.
+        saveCloudLocalStartScript: (settings: CloudLocalStartScript) => {
+          if (!cloud.available) return cloudUnavailable();
+          cloud.localStartScript = clone(settings);
+          cloud.localStartScriptSaves.push(clone(settings));
+          return emitCloud();
+        },
         getCloudStartupScript: () => (cloud.available ? success({ script: cloud.startupScript }) : cloudUnavailable()),
         saveCloudStartupScript: (script: string) => {
           if (!cloud.available) return cloudUnavailable();
@@ -1437,6 +1452,9 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         },
         getCloudCalls() {
           return clone(cloud.calls);
+        },
+        getCloudLocalStartScriptSaves() {
+          return clone(cloud.localStartScriptSaves);
         },
         getCloudStartupScriptSaves() {
           return clone(cloud.startupScriptSaves);
