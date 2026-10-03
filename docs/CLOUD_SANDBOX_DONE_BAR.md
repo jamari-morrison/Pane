@@ -20,3 +20,5 @@ Every done report lists each real-user UI step that was exercised, with evidence
 ## Superseded: 10:23 AM PT version
 
 The 10:23 AM version, which brought Doppler secrets and GitHub credentials back into scope, is superseded by this revision and no longer applies.
+
+Design brief for this bar (awaiting approval): [CLOUD_SANDBOX_REAL_USER_BRIEF.md](CLOUD_SANDBOX_REAL_USER_BRIEF.md).
