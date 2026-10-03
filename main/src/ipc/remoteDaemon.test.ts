@@ -1268,7 +1268,7 @@ describe('cloud sandbox IPC', () => {
     size: 'default',
     createdAt: '2026-10-01T09:00:00.000Z',
   };
-  const configured = { boat: { configured: true }, tailscale: { configured: true }, claude: { configured: true }, ready: true };
+  const configured = { boat: { configured: true }, tailscale: { configured: true }, claude: { configured: true }, github: { configured: false }, ready: true };
 
   interface DesktopHostsRef {
     current?: SavedRemoteHosts;
@@ -1329,7 +1329,7 @@ describe('cloud sandbox IPC', () => {
 
       expect(result).toMatchObject({
         success: true,
-        data: { available: true, credentials: { boat: false, tailscale: false, claude: false }, sandboxes: [] },
+        data: { available: true, credentials: { boat: false, tailscale: false, claude: false, github: false }, sandboxes: [] },
       });
     } finally {
       vi.unstubAllEnvs();

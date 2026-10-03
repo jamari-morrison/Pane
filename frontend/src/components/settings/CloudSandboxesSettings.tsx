@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
-import { AlertTriangle, Check, Cloud, Loader2, Plus, X } from 'lucide-react';
+import { AlertTriangle, Check, Cloud, ExternalLink, Loader2, Plus, X } from 'lucide-react';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
@@ -15,6 +15,7 @@ import { getActiveHostId, getHostTerminalPresentation, openHostTerminal } from '
 import {
   formatCloudUptime,
   getCloudSandboxActions,
+  getCloudGitHubNotice,
   getCloudSandboxBadge,
   getCloudStartupScriptNotice,
   getCloudStepLabel,
@@ -124,6 +125,7 @@ export function CloudSandboxesSettings({ onTerminalOpened }: { onTerminalOpened:
             </div>
           )}
           <CloudCredentialsRow credentials={snapshot.credentials} send={send} />
+          <GitHubTokenRow saved={snapshot.credentials.github} send={send} />
           <SettingRow
             settingId="remote-cloud-sandboxes"
             label="Add cloud sandbox"
@@ -371,6 +373,63 @@ function StartupLogDialog({ sandbox, onClose }: { sandbox: CloudSandboxView; onC
   );
 }
 
+/** Where to create a fine-grained token, and what it needs. */
+const GITHUB_TOKEN_URL = 'https://github.com/settings/personal-access-tokens/new';
+
+/** The GitHub token every sandbox signs gh and git in with, kept like the other credentials (only Set / Not set). */
+function GitHubTokenRow({ saved, send }: { saved: boolean; send: SendCloudRequest }) {
+  const [token, setToken] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      if (await send(() => API.remoteDaemon.updateCloudCredentials({ githubToken: token.trim() }))) setToken('');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <SettingRow
+      settingId="remote-cloud-github-token"
+      label="GitHub token"
+      description="Every sandbox signs gh and git in with it when it is created and each time it starts, so cloning and pushing need no sign-in."
+      align="start"
+    >
+      <div className="ph-no-capture w-full space-y-3 sm:w-[460px]">
+        <dl className="grid grid-cols-[1fr_auto] gap-x-3 text-sm" aria-label="Saved GitHub token">
+          <CredentialStatus label="Saved token" set={saved} />
+        </dl>
+        <Input
+          label="GitHub token"
+          type="password"
+          autoComplete="off"
+          value={token}
+          onChange={(event) => setToken(event.target.value)}
+          placeholder={saved ? 'Leave blank to keep the saved token' : undefined}
+          helperText="A fine-grained personal access token with Contents and Pull requests set to Read and write, for the repositories your agents work on."
+          fullWidth
+        />
+        <div className="flex items-center justify-between gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            icon={<ExternalLink className="h-4 w-4" />}
+            onClick={() => void window.electronAPI?.openExternal(GITHUB_TOKEN_URL)}
+          >
+            Create a fine-grained token
+          </Button>
+          <Button type="button" size="sm" loading={saving} disabled={!token.trim()} onClick={() => void save()}>
+            Save GitHub Token
+          </Button>
+        </div>
+      </div>
+    </SettingRow>
+  );
+}
+
 function CredentialStatus({ label, set }: { label: string; set: boolean }) {
   return (
     <>
@@ -426,6 +485,7 @@ function CloudSandboxRow({ sandbox, now, onAction, onViewLog }: {
 }) {
   const badge = getCloudSandboxBadge(sandbox);
   const startupNotice = getCloudStartupScriptNotice(sandbox);
+  const githubNotice = getCloudGitHubNotice(sandbox);
   const details = [
     sandbox.hostname,
     sandbox.size,
@@ -483,6 +543,14 @@ function CloudSandboxRow({ sandbox, now, onAction, onViewLog }: {
       )}
       {sandbox.error && (
         <p className="rounded-md border border-status-error/30 bg-status-error/10 p-2 text-xs text-status-error" role="alert">{sandbox.error}</p>
+      )}
+      {githubNotice && (
+        <p
+          className={githubNotice.kind === 'ok' ? 'text-xs text-text-secondary' : 'text-xs text-status-warning'}
+          role={githubNotice.kind === 'ok' ? 'status' : 'alert'}
+        >
+          {githubNotice.text}
+        </p>
       )}
       {startupNotice?.kind === 'running' && (
         <p className="flex items-center gap-2 text-xs text-text-secondary" role="status">

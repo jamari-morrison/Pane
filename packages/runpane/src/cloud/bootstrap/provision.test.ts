@@ -6,6 +6,7 @@ import type { TailscaleApi, TailscaleDevice } from '../tailscale';
 import {
   provisionSandbox,
   pushStartupScript,
+  applyGitHubToken,
   readStartupLog,
   redact,
   setSandboxHostname,
@@ -289,4 +290,47 @@ test('setSandboxHostname gives the OS the tailnet name and refuses anything else
   assert.deepEqual(await setSandboxHostname(sandbox.handle, 'rp-abc12345'), { hostname: 'rp-abc12345' });
   assert.deepEqual(sandbox.steps, [{ name: 'os-hostname', args: ['rp-abc12345'] }]);
   await assert.rejects(setSandboxHostname(sandbox.handle, 'Not A Name'), /is not a valid tailnet hostname/u);
+});
+
+const GITHUB_TOKEN = 'FAKE-GH-TOKEN-provision-SECRET';
+
+/** fakeSandbox, plus every script string it was asked to run. */
+function recordingSandbox(answers: Map<string, StepAnswer>) {
+  const sandbox = fakeSandbox(answers);
+  const scripts: string[] = [];
+  const runScript = sandbox.handle.runScript.bind(sandbox.handle);
+  sandbox.handle.runScript = async (script, options) => {
+    scripts.push(script);
+    return runScript(script, options);
+  };
+  return { ...sandbox, scripts };
+}
+
+test('applyGitHubToken sends the token only as file content and runs github-auth on that file', async () => {
+  const sandbox = recordingSandbox(new Map([['github-auth', answer({ ok: true, state: 'signed-in', user: 'octo-cat' })]]));
+  assert.deepEqual(await applyGitHubToken(sandbox.handle, GITHUB_TOKEN), { state: 'signed-in', user: 'octo-cat' });
+  const [file] = sandbox.steps.find((step) => step.name === 'github-auth')?.args ?? [];
+  assert.match(file, /^\/home\/user\/\.runpane-cloud\/gh-token-[0-9a-f]{12}$/u, 'a private file in the 0700 state dir');
+  assert.equal(sandbox.files.get(file), `${GITHUB_TOKEN}\n`);
+  for (const script of sandbox.scripts) assert.ok(!script.includes(GITHUB_TOKEN), 'the token is in no command string');
+  for (const [name, content] of sandbox.files) {
+    if (name !== file) assert.ok(!content.includes(GITHUB_TOKEN), `${name} does not carry the token`);
+  }
+});
+
+test('applyGitHubToken skips quietly without a token and maps every outcome to fixed text', async () => {
+  const none = recordingSandbox(new Map());
+  assert.deepEqual(await applyGitHubToken(none.handle, undefined), { state: 'none' });
+  assert.deepEqual(await applyGitHubToken(none.handle, '  '), { state: 'none' });
+  assert.deepEqual(none.scripts, [], 'nothing runs');
+  assert.equal(none.files.size, 0);
+
+  const outcome = async (payload: JsonObject) => applyGitHubToken(recordingSandbox(new Map([['github-auth', answer(payload)]])).handle, GITHUB_TOKEN);
+  assert.deepEqual(await outcome({ ok: true, state: 'invalid' }), { state: 'invalid' });
+  assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'gh-missing' }), { state: 'error', message: "gh isn't installed on the sandbox." });
+  assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'login-failed' }),
+    { state: 'error', message: "gh couldn't sign in on the sandbox (GitHub may be unreachable from it)." });
+  assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'setup-git-failed' }), { state: 'error', message: 'gh signed in, but setting up git failed.' });
+  assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'something-new' }), { state: 'error', message: "Couldn't apply the GitHub token on the sandbox." });
+  await assert.rejects(outcome({ ok: true, state: 'signed-in' }), /malformed result/u, 'signed-in needs the user');
 });

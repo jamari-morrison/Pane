@@ -2,12 +2,15 @@ import { randomBytes } from 'node:crypto';
 import { createBoatProvider } from './boat';
 import {
   applyClaudeModel,
+  applyGitHubToken,
   cloudHostname,
   provisionSandbox,
   pushStartupScript,
   readStartupLog,
   repairSandboxTailnet,
   setSandboxHostname,
+  GITHUB_AUTH_FAILED,
+  type GitHubAuthStatus,
   runStartupScript,
   updateSandboxPane,
   type ClaudeModelOutcome,
@@ -79,12 +82,15 @@ export interface CloudCredentialsInput {
   tailnet?: string;
   /** A Claude subscription token (`claude setup-token`) that agents in every new sandbox sign in with. */
   claudeToken?: string;
+  /** A GitHub personal access token that gh and git in every sandbox sign in with. */
+  githubToken?: string;
 }
 
 export interface CloudCredentialsStatus {
   boat: { configured: boolean; org?: BoatOrg };
   tailscale: { configured: boolean };
   claude: { configured: boolean };
+  github: { configured: boolean };
   /** boat and Tailscale are both configured: sandboxes can be created. */
   ready: boolean;
 }
@@ -152,6 +158,8 @@ export interface CloudSandboxInfo {
    * detection): then nothing is sent and the sandbox keeps the model it had.
    */
   claudeModel?: { model: string | null; outcome: ClaudeModelOutcome };
+  /** The sandbox's GitHub sign-in with the saved token, from create and start (`none` when no token is saved). */
+  github?: GitHubAuthStatus;
   /** The user's startup script's run on create; absent when no script ran. */
   startupScript?: StartupScriptStatus;
 }
@@ -191,6 +199,7 @@ export interface CloudBootstrap {
   update: typeof updateSandboxPane;
   applyClaudeModel: typeof applyClaudeModel;
   setHostname: typeof setSandboxHostname;
+  applyGitHubToken: typeof applyGitHubToken;
   pushStartupScript: typeof pushStartupScript;
   runStartupScript: typeof runStartupScript;
   readStartupLog: typeof readStartupLog;
@@ -225,6 +234,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
     update: updateSandboxPane,
     applyClaudeModel,
     setHostname: setSandboxHostname,
+    applyGitHubToken,
     pushStartupScript,
     runStartupScript,
     readStartupLog,
@@ -285,6 +295,18 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
     }
   }
 
+  /**
+   * Signs the sandbox's gh and git in with the saved GitHub token. Never throws (the sandbox works without GitHub), and
+   * never puts the token in a message: a failure is reported with fixed text.
+   */
+  async function applyGitHubBestEffort(handle: SandboxHandle, credentials: CloudCredentials): Promise<GitHubAuthStatus> {
+    try {
+      return await bootstrap.applyGitHubToken(handle, credentials.github?.token);
+    } catch {
+      return { state: 'error', message: GITHUB_AUTH_FAILED };
+    }
+  }
+
   async function loadRunningHost(host: string, stoppedMessage: string) {
     const loaded = await loadHost(host);
     const sandbox = await loaded.provider.get(loaded.record.profile.cloud.sandboxId);
@@ -299,6 +321,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       boat: { configured: Boolean(credentials.boat) },
       tailscale: { configured: Boolean(credentials.tailscale) },
       claude: { configured: Boolean(credentials.claude) },
+      github: { configured: Boolean(credentials.github) },
       ready: Boolean(credentials.boat && credentials.tailscale),
     };
     if (settings.boatOrg) status.boat.org = settings.boatOrg;
@@ -387,6 +410,8 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       }
       const claudeToken = nonEmpty(input.claudeToken);
       if (claudeToken) credentials.claude = { oauthToken: claudeToken };
+      const githubToken = nonEmpty(input.githubToken);
+      if (githubToken) credentials.github = { token: githubToken };
 
       const wantedOrg = nonEmpty(input.boatOrg);
       if (wantedOrg && !credentials.boat) throw new Error('Choosing a boat wallet needs the boat API key.');
@@ -449,6 +474,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
 
       let health: DaemonHealthResult;
       let claudeModel: CloudSandboxInfo['claudeModel'];
+      let github: GitHubAuthStatus = { state: 'none' };
       try {
         if (sandbox.name !== hostname) await provider.rename(sandbox.id, hostname);
         const ready = await waitForSandbox(provider, sandbox.id, 'running', SANDBOX_READY_TIMEOUT_MS);
@@ -485,6 +511,8 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
         if (outcome.daemonVersion) record.meta.daemonVersion = outcome.daemonVersion;
         await store.writeHost(record);
         claudeModel = await syncClaudeModel(provider.handle(sandbox.id), (message) => progress('install', message));
+        if (credentials.github) progress('install', 'Signing in to GitHub with your token...');
+        github = await applyGitHubBestEffort(provider.handle(sandbox.id), credentials);
         progress('saved-host', `Saving ${label} as a remote host...`);
         await savedHosts.upsert(record.profile);
       } catch (error) {
@@ -513,7 +541,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
         }
       }
       progress('done', `${label} is ready at ${record.profile.baseUrl}.`);
-      return sandboxInfo(record, await provider.get(sandbox.id), health, claudeModel, startupScript);
+      return { ...sandboxInfo(record, await provider.get(sandbox.id), health, claudeModel, startupScript), github };
     },
 
     async list() {
@@ -555,7 +583,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
     },
 
     async start(host, onProgress) {
-      const { record, provider, tailscale } = await loadHost(host);
+      const { record, provider, tailscale, credentials } = await loadHost(host);
       const { sandboxId, hostname } = record.profile.cloud;
       if (!record.profile.baseUrl) throw new Error(`${hostname} never finished its setup. Remove it and create a new one.`);
       let sandbox = await provider.get(sandboxId);
@@ -571,6 +599,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       }
       sandbox = await waitForSandbox(provider, sandboxId, 'running', SANDBOX_READY_TIMEOUT_MS);
       await setHostnameBestEffort(provider.handle(sandboxId), record, (message) => onProgress?.({ step: 'starting', message }));
+      const github = await applyGitHubBestEffort(provider.handle(sandboxId), credentials);
       // The boot already ran the script the sandbox had; an edit since then runs through runStartupScript.
       await pushStartupScriptBestEffort(provider.handle(sandboxId), (message) => onProgress?.({ step: 'starting', message }),
         'Your startup script could not be updated');
@@ -595,7 +624,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       if (!health.ok) throw new Error(`${record.profile.label} is running, but its Pane daemon did not answer at ${record.profile.baseUrl}.`);
       const claudeModel = await syncClaudeModelBestEffort(provider.handle(sandboxId), record.profile.label, 'starting', onProgress);
       onProgress?.({ step: 'done', message: `${record.profile.label} is running.` });
-      return sandboxInfo(record, sandbox, health, claudeModel);
+      return { ...sandboxInfo(record, sandbox, health, claudeModel), github };
     },
 
     async update(host, pane, onProgress) {

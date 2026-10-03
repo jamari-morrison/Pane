@@ -14,7 +14,7 @@ type CloudMockControls = {
   setCloudStartupLog(id: string, log: string): void;
 };
 
-const ALL_CREDENTIALS = { boat: true, tailscale: true, claude: true };
+const ALL_CREDENTIALS = { boat: true, tailscale: true, claude: true, github: true };
 const HOUR_MS = 60 * 60 * 1000;
 
 function cloudProfile(name: string): RemotePaneConnectionProfile {
@@ -54,11 +54,11 @@ async function openRemoteAccess(page: Page) {
 }
 
 test('cloud credentials are saved once and only shown as set or not set', async ({ page }, testInfo) => {
-  await installElectronApiMock(page, { cloudSandboxes: { credentials: { boat: false, tailscale: false, claude: false }, sandboxes: [] } });
+  await installElectronApiMock(page, { cloudSandboxes: { credentials: { boat: false, tailscale: false, claude: false, github: false }, sandboxes: [] } });
   await openRemoteAccess(page);
 
   const status = page.getByRole('definition');
-  await expect(status).toHaveText(['Not set', 'Account default', 'Not set', 'Not set']);
+  await expect(status).toHaveText(['Not set', 'Account default', 'Not set', 'Not set', 'Not set']);
   await expect(page.getByRole('button', { name: 'Add Cloud Sandbox' })).toBeDisabled();
 
   await page.getByLabel('boat API key').fill('synthetic-boat-key-value');
@@ -70,7 +70,7 @@ test('cloud credentials are saved once and only shown as set or not set', async 
   await page.getByLabel('Claude token').fill('synthetic-claude-token');
   await page.getByRole('button', { name: 'Save Credentials' }).click();
 
-  await expect(status).toHaveText(['Set', 'test', 'Set', 'Set']);
+  await expect(status).toHaveText(['Set', 'test', 'Set', 'Set', 'Not set']);
   await expect(page.getByLabel('boat API key')).toHaveCount(0);
   expect(await cloudMock(page, (mock) => mock.getCloudCredentialUpdateKeys())).toEqual([['boatApiKey', 'boatOrg', 'claudeToken', 'tailscale']]);
   const html = await page.content();
@@ -378,4 +378,39 @@ test('the first cloud sandbox brings up the host switcher, and removing the last
   await expect(page.getByRole('listitem', { name: 'Cloud sandbox alpha' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Close modal' }).click();
   await expect(switcher).toHaveCount(0);
+});
+
+test('the GitHub token is saved masked, shown only as set, and the row shows how each sandbox signed in', async ({ page }, testInfo) => {
+  await installElectronApiMock(page, {
+    cloudSandboxes: {
+      credentials: { ...ALL_CREDENTIALS, github: false },
+      sandboxes: [
+        cloudSandbox('alpha', { github: { state: 'signed-in', user: 'octo-cat' } }),
+        cloudSandbox('beta', { github: { state: 'invalid' } }),
+        cloudSandbox('gamma', { github: { state: 'error', message: "gh isn't installed on the sandbox." } }),
+        cloudSandbox('delta'),
+      ],
+      profiles: ['alpha', 'beta', 'gamma', 'delta'].map(cloudProfile),
+    },
+  });
+  await openRemoteAccess(page);
+
+  const field = page.getByRole('textbox', { name: 'GitHub token' });
+  await expect(field).toHaveAttribute('type', 'password');
+  await expect(page.getByLabel('Saved GitHub token')).toContainText('Not set');
+  await expect(page.getByText('A fine-grained personal access token with Contents and Pull requests set to Read and write')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Create a fine-grained token' })).toBeVisible();
+  await field.fill('FAKE-GH-TOKEN-ui-SECRET');
+  await page.getByRole('button', { name: 'Save GitHub Token' }).click();
+  await expect(field).toHaveValue('');
+  expect((await cloudMock(page, (mock) => mock.getCloudCredentialUpdateKeys())).at(-1)).toEqual(['githubToken']);
+  await expect(page.getByLabel('Saved GitHub token').getByRole('definition')).toHaveText('Set');
+  await expect(page.getByText('FAKE-GH-TOKEN-ui-SECRET')).toHaveCount(0);
+
+  await expect(page.getByRole('listitem', { name: 'Cloud sandbox alpha' })).toContainText('GitHub: signed in as octo-cat');
+  await expect(page.getByRole('listitem', { name: 'Cloud sandbox beta' }).getByRole('alert')).toContainText('⚠ GitHub token invalid');
+  await expect(page.getByRole('listitem', { name: 'Cloud sandbox gamma' }).getByRole('alert'))
+    .toContainText("⚠ GitHub sign-in didn't finish: gh isn't installed on the sandbox.");
+  await expect(page.getByRole('listitem', { name: 'Cloud sandbox delta' })).not.toContainText('GitHub');
+  await page.screenshot({ path: testInfo.outputPath('cloud-github-token.png'), fullPage: true });
 });

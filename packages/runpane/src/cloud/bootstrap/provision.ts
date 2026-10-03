@@ -354,6 +354,45 @@ export async function setSandboxHostname(sandbox: SandboxHandle, hostname: strin
   return { hostname: (await new StepRunner(sandbox, sandboxHome).run('os-hostname', [name], hostnameStepSchema, { timeoutSeconds: 60 })).hostname };
 }
 
+/**
+ * The sandbox's GitHub sign-in with the user's token. `none`: no token is saved, so nothing ran. `invalid`: GitHub
+ * refused the token. `error`: it could not be applied or checked; the message is fixed text, never gh's output.
+ */
+export type GitHubAuthStatus =
+  | { state: 'signed-in'; user: string }
+  | { state: 'invalid' }
+  | { state: 'none' }
+  | { state: 'error'; message: string };
+
+const GITHUB_AUTH_ERRORS = new Map<string, string>([
+  ['gh-missing', "gh isn't installed on the sandbox."],
+  ['login-failed', "gh couldn't sign in on the sandbox (GitHub may be unreachable from it)."],
+  ['setup-git-failed', 'gh signed in, but setting up git failed.'],
+  ['status-failed', "gh signed in, but couldn't confirm it."],
+  ['user-unknown', "gh signed in, but couldn't read the account name."],
+]);
+export const GITHUB_AUTH_FAILED = "Couldn't apply the GitHub token on the sandbox.";
+
+/**
+ * Signs gh and git in on the sandbox with the user's GitHub token (`gh auth login --with-token --insecure-storage`,
+ * then `gh auth setup-git`). The token travels only as file content through boat's files API, into the 0700 state
+ * dir, never on a command line; the sandbox step feeds it to gh on stdin and removes the file. A blank token runs
+ * nothing.
+ */
+export async function applyGitHubToken(sandbox: SandboxHandle, token: string | undefined, sandboxHome = DEFAULT_SANDBOX_HOME): Promise<GitHubAuthStatus> {
+  if (!token?.trim()) return { state: 'none' };
+  await uploadScripts(sandbox, sandboxHome);
+  const file = path.posix.join(stateDir(sandboxHome), `gh-token-${crypto.randomBytes(6).toString('hex')}`);
+  await sandbox.writeFile(file, `${token.trim()}\n`);
+  const result = await new StepRunner(sandbox, sandboxHome).run('github-auth', [file], githubAuthStepSchema, { timeoutSeconds: 120 });
+  if (result.state === 'signed-in') {
+    if (!result.user) throw new BootstrapError('github-auth', 'malformed result: signed in without a user');
+    return { state: 'signed-in', user: result.user };
+  }
+  if (result.state === 'invalid') return { state: 'invalid' };
+  return { state: 'error', message: GITHUB_AUTH_ERRORS.get(result.reason ?? '') ?? GITHUB_AUTH_FAILED };
+}
+
 /** The user's startup script's last run, from the sandbox's startup-status.json. */
 export interface StartupScriptStatus {
   /** null while the script runs. */
@@ -530,6 +569,11 @@ const serveHttpStepSchema = boundary.object({ baseUrl: boundary.nonEmptyString }
 const serveGuardStepSchema = boundary.object({
   applied: boundary.optional(boundary.boolean),
   detail: boundary.optional(boundary.string),
+});
+const githubAuthStepSchema = boundary.object({
+  state: boundary.enumeration('signed-in', 'invalid', 'error'),
+  user: boundary.optional(boundary.string),
+  reason: boundary.optional(boundary.string),
 });
 const hostnameStepSchema = boundary.object({ hostname: boundary.string });
 const startupInstallStepSchema = boundary.object({ sha256: boundary.optional(boundary.nullable(boundary.string)) });

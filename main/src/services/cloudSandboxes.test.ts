@@ -42,7 +42,7 @@ function createStartupScriptFile(initial = '') {
   };
 }
 
-const CONFIGURED = { boat: { configured: true, org: { id: 'team_test', name: 'test' } }, tailscale: { configured: true }, claude: { configured: false }, ready: true };
+const CONFIGURED = { boat: { configured: true, org: { id: 'team_test', name: 'test' } }, tailscale: { configured: true }, claude: { configured: false }, github: { configured: false }, ready: true };
 
 function createLibrary(overrides: Partial<CloudSandboxLibrary> = {}): CloudSandboxLibrary {
   return {
@@ -105,7 +105,7 @@ describe('CloudSandboxManager', () => {
     const snapshot = await manager.refresh();
 
     expect(snapshot.available).toBe(true);
-    expect(snapshot.credentials).toEqual({ boat: true, tailscale: true, claude: false, boatOrg: 'test' });
+    expect(snapshot.credentials).toEqual({ boat: true, tailscale: true, claude: false, github: false, boatOrg: 'test' });
     expect(snapshot.sandboxes.map((row) => [row.id, row.state, row.startedAt])).toEqual([
       ['rp-alpha', 'running', '2026-10-01T10:00:00.000Z'],
       ['rp-beta', 'stopped', undefined],
@@ -296,7 +296,7 @@ describe('CloudSandboxManager library mapping', () => {
       tailscaleClientSecret: 'synthetic-secret',
       claudeToken: undefined,
     });
-    expect(snapshot.credentials).toEqual({ boat: true, tailscale: true, claude: true, boatOrg: 'test' });
+    expect(snapshot.credentials).toEqual({ boat: true, tailscale: true, claude: true, github: false, boatOrg: 'test' });
     expect(JSON.stringify(snapshot)).not.toContain('synthetic');
   });
 
@@ -769,5 +769,36 @@ describe('getStartupScriptView', () => {
     ['timed out', { ...STARTUP_OK, exitCode: 124, timedOut: true }, { state: 'failed', exitCode: 124, timedOut: true }],
   ])('%s', (_name, status, view) => {
     expect(getStartupScriptView(status)).toEqual(view);
+  });
+});
+
+describe('CloudSandboxManager GitHub token', () => {
+  const rowOf = (snapshot: CloudSandboxesSnapshot) => snapshot.sandboxes.find((row) => row.id === 'rp-alpha');
+  const TOKEN = 'FAKE-GH-TOKEN-main-SECRET';
+
+  it('saves the token through setup and shows only whether it is set', async () => {
+    const setup = vi.fn(async () => ({ ...CONFIGURED, github: { configured: true } }));
+    const { manager } = createManager(createLibrary({ setup }));
+
+    const snapshot = await manager.updateCredentials({ githubToken: TOKEN });
+
+    expect(setup).toHaveBeenCalledWith(expect.objectContaining({ githubToken: TOKEN }));
+    expect(snapshot.credentials.github).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toContain(TOKEN);
+  });
+
+  it('shows the GitHub sign-in from create and start on the row; no token shows nothing', async () => {
+    const create = vi.fn(async () => summary({ github: { state: 'signed-in', user: 'octo-cat' } }));
+    const start = vi.fn(async () => summary({ github: { state: 'invalid' } }));
+    const { manager } = createManager(createLibrary({ create, start }));
+
+    expect(rowOf(await manager.create({ name: 'alpha', size: 'default' }))?.github).toEqual({ state: 'signed-in', user: 'octo-cat' });
+    expect(rowOf(await manager.start('rp-alpha'))?.github).toEqual({ state: 'invalid' });
+
+    start.mockResolvedValueOnce(summary({ github: { state: 'error', message: "Couldn't apply the GitHub token on the sandbox." } }));
+    expect(rowOf(await manager.start('rp-alpha'))?.github).toEqual({ state: 'error', message: "Couldn't apply the GitHub token on the sandbox." });
+
+    start.mockResolvedValueOnce(summary({ github: { state: 'none' } }));
+    expect(rowOf(await manager.start('rp-alpha'))?.github).toBeUndefined();
   });
 });

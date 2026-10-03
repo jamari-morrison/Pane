@@ -815,6 +815,38 @@ UNIT
   result "$(printf '{"ok":true,"hostname":"%s"}' "$(hostname)")"
 }
 
+# github-auth <token file>: sign gh and git in with the user's GitHub token (Settings > Cloud sandboxes). The token
+# reaches this step only as a 0600 file that boat's files API wrote (never on a command line); gh reads it on stdin and
+# the file is removed whatever happens. --insecure-storage: the sandbox's keyring has no default collection and a store
+# would hang, so gh keeps it in ~/.config/gh/hosts.yml, owner-only. No gh output reaches the result (it can echo token
+# prefixes): `invalid` when GitHub refuses the token, `error` with a fixed reason otherwise.
+step_github_auth() {
+  local file="${1:-}" out rc=0 user
+  [ -f "$file" ] || fail "github-auth: no token file"
+  # shellcheck disable=SC2064 # the path is fixed now
+  trap "shred -u '$file' 2>/dev/null || rm -f '$file'" EXIT
+  chmod 600 "$file"
+  if ! command -v gh >/dev/null 2>&1; then
+    result '{"ok":true,"state":"error","reason":"gh-missing"}'
+    return
+  fi
+  out="$(gh auth login --hostname github.com --with-token --insecure-storage <"$file" 2>&1)" || rc=$?
+  shred -u "$file" 2>/dev/null || rm -f "$file"
+  if [ "$rc" -ne 0 ]; then
+    case "$out" in
+      *"HTTP 401"*|*"Bad credentials"*|*"missing required scope"*) result '{"ok":true,"state":"invalid"}' ;;
+      *) result '{"ok":true,"state":"error","reason":"login-failed"}' ;;
+    esac
+    return
+  fi
+  [ -f "$HOME/.config/gh/hosts.yml" ] && chmod 600 "$HOME/.config/gh/hosts.yml"
+  gh auth setup-git --hostname github.com >/dev/null 2>&1 || { result '{"ok":true,"state":"error","reason":"setup-git-failed"}'; return; }
+  gh auth status --hostname github.com >/dev/null 2>&1 || { result '{"ok":true,"state":"error","reason":"status-failed"}'; return; }
+  user="$(gh api user --jq .login 2>/dev/null || true)"
+  [[ "$user" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || { result '{"ok":true,"state":"error","reason":"user-unknown"}'; return; }
+  result "$(printf '{"ok":true,"state":"signed-in","user":"%s"}' "$user")"
+}
+
 step="${1:-}"; shift || true
 case "$step" in
   identity) step_identity "$@" ;;
@@ -841,5 +873,6 @@ case "$step" in
   startup-status) step_startup_status ;;
   startup-log) step_startup_log ;;
   os-hostname) step_os_hostname "$@" ;;
+  github-auth) step_github_auth "$@" ;;
   *) fail "unknown step '$step'" ;;
 esac

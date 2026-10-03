@@ -5,6 +5,7 @@ import {
   getCloudHostSwitcherEntry,
   getCloudSandboxActions,
   getCloudSandboxBadge,
+  getCloudGitHubNotice,
   getCloudStartupScriptNotice,
   getCloudStepLabel,
   STARTUP_SCRIPT_WARNING,
@@ -173,5 +174,17 @@ describe('getCloudStartupScriptNotice', () => {
 
   it('labels the create step that runs the script', () => {
     expect(getCloudStepLabel('startup')).toBe('Running your startup script…');
+  });
+});
+
+describe('getCloudGitHubNotice', () => {
+  it.each([
+    ['no token', undefined, null],
+    ['signed in', { state: 'signed-in', user: 'octo-cat' }, { kind: 'ok', text: 'GitHub: signed in as octo-cat' }],
+    ['invalid', { state: 'invalid' }, { kind: 'warning', text: '⚠ GitHub token invalid' }],
+    ['could not apply', { state: 'error', message: "gh isn't installed on the sandbox." },
+      { kind: 'warning', text: "⚠ GitHub sign-in didn't finish: gh isn't installed on the sandbox." }],
+  ] as const)('%s', (_name, github, notice) => {
+    expect(getCloudGitHubNotice(sandbox({ github }))).toEqual(notice);
   });
 });
