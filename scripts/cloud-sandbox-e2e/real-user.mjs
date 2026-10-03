@@ -376,7 +376,8 @@ const ui = {
   switcherTerminal: (label) => page.getByRole('menuitem', { name: `Open terminal on ${label}`, exact: true }),
   rowOpenTerminal: (label) => ui.row(label).getByRole('button', { name: `Open terminal on ${label}`, exact: true }),
   hostTerminalTab: (label) => page.getByRole('tab', { name: new RegExp(`${escapeRegExp(label)} · Terminal`) }),
-  hostTerminalHeading: (label) => page.getByText(`Terminal on ${label}`, { exact: true }),
+  // The terminal's name, "Terminal on <host>", labels its tab strip.
+  hostTerminalHeading: (label) => page.getByRole('tablist', { name: `Terminal on ${label}`, exact: true }),
   hostChip: (scope, label, kind) => scope.getByText(label ? `On: ${label} (${kind})` : 'On: This computer', { exact: true }),
   // Folder browser (cs-repo-ui HostFolderBrowser): a click on an entry opens it; "Select this folder" picks the current one.
   picker: (label) => page.getByRole('dialog', { name: new RegExp(`^Choose a folder on ${escapeRegExp(label)}`) }),
@@ -535,6 +536,15 @@ function commandEnd(lines, command) {
   return -1;
 }
 async function runInTerminal(panelId, command, { timeoutMs = 60_000, done } = {}) {
+  // Text left at the prompt (D3's unsubmitted sign-in line) is abandoned first with Ctrl+C, as a user would;
+  // typing after it would run both.
+  const pending = nonEmpty(await screenText(panelId).catch(() => '')).at(-1) ?? '';
+  if (!promptLine.test(pending)) {
+    log(`clearing the line left at the prompt: ${pending.slice(-60)}`);
+    await page.locator('.xterm:visible').last().click();
+    await page.keyboard.press('Control+C');
+    await until(async () => promptLine.test(nonEmpty(await screenText(panelId)).at(-1) ?? ''), 10_000, 300);
+  }
   await typeInVisibleTerminal(command);
   let last = '';
   let stableSince = 0;
