@@ -114,6 +114,11 @@ export interface RemotePaneConnectionProfile {
   hostKind?: RemoteHostKind;
   /** Environment the host terminal's shell starts with on this host. Saved unencrypted with the profile: not for secrets. */
   hostTerminalEnv?: HostTerminalEnvVar[];
+  /**
+   * Where the user signs this host in to GitHub. 'settings': its credentials are managed in this app's
+   * Settings, so a clone that needs a sign-in points there. Absent: sign in on the host itself.
+   */
+  githubSignIn?: 'settings';
 }
 
 export interface RemoteDaemonHostAccess {
@@ -497,6 +502,7 @@ const remoteProfileSchema: BoundarySchema<RemotePaneConnectionProfile> = boundar
   cloud: boundary.optional(remoteCloudInfoSchema),
   hostKind: boundary.optional(remoteHostKindSchema),
   hostTerminalEnv: boundary.optional(boundary.array(hostTerminalEnvVarSchema)),
+  githubSignIn: boundary.optional(boundary.literal('settings')),
 });
 const remoteImportSchema = boundary.object({
   v: boundary.literal(1),
