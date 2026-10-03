@@ -880,6 +880,7 @@ function App() {
         )}
         <AddProjectDialog
           isOpen={showAddProjectDialog}
+          mode="new"
           onClose={() => setShowAddProjectDialog(false)}
         />
         <Help isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />

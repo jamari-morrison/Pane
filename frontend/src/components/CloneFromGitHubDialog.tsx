@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { Button } from './ui/Button';
 import { EnhancedInput } from './ui/EnhancedInput';
 import { FieldWithTooltip } from './ui/FieldWithTooltip';
+import { HostChip } from './HostChip';
+import { HostFolderField } from './HostFolderField';
 import { API } from '../utils/api';
 import { useNavigationStore } from '../stores/navigationStore';
 import { EMPTY_CLONE_DRAFT, LOCAL_CLONE_HOST, useCloneDraftStore, type CloneDraft } from '../stores/cloneDraftStore';
@@ -10,6 +12,8 @@ import { useRemoteRuntimeState } from '../hooks/useRemoteRuntimeState';
 import { openHostTerminal } from '../utils/hostTerminal';
 import { CloneSignInNotice } from './CloneSignInNotice';
 import { GIT_CLONE_AUTH_REQUIRED } from '../../../shared/types/gitClone';
+import { useActiveHost } from '../hooks/useActiveHost';
+import { buildCloneOptions, buildCreateProjectRequest, defaultCloneDestination } from '../utils/hostRepoActions';
 
 /** Typed into the host terminal for the user to run; never submitted for them. */
 const GITHUB_SIGN_IN_COMMAND = 'gh auth login --web --git-protocol https && gh auth setup-git';
@@ -38,6 +42,13 @@ export function CloneFromGitHubDialog({ isOpen, onClose }: CloneFromGitHubDialog
   const resetDraft = storedDraft.reset;
 
   const navigateToProject = useNavigationStore(s => s.navigateToProject);
+  const host = useActiveHost();
+  const defaultDestination = defaultCloneDestination(host);
+
+  // A remote clone lands in the host's home unless the user picks a folder.
+  useEffect(() => {
+    if (isOpen && !destPath) useCloneDraftStore.getState().update(hostId, { destPath: defaultDestination });
+  }, [isOpen, destPath, hostId, defaultDestination]);
 
   const setDestPath = (value: string) => updateDraft({ destPath: value });
   const setError = (value: string) => updateDraft({ error: value, signInHost: null });
@@ -61,13 +72,6 @@ export function CloneFromGitHubDialog({ isOpen, onClose }: CloneFromGitHubDialog
     }
   };
 
-  const handleBrowse = async () => {
-    const result = await window.electronAPI.dialog.openDirectory();
-    if (result.success && result.data) {
-      setDestPath(result.data);
-    }
-  };
-
   const handleClone = async () => {
     if (!url || !destPath) return;
     setCloning(true);
@@ -75,7 +79,7 @@ export function CloneFromGitHubDialog({ isOpen, onClose }: CloneFromGitHubDialog
     // A sign-in notice stays up while its Try again runs.
     updateDraft({ error: '' });
     try {
-      const cloneResult = await API.git.cloneRepo(url, destPath);
+      const cloneResult = await API.git.cloneRepo(url, destPath, buildCloneOptions(host));
       if (!cloneResult.success || !cloneResult.data) {
         const remoteHost = connectionState.mode === 'remote' ? connectionState.activeProfileLabel : null;
         updateDraft({
@@ -88,11 +92,9 @@ export function CloneFromGitHubDialog({ isOpen, onClose }: CloneFromGitHubDialog
 
       const { clonedPath, repoName } = cloneResult.data;
 
-      const projectResult = await API.projects.create({
-        name: repoName,
-        path: clonedPath,
-        active: false,
-      });
+      const projectResult = await API.projects.create(
+        buildCreateProjectRequest(host, { name: repoName, path: clonedPath, mode: 'open' }),
+      );
 
       if (!projectResult.success || !projectResult.data) {
         setError(projectResult.error ?? 'Failed to create project');
@@ -117,12 +119,14 @@ export function CloneFromGitHubDialog({ isOpen, onClose }: CloneFromGitHubDialog
       />
       <ModalBody>
         <div className="space-y-6">
+          <HostChip host={host} />
           <FieldWithTooltip
             label="Repository URL"
             tooltip="The HTTPS or SSH URL of the GitHub repository to clone"
           >
             <EnhancedInput
               type="text"
+              aria-label="Repository URL"
               value={url}
               onChange={(e) => {
                 updateDraft({ url: e.target.value, error: '', signInHost: null });
@@ -135,23 +139,19 @@ export function CloneFromGitHubDialog({ isOpen, onClose }: CloneFromGitHubDialog
 
           <FieldWithTooltip
             label="Destination"
-            tooltip="The local directory where the repository will be cloned into"
+            tooltip={`The folder on ${host.name} that the repository is cloned into`}
           >
-            <div className="space-y-2">
-              <EnhancedInput
-                type="text"
-                value={destPath}
-                readOnly
-                placeholder="Select a destination folder..."
-                size="lg"
-                fullWidth
-              />
-              <div className="flex justify-end">
-                <Button onClick={handleBrowse} variant="secondary" size="sm">
-                  Browse
-                </Button>
-              </div>
-            </div>
+            <HostFolderField
+              host={host}
+              label="Destination"
+              value={destPath}
+              onChange={(value) => {
+                setDestPath(value);
+                if (error) setError('');
+              }}
+              placeholder="Select a destination folder..."
+              allowCreate
+            />
           </FieldWithTooltip>
 
           {signInHost ? (
@@ -162,7 +162,7 @@ export function CloneFromGitHubDialog({ isOpen, onClose }: CloneFromGitHubDialog
               onTryAgain={() => void handleClone()}
             />
           ) : error && (
-            <div className="text-sm text-status-error">{error}</div>
+            <div role="alert" className="text-sm text-status-error">{error}</div>
           )}
           {terminalError && (
             <div className="text-sm text-status-error">{terminalError}</div>
