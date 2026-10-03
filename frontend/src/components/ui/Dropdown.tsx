@@ -19,6 +19,12 @@ export interface DropdownItem {
   showDot?: boolean;
   dotColor?: string;
   shortcut?: string;
+  /** An icon button at the row's end that does something other than picking the row. */
+  action?: {
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+    onClick: () => void;
+  };
 }
 
 export interface DropdownProps {
@@ -367,6 +373,8 @@ export function Dropdown({
                 const isSelectable = selectedId !== undefined;
                 const isSelected = item.id === selectedId;
                 const variant = item.variant || 'default';
+                const action = item.action;
+                const ActionIcon = action?.icon;
 
                 return (
                   <React.Fragment key={item.id}>
@@ -374,72 +382,90 @@ export function Dropdown({
                       <div className="h-2" />
                     )}
 
-                    <button
-                      type="button"
-                      data-dropdown-item-index={index}
-                      // A `selectedId` menu is a single-select group: plain menuitem can't
-                      // tell a screen reader which option is currently active.
-                      role={isSelectable ? 'menuitemradio' : 'menuitem'}
-                      aria-checked={isSelectable ? isSelected : undefined}
-                      tabIndex={index === activeIndex ? 0 : -1}
-                      onClick={() => handleItemClick(item)}
-                      // Keeps pointer and keyboard on one item; otherwise the hovered and
-                      // the focused row are both highlighted.
-                      onMouseEnter={() => !item.disabled && setActiveIndex(index)}
-                      disabled={item.disabled}
-                      className={cn(
-                        'w-full text-left px-2.5 py-1',
-                        'flex items-center gap-2',
-                        'focus:outline-none focus:ring-2 focus:ring-inset focus:ring-focus-ring-subtle',
-                        'min-h-[1.75rem] group relative',
-                        item.disabled && 'opacity-50 cursor-not-allowed',
-                        !item.disabled && !isSelected && variantStyles[variant],
-                        isSelected && selectedVariantStyles[variant],
-                        itemClassName
-                      )}
-                    >
-                      {Icon && (
-                        <div className="flex items-center justify-center w-4 h-4 flex-shrink-0">
-                          <Icon className={cn(
-                            'w-3.5 h-3.5',
-                            'stroke-[1.5]',
-                            item.iconColor || 'text-current'
-                          )} />
-                        </div>
-                      )}
-
-                      <div className="flex-1 min-w-0">
-                        <div className={cn(
-                          'text-[13px] leading-tight truncate',
-                          'group-hover:text-inherit'
-                        )}>
-                          {item.label}
-                        </div>
-                        {item.description && (
-                          <div className="text-[11px] text-text-tertiary mt-0.5 leading-tight">
-                            {item.description}
+                    <div className="flex items-center">
+                      <button
+                        type="button"
+                        data-dropdown-item-index={index}
+                        // A `selectedId` menu is a single-select group: plain menuitem can't
+                        // tell a screen reader which option is currently active.
+                        role={isSelectable ? 'menuitemradio' : 'menuitem'}
+                        aria-checked={isSelectable ? isSelected : undefined}
+                        tabIndex={index === activeIndex ? 0 : -1}
+                        onClick={() => handleItemClick(item)}
+                        // Keeps pointer and keyboard on one item; otherwise the hovered and
+                        // the focused row are both highlighted.
+                        onMouseEnter={() => !item.disabled && setActiveIndex(index)}
+                        disabled={item.disabled}
+                        className={cn(
+                          'w-full min-w-0 text-left px-2.5 py-1',
+                          'flex items-center gap-2',
+                          'focus:outline-none focus:ring-2 focus:ring-inset focus:ring-focus-ring-subtle',
+                          'min-h-[1.75rem] group relative',
+                          item.disabled && 'opacity-50 cursor-not-allowed',
+                          !item.disabled && !isSelected && variantStyles[variant],
+                          isSelected && selectedVariantStyles[variant],
+                          itemClassName
+                        )}
+                      >
+                        {Icon && (
+                          <div className="flex items-center justify-center w-4 h-4 flex-shrink-0">
+                            <Icon className={cn(
+                              'w-3.5 h-3.5',
+                              'stroke-[1.5]',
+                              item.iconColor || 'text-current'
+                            )} />
                           </div>
                         )}
-                      </div>
 
-                      {item.shortcut && (
-                        <Kbd variant="inline" className="shrink-0 pl-3">
-                          {formatKeyDisplay(item.shortcut)}
-                        </Kbd>
-                      )}
-
-                      {(isSelected || item.showDot) && (
-                        <div className="flex items-center justify-center w-5 h-5 flex-shrink-0">
-                          <div
-                            className={cn(
-                              'w-2 h-2 rounded-full',
-                              isSelected && 'bg-interactive shadow-sm',
-                              item.showDot && !isSelected && item.dotColor
-                            )}
-                          />
+                        <div className="flex-1 min-w-0">
+                          <div className={cn(
+                            'text-[13px] leading-tight truncate',
+                            'group-hover:text-inherit'
+                          )}>
+                            {item.label}
+                          </div>
+                          {item.description && (
+                            <div className="text-[11px] text-text-tertiary mt-0.5 leading-tight">
+                              {item.description}
+                            </div>
+                          )}
                         </div>
+
+                        {item.shortcut && (
+                          <Kbd variant="inline" className="shrink-0 pl-3">
+                            {formatKeyDisplay(item.shortcut)}
+                          </Kbd>
+                        )}
+
+                        {(isSelected || item.showDot) && (
+                          <div className="flex items-center justify-center w-5 h-5 flex-shrink-0">
+                            <div
+                              className={cn(
+                                'w-2 h-2 rounded-full',
+                                isSelected && 'bg-interactive shadow-sm',
+                                item.showDot && !isSelected && item.dotColor
+                              )}
+                            />
+                          </div>
+                        )}
+                      </button>
+                      {action && ActionIcon && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          aria-label={action.label}
+                          title={action.label}
+                          tabIndex={-1}
+                          onClick={() => {
+                            action.onClick();
+                            if (closeOnSelect) handleClose();
+                          }}
+                          className="mr-1 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded text-text-tertiary hover:bg-surface-hover hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-inset focus:ring-focus-ring-subtle"
+                        >
+                          <ActionIcon className="h-3.5 w-3.5 stroke-[1.5]" />
+                        </button>
                       )}
-                    </button>
+                    </div>
                   </React.Fragment>
                 );
               })}
