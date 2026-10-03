@@ -9,6 +9,7 @@ import {
   readStartupLog,
   repairSandboxTailnet,
   setSandboxHostname,
+  writeLocalEnv,
   GITHUB_AUTH_FAILED,
   type GitHubAuthStatus,
   runStartupScript,
@@ -158,10 +159,34 @@ export interface CloudSandboxInfo {
    * detection): then nothing is sent and the sandbox keeps the model it had.
    */
   claudeModel?: { model: string | null; outcome: ClaudeModelOutcome };
+  /** The local start script's run for this create or start; absent when the caller has no local start script (the CLI). */
+  localStart?: LocalStartStatus;
   /** The sandbox's GitHub sign-in with the saved token, from create and start (`none` when no token is saved). */
   github?: GitHubAuthStatus;
   /** The user's startup script's run on create; absent when no script ran. */
   startupScript?: StartupScriptStatus;
+}
+
+/**
+ * How the user's LOCAL start script went. `ok`: its variables went to the sandbox (count only; `reserved` = names it
+ * printed that the sandbox keeps for itself, dropped). `none`: no script, so the sandbox has no variables from it.
+ * `failed`, `timeout` and `error` (fixed text): the sandbox keeps the variables it had. Never a value.
+ */
+export type LocalStartStatus =
+  | { state: 'ok'; keys: number; reserved: string[] }
+  | { state: 'none' }
+  | { state: 'failed'; exitCode: number }
+  | { state: 'timeout'; seconds: number }
+  | { state: 'error'; message: string };
+
+/**
+ * One run of the user's local start script for one sandbox. `envFile`: `export NAME='value'` lines for the sandbox,
+ * '' to remove its variables, or null to leave them as they are (the run failed: a fetch that failed must not wipe
+ * values that still work).
+ */
+export interface LocalStartEnv {
+  status: LocalStartStatus;
+  envFile: string | null;
 }
 
 /** The outside world, swappable in tests. */
@@ -191,6 +216,11 @@ export interface CloudSandboxesOptions {
    * Unset (the CLI), nothing is pushed and each sandbox keeps the script it has.
    */
   readStartupScript?: () => Promise<string>;
+  /**
+   * Runs the user's local start script on this computer for the sandbox being created or started, right then. Unset
+   * (the CLI), no local start script runs and each sandbox keeps the variables it has.
+   */
+  readLocalStartEnv?: () => Promise<LocalStartEnv>;
 }
 
 export interface CloudBootstrap {
@@ -199,6 +229,7 @@ export interface CloudBootstrap {
   update: typeof updateSandboxPane;
   applyClaudeModel: typeof applyClaudeModel;
   setHostname: typeof setSandboxHostname;
+  writeLocalEnv: typeof writeLocalEnv;
   applyGitHubToken: typeof applyGitHubToken;
   pushStartupScript: typeof pushStartupScript;
   runStartupScript: typeof runStartupScript;
@@ -207,6 +238,8 @@ export interface CloudBootstrap {
 }
 
 const SANDBOX_READY_TIMEOUT_MS = 180_000;
+const LOCAL_START_FAILED = "Pane couldn't run the local start script.";
+const LOCAL_ENV_NOT_SENT = "Couldn't send the local start script's variables to the sandbox.";
 /**
  * How long a Stop boat accepted may take. boat snapshots the disk before it powers off ("archiving"), and has taken
  * over 5 minutes; until it is stopped that is progress, not a failure.
@@ -234,6 +267,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
     update: updateSandboxPane,
     applyClaudeModel,
     setHostname: setSandboxHostname,
+    writeLocalEnv,
     applyGitHubToken,
     pushStartupScript,
     runStartupScript,
@@ -304,6 +338,28 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       return await bootstrap.applyGitHubToken(handle, credentials.github?.token);
     } catch {
       return { state: 'error', message: GITHUB_AUTH_FAILED };
+    }
+  }
+
+  /** Runs the local start script for one sandbox; a throw becomes a fixed-text error (never output or values). */
+  async function runLocalStart(): Promise<LocalStartEnv | undefined> {
+    if (!options.readLocalStartEnv) return undefined;
+    try {
+      return await options.readLocalStartEnv();
+    } catch {
+      return { status: { state: 'error', message: LOCAL_START_FAILED }, envFile: null };
+    }
+  }
+
+  /** Sends a local start script's result to this one sandbox. Reported, never thrown: the sandbox works without it. */
+  async function applyLocalStart(handle: SandboxHandle, run: LocalStartEnv): Promise<LocalStartStatus> {
+    if (run.envFile === null) return run.status;
+    try {
+      const written = await bootstrap.writeLocalEnv(handle, run.envFile);
+      if (run.status.state !== 'ok') return run.status;
+      return { state: 'ok', keys: written.keys, reserved: [...new Set([...run.status.reserved, ...written.reserved])].sort() };
+    } catch {
+      return { state: 'error', message: LOCAL_ENV_NOT_SENT };
     }
   }
 
@@ -475,6 +531,8 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       let health: DaemonHealthResult;
       let claudeModel: CloudSandboxInfo['claudeModel'];
       let github: GitHubAuthStatus = { state: 'none' };
+      const localRun = await runLocalStart();
+      let localStart = localRun?.status;
       try {
         if (sandbox.name !== hostname) await provider.rename(sandbox.id, hostname);
         const ready = await waitForSandbox(provider, sandbox.id, 'running', SANDBOX_READY_TIMEOUT_MS);
@@ -490,6 +548,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
           tailscale: createTailscale(tailscale),
           paneSource,
           agentEnv: agentEnvironment(credentials),
+          localEnv: localRun?.envFile ?? undefined,
           transport: createOptions.transport ?? 'auto',
           healthTimeoutMs: CREATE_HEALTH_TIMEOUT_MS,
           onStep: (step) => {
@@ -541,7 +600,9 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
         }
       }
       progress('done', `${label} is ready at ${record.profile.baseUrl}.`);
-      return { ...sandboxInfo(record, await provider.get(sandbox.id), health, claudeModel, startupScript), github };
+      const created: CloudSandboxInfo = { ...sandboxInfo(record, await provider.get(sandbox.id), health, claudeModel, startupScript), github };
+      if (localStart) created.localStart = localStart;
+      return created;
     },
 
     async list() {
@@ -600,6 +661,9 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       sandbox = await waitForSandbox(provider, sandboxId, 'running', SANDBOX_READY_TIMEOUT_MS);
       await setHostnameBestEffort(provider.handle(sandboxId), record, (message) => onProgress?.({ step: 'starting', message }));
       const github = await applyGitHubBestEffort(provider.handle(sandboxId), credentials);
+      // Fresh variables for THIS sandbox only, before its startup script runs with them.
+      const localRun = await runLocalStart();
+      const localStart = localRun ? await applyLocalStart(provider.handle(sandboxId), localRun) : undefined;
       // The boot already ran the script the sandbox had; an edit since then runs through runStartupScript.
       await pushStartupScriptBestEffort(provider.handle(sandboxId), (message) => onProgress?.({ step: 'starting', message }),
         'Your startup script could not be updated');
@@ -624,7 +688,9 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       if (!health.ok) throw new Error(`${record.profile.label} is running, but its Pane daemon did not answer at ${record.profile.baseUrl}.`);
       const claudeModel = await syncClaudeModelBestEffort(provider.handle(sandboxId), record.profile.label, 'starting', onProgress);
       onProgress?.({ step: 'done', message: `${record.profile.label} is running.` });
-      return { ...sandboxInfo(record, sandbox, health, claudeModel), github };
+      const started: CloudSandboxInfo = { ...sandboxInfo(record, sandbox, health, claudeModel), github };
+      if (localStart) started.localStart = localStart;
+      return started;
     },
 
     async update(host, pane, onProgress) {
@@ -753,6 +819,7 @@ function describeStep(step: ProvisionStepName): string {
     case 'firewall': return 'Closing inbound tailnet ports...';
     case 'tailscale-join': return 'Joining your tailnet...';
     case 'agent-env': return 'Signing agents in...';
+    case 'local-env': return 'Sending your local start script\'s variables...';
     case 'agent-prompts': return 'Answering Claude Code\'s first-run prompts...';
     case 'install-pane': return 'Installing Pane...';
     case 'pairing': return 'Pairing...';

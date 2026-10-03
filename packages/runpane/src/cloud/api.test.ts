@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { createCloudSandboxes, type CloudBootstrap, type CloudProgress } from './api';
+import { createCloudSandboxes, type CloudBootstrap, type CloudProgress, type LocalStartEnv } from './api';
 import type { DaemonHealthResult } from './bootstrap/health';
 import type { GitHubAuthStatus, ProvisionResult, RepairResult, StartupScriptStatus } from './bootstrap/provision';
 import type { CloudProvider, CloudSandbox, CreateSandboxRequest, ListedBoatOrg } from './provider';
@@ -142,11 +142,16 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
   const health = [...(script.health ?? [])];
   /** Startup script pushes and runs, and health checks, in call order. */
   const events: string[] = [];
+  /** Local env files writeLocalEnv received, with the sandbox each went to. Kept out of `events`. */
+  const localEnvWrites: Array<{ sandboxId: string; envFile: string }> = [];
+  /** What provision was given as the local env (undefined: none). */
+  const provisionLocalEnvs: Array<string | undefined> = [];
   /** The GitHub tokens applyGitHubToken received, in order (undefined: none saved). Kept out of `events`. */
   const githubTokens: Array<string | undefined> = [];
   const bootstrap: CloudBootstrap = {
     async provision(_sandbox, options): Promise<ProvisionResult> {
       agentEnvs.push(options.agentEnv);
+      provisionLocalEnvs.push(options.localEnv);
       paneSources.push(options.paneSource);
       tailnet.devices.push({ nodeId: 'n1', id: '1', hostname: options.hostname, name: FQDN, addresses: [], tags: ['tag:rp-session'] });
       if (script.provisionError) throw script.provisionError;
@@ -172,6 +177,11 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
       if (script.claudeModelFails) throw new Error('cloud bootstrap step "claude-model" failed: settings.json is not a JSON object');
       claudeModels.push(model);
       return { outcome: 'set', model };
+    },
+    async writeLocalEnv(sandbox, envFile) {
+      events.push('local-env');
+      localEnvWrites.push({ sandboxId: sandbox.id, envFile });
+      return { keys: envFile ? 1 : 0, reserved: [] };
     },
     async applyGitHubToken(_sandbox, token) {
       events.push('github');
@@ -205,7 +215,7 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
       return { ok, elapsedMs: 1, version: ok ? '2.4.146' : undefined };
     },
   };
-  return { bootstrap, agentEnvs, paneSources, repairs, updates, claudeModels, events, githubTokens };
+  return { bootstrap, agentEnvs, paneSources, repairs, updates, claudeModels, events, githubTokens, localEnvWrites, provisionLocalEnvs };
 }
 
 /** The user's Claude Code default model on "this machine"; tests change it. */
@@ -218,7 +228,14 @@ class LocalStartupScript {
   constructor(public script: string | undefined) {}
 }
 
-function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}, startupScript?: string) {
+/** What the desktop's local start script gives a create or start; undefined: no reader (the CLI). */
+class LocalStartScript {
+  runs = 0;
+  constructor(public result: LocalStartEnv | undefined) {}
+}
+
+function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}, startupScript?: string, localStart?: LocalStartEnv) {
+  const localStartScript = new LocalStartScript(localStart);
   const startup = new LocalStartupScript(startupScript);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-cloud-'));
   const clock = new FakeClock();
@@ -246,9 +263,13 @@ function harness(script: BootstrapScript = {}, env: NodeJS.ProcessEnv = {}, star
     env,
     localClaudeModel: async () => local.model,
     readStartupScript: startupScript === undefined ? undefined : async () => startup.script ?? '',
+    readLocalStartEnv: localStart === undefined ? undefined : async () => {
+      localStartScript.runs += 1;
+      return localStartScript.result ?? { status: { state: 'none' }, envFile: '' };
+    },
   });
   const onProgress = (update: CloudProgress) => progress.push(update);
-  return { dir, cloud, provider, tailnet, boot, saved, progress, onProgress, local, clock, startup };
+  return { dir, cloud, provider, tailnet, boot, saved, progress, onProgress, local, clock, startup, localStartScript };
 }
 
 async function withCredentials(h: ReturnType<typeof harness>) {
@@ -691,4 +712,59 @@ test('no GitHub token is quiet, an invalid one is reported, and a failure never 
   assert.deepEqual(kept.github, { state: 'error', message: "Couldn't apply the GitHub token on the sandbox." });
   await broken.cloud.stop(kept.hostname);
   assert.deepEqual((await broken.cloud.start(kept.hostname)).github, { state: 'error', message: "Couldn't apply the GitHub token on the sandbox." });
+});
+
+const LOCAL_ENV_FILE = "export DOPPLER_TOKEN='FAKE-LOCAL-ENV-api-SECRET'\n";
+const LOCAL_OK: LocalStartEnv = { status: { state: 'ok', keys: 1, reserved: [] }, envFile: LOCAL_ENV_FILE };
+
+test('create runs the local start script once and provisions its variables; the CLI does neither', async () => {
+  const h = harness({}, {}, 'echo hi\n', LOCAL_OK);
+  await withCredentials(h);
+  const info = await h.cloud.create({}, h.onProgress);
+  assert.equal(h.localStartScript.runs, 1);
+  assert.deepEqual(h.boot.provisionLocalEnvs, [LOCAL_ENV_FILE]);
+  assert.deepEqual(info.localStart, { state: 'ok', keys: 1, reserved: [] });
+  assert.ok(!JSON.stringify([info, h.progress, h.boot.events]).includes('FAKE-LOCAL-ENV'), 'no value in results or progress');
+
+  const cli = harness();
+  await withCredentials(cli);
+  const created = await cli.cloud.create();
+  assert.deepEqual(cli.boot.provisionLocalEnvs, [undefined]);
+  assert.equal(created.localStart, undefined);
+});
+
+test('every start sends the fresh variables to THAT sandbox only, before the startup script', async () => {
+  const h = harness({}, {}, 'echo hi\n', LOCAL_OK);
+  await withCredentials(h);
+  const a = await h.cloud.create({ label: 'a' });
+  const b = await h.cloud.create({ label: 'b' });
+  await h.cloud.stop(a.hostname);
+  h.boot.events.length = 0;
+  h.boot.localEnvWrites.length = 0;
+  const started = await h.cloud.start(a.hostname, h.onProgress);
+  assert.deepEqual(h.boot.localEnvWrites, [{ sandboxId: a.sandboxId, envFile: LOCAL_ENV_FILE }], `${b.hostname} (running) gets nothing`);
+  assert.ok(h.boot.events.indexOf('local-env') < h.boot.events.indexOf('push "echo hi\\n"'), 'before the startup script push');
+  assert.deepEqual(started.localStart, { state: 'ok', keys: 1, reserved: [] });
+});
+
+test('a failed or timed-out local start script leaves the sandbox env alone and never fails the start', async () => {
+  for (const status of [{ state: 'failed', exitCode: 2 }, { state: 'timeout', seconds: 60 }, { state: 'error', message: "Couldn't start PowerShell for the local start script." }] as const) {
+    const h = harness({}, {}, 'echo hi\n', { status, envFile: null });
+    await withCredentials(h);
+    const created = await h.cloud.create();
+    assert.deepEqual(h.boot.provisionLocalEnvs, [undefined], `${status.state}: nothing written on create`);
+    assert.deepEqual(created.localStart, status);
+    await h.cloud.stop(created.hostname);
+    h.boot.localEnvWrites.length = 0;
+    const started = await h.cloud.start(created.hostname);
+    assert.equal(started.state, 'running');
+    assert.deepEqual(h.boot.localEnvWrites, [], `${status.state}: nothing written on start`);
+    assert.deepEqual(started.localStart, status);
+  }
+  const cleared = harness({}, {}, 'echo hi\n', { status: { state: 'none' }, envFile: '' });
+  await withCredentials(cleared);
+  const created = await cleared.cloud.create();
+  await cleared.cloud.stop(created.hostname);
+  await cleared.cloud.start(created.hostname);
+  assert.deepEqual(cleared.boot.localEnvWrites.map((write) => write.envFile), [''], 'no script: the start removes the old file');
 });
