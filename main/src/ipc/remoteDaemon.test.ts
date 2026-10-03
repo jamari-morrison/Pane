@@ -19,7 +19,7 @@ import {
 } from '../daemon/setupRemoteHost';
 import { registerRemoteDaemonHandlers as registerRemoteDaemonHandlersImpl } from './remoteDaemon';
 import { CloudSandboxesUnavailableError, type CloudSandboxLibrary } from '../services/cloudSandboxes';
-import type { CloudSandboxInfo } from '../../../packages/runpane/src/cloud/api';
+import type { CloudSandboxInfo, LocalStartEnv } from '../../../packages/runpane/src/cloud/api';
 import type { SavedRemoteHosts } from '../../../packages/runpane/src/cloud/savedHosts';
 import type { PaneCommandValue } from '../daemon/commandRegistry';
 
@@ -33,7 +33,7 @@ type RemoteDaemonTestDependencies = NonNullable<Parameters<typeof registerRemote
 function registerTestRemoteDaemonHandlers(
   ipcMain: Parameters<typeof registerRemoteDaemonHandlersImpl>[0],
   services: Omit<Parameters<typeof registerRemoteDaemonHandlersImpl>[1], 'dependencies'>,
-  cloudDependencies: Partial<Pick<RemoteDaemonTestDependencies, 'loadCloudSandboxLibrary' | 'readCloudDaemonVersion' | 'resolvePaneReleaseDeb' | 'readDefaultClaudeModel' | 'watchClaudeSettings' | 'createCloudStartupScriptFile'>> = {},
+  cloudDependencies: Partial<Pick<RemoteDaemonTestDependencies, 'loadCloudSandboxLibrary' | 'readCloudDaemonVersion' | 'resolvePaneReleaseDeb' | 'readDefaultClaudeModel' | 'watchClaudeSettings' | 'createCloudStartupScriptFile' | 'createCloudLocalStartScriptFile' | 'runLocalStartScript'>> = {},
 ): void {
   registerRemoteDaemonHandlersImpl(ipcMain, {
     ...services,
@@ -47,6 +47,8 @@ function registerTestRemoteDaemonHandlers(
       resolvePaneReleaseDeb: async () => { throw new Error('no releases in tests'); },
       watchClaudeSettings: () => () => undefined,
       createCloudStartupScriptFile: () => ({ read: async () => '', write: async () => undefined }),
+      createCloudLocalStartScriptFile: () => ({ read: async () => ({ shell: 'sh', script: '' }), write: async () => undefined }),
+      runLocalStartScript: async () => { throw new Error('no local start script in tests'); },
       ...cloudDependencies,
     },
   });
@@ -1275,6 +1277,8 @@ describe('cloud sandbox IPC', () => {
     current?: SavedRemoteHosts;
     /** What the desktop gave the library to read the user's startup script with. */
     readStartupScript?: () => Promise<string>;
+    /** What the desktop gave the library to run the local start script with. */
+    readLocalStartEnv?: () => Promise<LocalStartEnv>;
   }
 
   function createCloudLibrary(hostsRef: DesktopHostsRef, overrides: Partial<CloudSandboxLibrary> = {}) {
@@ -1300,9 +1304,14 @@ describe('cloud sandbox IPC', () => {
     };
     return {
       library,
-      loadCloudSandboxLibrary: async ({ savedHosts, readStartupScript }: { savedHosts: SavedRemoteHosts; readStartupScript: () => Promise<string> }) => {
+      loadCloudSandboxLibrary: async ({ savedHosts, readStartupScript, readLocalStartEnv }: {
+        savedHosts: SavedRemoteHosts;
+        readStartupScript: () => Promise<string>;
+        readLocalStartEnv: () => Promise<LocalStartEnv>;
+      }) => {
         hostsRef.current = savedHosts;
         hostsRef.readStartupScript = readStartupScript;
+        hostsRef.readLocalStartEnv = readLocalStartEnv;
         return library;
       },
     };
@@ -1398,6 +1407,43 @@ describe('cloud sandbox IPC', () => {
     await expect(ipcMain.handlers.get('remote-daemon:save-cloud-startup-script')?.({}, 'x'.repeat(256 * 1024 + 1)))
       .resolves.toEqual({ success: false, error: 'The startup script is too long (at most 256 KB).' });
     expect(startupScriptFile.write).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves the local start script locally only, and runs it only when the library asks (a create or start)', async () => {
+    const ipcMain = createIpcMainStub();
+    let saved = { shell: 'sh' as const, script: '' };
+    const file = { read: vi.fn(async () => saved), write: vi.fn(async (next: typeof saved) => { saved = next; }) };
+    const runLocalStartScript = vi.fn(async () => ({
+      ok: true, env: new Map([['DOPPLER_TOKEN', 'FAKE-LOCAL-ENV-ipc-SECRET']]), keys: ['DOPPLER_TOKEN'], reservedKeys: [], skippedLines: 0,
+      exitCode: 0, timedOut: false, failureSummary: null,
+    }));
+    const hostsRef: DesktopHostsRef = {};
+    const cloud = createCloudLibrary(hostsRef);
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager: createConfigManagerStub() }, {
+      ...cloud,
+      createCloudLocalStartScriptFile: () => file,
+      runLocalStartScript,
+    });
+    await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
+
+    const result = await ipcMain.handlers.get('remote-daemon:save-cloud-local-start-script')?.({}, { shell: 'sh', script: 'echo DOPPLER_TOKEN=x' });
+
+    expect(result).toMatchObject({ success: true, data: { localStartScriptSet: true } });
+    expect(runLocalStartScript).not.toHaveBeenCalled();
+    expect(cloud.library.runStartupScript).not.toHaveBeenCalled();
+    expect(cloud.library.start).not.toHaveBeenCalled();
+    await expect(ipcMain.handlers.get('remote-daemon:get-cloud-local-start-script')?.({}))
+      .resolves.toEqual({ success: true, data: { shell: 'sh', script: 'echo DOPPLER_TOKEN=x' } });
+
+    const env = await hostsRef.readLocalStartEnv?.();
+    expect(runLocalStartScript).toHaveBeenCalledWith('echo DOPPLER_TOKEN=x', { shell: 'sh', timeoutMs: 60_000 });
+    expect(env?.status).toEqual({ state: 'ok', keys: 1, reserved: [] });
+    expect(env?.envFile).toBe("export DOPPLER_TOKEN='FAKE-LOCAL-ENV-ipc-SECRET'\n");
+
+    await expect(ipcMain.handlers.get('remote-daemon:save-cloud-local-start-script')?.({}, { shell: 'bash', script: '' }))
+      .resolves.toMatchObject({ success: false });
+    await expect(ipcMain.handlers.get('remote-daemon:save-cloud-local-start-script')?.({}, { shell: 'sh', script: 'x'.repeat(256 * 1024 + 1) }))
+      .resolves.toEqual({ success: false, error: 'The local start script is too long (at most 256 KB).' });
   });
 
   it('keeps the saved profile id when the library saves the same sandbox again', async () => {

@@ -242,6 +242,9 @@ The **Cloud sandboxes (experimental)** section there:
 - has a **Startup script** editor: one script, kept on this computer, that every sandbox runs each time it starts.
   A failed run shows on the sandbox's row with **View log**. See
   [Cloud sandbox startup script](CLOUD_SANDBOX_STARTUP_SCRIPT.md).
+- has a **Local start script** editor: a script that runs on this computer before each sandbox create and start, whose
+  `NAME=value` output becomes variables on that sandbox only (for example a Doppler token). See
+  [Local start script](CLOUD_SANDBOX_STARTUP_SCRIPT.md#local-start-script).
 
 Stopping or removing the host the desktop is connected to switches the desktop back to **This computer**
 first. In the host switcher, a stopped sandbox reads **Stopped · Select to start**: choosing it starts the

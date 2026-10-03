@@ -99,6 +99,19 @@ export function getCloudGitHubNotice(sandbox: CloudSandboxView): { kind: 'ok' | 
   return { kind: 'warning', text: `⚠ GitHub sign-in didn't finish: ${github.message}` };
 }
 
+/**
+ * The sandbox row's line about the local start script's last run for it: why it didn't refresh the variables (the
+ * sandbox kept the ones it had), or the reserved names it skipped. Never a value.
+ */
+export function getCloudLocalStartNotice(sandbox: CloudSandboxView): { kind: 'warning' | 'info'; text: string } | null {
+  const run = sandbox.localStart;
+  if (!run) return null;
+  if (run.state === 'failed') return { kind: 'warning', text: `⚠ Local start script failed (exit ${run.exitCode})` };
+  if (run.state === 'timeout') return { kind: 'warning', text: `⚠ Local start script timed out after ${run.seconds} s` };
+  if (run.state === 'error') return { kind: 'warning', text: `⚠ Local start script didn't run: ${run.message}` };
+  return { kind: 'info', text: `Local start script: skipped reserved names ${run.reserved.join(', ')}` };
+}
+
 /** One entry per sandbox: while a sandbox is being created, its create (with the progress) stands for it. */
 export function getCloudSandboxRows(sandboxes: CloudSandboxView[]): CloudSandboxView[] {
   const creating = new Set(sandboxes.filter((sandbox) => sandbox.state === 'creating' && !sandbox.hostname).map((sandbox) => sandbox.label));

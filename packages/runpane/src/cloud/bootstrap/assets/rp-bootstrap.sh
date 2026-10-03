@@ -694,6 +694,8 @@ UNIT
 STARTUP_SCRIPT="$HOME/.config/runpane-cloud/startup.sh"
 STARTUP_STATUS="$HOME/.local/state/runpane-cloud/startup-status.json"
 STARTUP_UNIT=rp-user-startup.service
+LOCAL_ENV="$HOME/.config/runpane-cloud/local-env"
+LOCAL_ENV_LOADER="$HOME/.config/runpane-cloud/local-env.sh"
 
 install_startup_unit() {
   sudo install -m 755 "$RP_SCRIPTS/rp-user-startup.sh" "$RP_SBIN/rp-user-startup"
@@ -760,8 +762,9 @@ step_startup_run() {
   if [ "$(systemctl is-active "$STARTUP_UNIT" 2>/dev/null)" = activating ]; then
     state=busy
   elif [ -s "$STARTUP_SCRIPT" ]; then
-    if [ "$mode" = always ] || ! python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); sys.exit(0 if s.get("sha256")==sys.argv[2] and s.get("finishedAt") else 1)' \
-        "$STARTUP_STATUS" "$(sha256sum "$STARTUP_SCRIPT" | cut -d' ' -f1)" 2>/dev/null; then
+    # if-changed: the last run used this script AND this local env (its sha, or none).
+    if [ "$mode" = always ] || ! python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); sys.exit(0 if s.get("sha256")==sys.argv[2] and s.get("envSha256")==(sys.argv[3] or None) and s.get("finishedAt") else 1)' \
+        "$STARTUP_STATUS" "$(sha256sum "$STARTUP_SCRIPT" | cut -d' ' -f1)" "$( [ -f "$LOCAL_ENV" ] && sha256sum "$LOCAL_ENV" | cut -d' ' -f1)" 2>/dev/null; then
       sudo systemctl start --no-block "$STARTUP_UNIT" || fail "could not start $STARTUP_UNIT"
       state=started
     fi
@@ -849,6 +852,65 @@ step_github_auth() {
   result "$(printf '{"ok":true,"state":"signed-in","user":"%s"}' "$user")"
 }
 
+# local-env-install <uploaded env file | "">: the variables the user's LOCAL start script printed (Settings > Cloud
+# sandboxes > Local start script), for this sandbox only. The upload came through boat's files API (never a command
+# line). Only `export NAME='value'` lines are kept (single quotes, ' as '\''), so sourcing never runs a value; reserved
+# names (the sandbox's own runtime and sign-ins) are dropped. Values are never printed: the result has counts and the
+# dropped reserved NAMES. No upload: the env file is removed, so no stale values stay. Then terminals (~/.bashrc),
+# login shells (~/.profile) and every bash the daemon's agents run (BASH_ENV, a daemon drop-in) source the loader.
+step_local_env_install() {
+  local upload="${1:-}" dropin="$HOME/.config/systemd/user/pane-remote-daemon.service.d" filtered rc
+  mkdir -p "$(dirname "$LOCAL_ENV")"
+  if [ -n "$upload" ]; then
+    [ -f "$upload" ] || fail "local-env-install: no uploaded env file"
+    # shellcheck disable=SC2064 # the path is fixed now
+    trap "shred -u '$upload' 2>/dev/null || rm -f '$upload'" EXIT
+    filtered="$(python3 - "$upload" "$LOCAL_ENV" <<'PY'
+import json, re, sys
+line_re = re.compile(r"^export ([A-Za-z_][A-Za-z0-9_]*)='((?:[^']|'\\'')*)'$")
+reserved_exact = {"PATH", "HOME", "USER", "SHELL", "BASH_ENV", "ENV", "IFS", "GITHUB_TOKEN"}
+reserved_prefix = ("LD_", "GIT_", "SSH_", "PANE_", "RUNPANE_", "CLAUDE_", "ANTHROPIC_", "GH_")
+kept, dropped, reserved = [], 0, set()
+for line in open(sys.argv[1], encoding="utf-8", errors="surrogateescape", newline="").read().split("\n"):
+    if line == "":
+        continue
+    match = line_re.match(line)
+    if not match:
+        dropped += 1
+        continue
+    name = match.group(1)
+    if name in reserved_exact or name.startswith(reserved_prefix):
+        dropped += 1
+        reserved.add(name)
+        continue
+    kept.append(line)
+with open(sys.argv[2], "w", encoding="utf-8", errors="surrogateescape", newline="") as out:  # in place, never renamed
+    out.write("".join(item + "\n" for item in kept))
+result = {"ok": True, "keys": len(kept), "dropped": dropped}
+if reserved:
+    result["reserved"] = sorted(reserved)
+print(json.dumps(result, separators=(",", ":")))
+PY
+)" || fail "local-env-install: could not write the env file"
+    chmod 600 "$LOCAL_ENV"
+  else
+    rm -f "$LOCAL_ENV"
+    filtered='{"ok":true,"keys":0,"dropped":0}'
+  fi
+  printf '%s\n' "# runpane-cloud: the local start script's variables (Settings > Cloud sandboxes > Local start script)." \
+    'if [ -r "$HOME/.config/runpane-cloud/local-env" ]; then . "$HOME/.config/runpane-cloud/local-env"; fi' >"$LOCAL_ENV_LOADER"
+  for rc in "$HOME/.bashrc" "$HOME/.profile"; do
+    grep -q "runpane-cloud local-env" "$rc" 2>/dev/null \
+      || printf '\n%s\n' '[ -r "$HOME/.config/runpane-cloud/local-env.sh" ] && . "$HOME/.config/runpane-cloud/local-env.sh" # runpane-cloud local-env' >>"$rc"
+  done
+  mkdir -p "$dropin"
+  printf '[Service]\nEnvironment=BASH_ENV=%%h/.config/runpane-cloud/local-env.sh\n' >"$dropin/local-env.conf"
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  rc=0
+  result "$filtered"
+  return "$rc"
+}
+
 step="${1:-}"; shift || true
 case "$step" in
   identity) step_identity "$@" ;;
@@ -876,5 +938,6 @@ case "$step" in
   startup-log) step_startup_log ;;
   os-hostname) step_os_hostname "$@" ;;
   github-auth) step_github_auth "$@" ;;
+  local-env-install) step_local_env_install "$@" ;;
   *) fail "unknown step '$step'" ;;
 esac

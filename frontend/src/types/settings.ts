@@ -59,6 +59,7 @@ export type SettingsSettingId =
   | 'remote-cloud-sandboxes'
   | 'remote-cloud-startup-script'
   | 'remote-cloud-github-token'
+  | 'remote-cloud-local-start-script'
   | 'voice-transcription'
   | 'keyboard-shortcuts'
   | 'command-palette-shortcut'

@@ -11,6 +11,7 @@ type CloudMockControls = {
   getCloudCalls(): Array<{ action: CloudSandboxAction; id: string }>;
   getCloudCredentialUpdateKeys(): string[][];
   getCloudStartupScriptSaves(): string[];
+  getCloudLocalStartScriptSaves(): Array<{ shell: string; script: string }>;
   setCloudStartupLog(id: string, log: string): void;
 };
 
@@ -321,7 +322,7 @@ test('the startup script is edited once for every sandbox, with no sandbox yet, 
   await editor.fill('echo "E2E_MARKER $(date -Is)" >> ~/e2e-startup-marker.log\n');
   await save.click();
 
-  await expect(page.getByText('Saved', { exact: true })).toBeVisible();
+  await expect(page.locator('[data-setting-id="remote-cloud-startup-script"]').getByText('Saved', { exact: true })).toBeVisible();
   await expect(save).toBeDisabled();
   expect(await cloudMock(page, (mock) => mock.getCloudStartupScriptSaves())).toEqual(['echo "E2E_MARKER $(date -Is)" >> ~/e2e-startup-marker.log\n']);
   await page.screenshot({ path: testInfo.outputPath('cloud-startup-script-editor.png'), fullPage: true });
@@ -451,4 +452,64 @@ test('a sandbox being created shows once, with its startup script step visible, 
   await step.scrollIntoViewIfNeeded();
   await expect(step).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('cloud-create-once.png'), fullPage: true });
+});
+
+test('adding a sandbox warns about missing setup, and each link focuses its field', async ({ page }, testInfo) => {
+  await installElectronApiMock(page, { cloudSandboxes: { credentials: { ...ALL_CREDENTIALS, github: false }, sandboxes: [] } });
+  await openRemoteAccess(page);
+
+  const warning = page.getByRole('status', { name: 'Setup a new sandbox would miss' });
+  await expect(warning).toContainText('No GitHub token is set.');
+  // Non-blocking: the sandbox can still be added.
+  await page.getByLabel('Name', { exact: true }).fill('alpha');
+  await expect(page.getByRole('button', { name: 'Add Cloud Sandbox' })).toBeEnabled();
+  await warning.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('setup-warning.png') });
+
+  await warning.getByRole('button', { name: 'Set a GitHub token' }).click();
+  await expect(page.locator('#settings-remote-cloud-github-token')).toBeFocused();
+});
+
+test('the setup warning leaves out a GitHub token that is already set', async ({ page }) => {
+  await installElectronApiMock(page, { cloudSandboxes: { credentials: { ...ALL_CREDENTIALS, github: true }, sandboxes: [] } });
+  await openRemoteAccess(page);
+
+  const warning = page.getByRole('status', { name: 'Setup a new sandbox would miss' });
+  await expect(warning.getByRole('button', { name: 'Set a local start script' })).toBeVisible();
+  await expect(warning.getByRole('button', { name: 'Set a GitHub token' })).toHaveCount(0);
+});
+
+test('the local start script is saved on this computer only, and its failures show on the row of the sandbox that ran it', async ({ page }, testInfo) => {
+  await installElectronApiMock(page, {
+    cloudSandboxes: {
+      credentials: { ...ALL_CREDENTIALS, github: true },
+      sandboxes: [
+        cloudSandbox('alpha', { localStart: { state: 'failed', exitCode: 2 } }),
+        cloudSandbox('beta', { localStart: { state: 'timeout', seconds: 60 } }),
+        cloudSandbox('gamma', { localStart: { state: 'ok', reserved: ['PATH'] } }),
+        cloudSandbox('delta'),
+      ],
+      profiles: ['alpha', 'beta', 'gamma', 'delta'].map(cloudProfile),
+    },
+  });
+  await openRemoteAccess(page);
+
+  // E8 (cs-host-terminal's warning) reads the real saved flag: shown until a local start script is saved.
+  const warning = page.getByRole('status', { name: 'Setup a new sandbox would miss' });
+  await expect(warning).toContainText('No local start script is set.');
+  await expect(page.getByText("Fetch secrets here, don't paste them: the script is stored unencrypted.")).toBeVisible();
+  const editor = page.getByRole('textbox', { name: 'Local start script' });
+  await editor.fill('echo "DOPPLER_TOKEN=$(doppler configure get token --plain)"');
+  const before = await cloudMock(page, (mock) => mock.getCloudCalls());
+  await page.getByRole('button', { name: 'Save Local Start Script' }).click();
+  await expect(page.getByRole('button', { name: 'Save Local Start Script' })).toBeDisabled();
+  expect((await cloudMock(page, (mock) => mock.getCloudLocalStartScriptSaves())).at(-1)).toEqual({ shell: 'sh', script: 'echo "DOPPLER_TOKEN=$(doppler configure get token --plain)"' });
+  expect(await cloudMock(page, (mock) => mock.getCloudCalls())).toEqual(before);
+  await expect(warning).toHaveCount(0);
+
+  await expect(page.getByRole('listitem', { name: 'Cloud sandbox alpha' }).getByRole('alert')).toContainText('⚠ Local start script failed (exit 2)');
+  await expect(page.getByRole('listitem', { name: 'Cloud sandbox beta' }).getByRole('alert')).toContainText('⚠ Local start script timed out after 60 s');
+  await expect(page.getByRole('listitem', { name: 'Cloud sandbox gamma' })).toContainText('Local start script: skipped reserved names PATH');
+  await expect(page.getByRole('listitem', { name: 'Cloud sandbox delta' })).not.toContainText('Local start script');
+  await page.screenshot({ path: testInfo.outputPath('cloud-local-start-script.png'), fullPage: true });
 });

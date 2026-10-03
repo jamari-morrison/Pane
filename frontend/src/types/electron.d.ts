@@ -22,6 +22,7 @@ import type {
 } from '../../../shared/types/remoteDaemon';
 import type {
   CloudCredentialsUpdate,
+  CloudLocalStartScript,
   CloudSandboxCreateRequest,
   CloudSandboxesSnapshot,
 } from '../../../shared/types/cloudSandboxes';
@@ -372,6 +373,8 @@ interface ElectronAPI {
     getCloudStartupScript: () => Promise<IPCResponse<{ script: string }>>;
     saveCloudStartupScript: (script: string) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
     readCloudSandboxStartupLog: (id: string) => Promise<IPCResponse<{ log: string }>>;
+    getCloudLocalStartScript: () => Promise<IPCResponse<CloudLocalStartScript>>;
+    saveCloudLocalStartScript: (settings: CloudLocalStartScript) => Promise<IPCResponse<CloudSandboxesSnapshot>>;
     /** Main saved or forgot a host on its own (e.g. a cloud sandbox); refetch the config. */
     onProfilesChanged: (callback: () => void) => () => void;
     onCloudSandboxesChanged: (callback: (snapshot: CloudSandboxesSnapshot) => void) => () => void;

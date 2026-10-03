@@ -72,6 +72,26 @@ export interface CloudSandboxStartupScriptView {
   error?: string;
 }
 
+/** The shell the local start script runs in: sh on macOS and Linux; PowerShell or cmd on Windows. */
+export type CloudLocalStartScriptShell = 'sh' | 'powershell' | 'cmd';
+
+/** The user's local start script, run on this computer before each sandbox create and start. */
+export interface CloudLocalStartScript {
+  shell: CloudLocalStartScriptShell;
+  script: string;
+}
+
+/**
+ * The local start script's last run for a sandbox, when there is something to say. `ok` with the reserved names it
+ * printed and that were dropped; `failed`, `timeout` or `error` (fixed text): the sandbox kept its previous variables.
+ * Never a value.
+ */
+export type CloudSandboxLocalStartView =
+  | { state: 'ok'; reserved: string[] }
+  | { state: 'failed'; exitCode: number }
+  | { state: 'timeout'; seconds: number }
+  | { state: 'error'; message: string };
+
 export interface CloudSandboxView {
   /** The tailnet hostname once known; a create in flight uses `create:<name>`. */
   id: string;
@@ -100,6 +120,8 @@ export interface CloudSandboxView {
   startupScript?: CloudSandboxStartupScriptView;
   /** GitHub sign-in with the saved token; absent when no token is saved or it wasn't applied since this app started. */
   github?: CloudSandboxGitHubView;
+  /** The local start script's last run for this sandbox; absent when it ran fine or there is none. */
+  localStart?: CloudSandboxLocalStartView;
 }
 
 export interface CloudSandboxesSnapshot {
@@ -107,6 +129,8 @@ export interface CloudSandboxesSnapshot {
   available: boolean;
   credentials: CloudCredentialStatus;
   sandboxes: CloudSandboxView[];
+  /** A non-blank local start script is saved. */
+  localStartScriptSet: boolean;
   /** Listing failed (for example, the provider is unreachable); the last known rows are kept. */
   loadError?: string;
 }
@@ -116,6 +140,7 @@ export function createDefaultCloudSandboxesSnapshot(): CloudSandboxesSnapshot {
     available: false,
     credentials: { boat: false, tailscale: false, claude: false, github: false },
     sandboxes: [],
+    localStartScriptSet: false,
   };
 }
 

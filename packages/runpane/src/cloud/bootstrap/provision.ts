@@ -36,6 +36,7 @@ export type ProvisionStepName =
   | 'firewall'
   | 'tailscale-join'
   | 'agent-env'
+  | 'local-env'
   | 'agent-prompts'
   | 'install-pane'
   | 'pairing'
@@ -65,6 +66,11 @@ export interface ProvisionOptions {
    * 0600 file in the sandbox and never logged.
    */
   agentEnv?: string;
+  /**
+   * The local start script's variables for this sandbox (`export NAME='value'` lines; '' removes them). Undefined
+   * leaves the sandbox's file alone. Sent as file content only, never logged.
+   */
+  localEnv?: string;
   /**
    * How clients reach the daemon. `https` is Tailscale Serve with a Let's Encrypt certificate; `http` serves plain
    * TCP inside the tailnet (WireGuard encrypts it; the phone PWA can't use it). `auto` (default) tries HTTPS and
@@ -185,6 +191,12 @@ export async function provisionSandbox(sandbox: SandboxHandle, options: Provisio
       await sandbox.writeFile(envFile, agentEnv.endsWith('\n') ? agentEnv : `${agentEnv}\n`);
       return runner.run('agent-env', [envFile], envelopeSchema, { timeoutSeconds: 60 });
     });
+  }
+
+  // Before Pane installs, so its daemon starts with BASH_ENV pointing at the loader.
+  if (options.localEnv !== undefined) {
+    const localEnv = options.localEnv;
+    await step('local-env', () => writeLocalEnv(sandbox, localEnv, home), (value) => `${value.keys} variable(s)`);
   }
 
   // Claude Code's folder-trust prompt defaults to exit and nobody watches a new panel: answer it up front.
@@ -400,6 +412,30 @@ export async function applyGitHubToken(sandbox: SandboxHandle, token: string | u
   return { state: 'error', message: GITHUB_AUTH_ERRORS.get(result.reason ?? '') ?? GITHUB_AUTH_FAILED };
 }
 
+/**
+ * Gives the sandbox the variables the user's LOCAL start script printed (`export NAME='value'` lines from
+ * formatLocalEnvFile), or removes them when `envFile` is blank. The content goes only through boat's files API into the
+ * 0700 state dir; the sandbox step keeps safe lines, drops reserved names and writes ~/.config/runpane-cloud/local-env
+ * (0600). Resolves the variable count and the dropped reserved names (names only, never values).
+ */
+export async function writeLocalEnv(sandbox: SandboxHandle, envFile: string, sandboxHome = DEFAULT_SANDBOX_HOME): Promise<{ keys: number; reserved: string[] }> {
+  await uploadScripts(sandbox, sandboxHome);
+  let upload = '';
+  if (envFile.trim()) {
+    upload = path.posix.join(stateDir(sandboxHome), `local-env-${crypto.randomBytes(6).toString('hex')}`);
+    await sandbox.writeFile(upload, envFile);
+  }
+  try {
+    const result = await new StepRunner(sandbox, sandboxHome).run('local-env-install', [upload], localEnvStepSchema, { timeoutSeconds: 60 });
+    return { keys: result.keys, reserved: result.reserved ?? [] };
+  } catch (error) {
+    if (upload) {
+      await sandbox.runScript(`shred -u ${shellQuote(upload)} 2>/dev/null || rm -f ${shellQuote(upload)}`, { timeoutSeconds: 30 }).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
 /** The user's startup script's last run, from the sandbox's startup-status.json. */
 export interface StartupScriptStatus {
   /** null while the script runs. */
@@ -409,6 +445,8 @@ export interface StartupScriptStatus {
   finishedAt: string | null;
   /** The script that ran. */
   sha256: string;
+  /** The local env it ran with (null: none; absent: a runner from before the local start script). */
+  envSha256?: string | null;
   /** Killed at the 10 minute limit. */
   timedOut: boolean;
 }
@@ -577,6 +615,11 @@ const serveGuardStepSchema = boundary.object({
   applied: boundary.optional(boundary.boolean),
   detail: boundary.optional(boundary.string),
 });
+const localEnvStepSchema = boundary.object({
+  keys: boundary.number,
+  dropped: boundary.optional(boundary.number),
+  reserved: boundary.optional(boundary.array(boundary.string)),
+});
 const githubAuthStepSchema = boundary.object({
   state: boundary.enumeration('signed-in', 'invalid', 'error'),
   user: boundary.optional(boundary.string),
@@ -585,6 +628,7 @@ const githubAuthStepSchema = boundary.object({
 const hostnameStepSchema = boundary.object({ hostname: boundary.string });
 const startupInstallStepSchema = boundary.object({ sha256: boundary.optional(boundary.nullable(boundary.string)) });
 const startupStatusSchema = boundary.object({
+  envSha256: boundary.optional(boundary.nullable(boundary.string)),
   exitCode: boundary.nullable(boundary.number),
   startedAt: boundary.string,
   finishedAt: boundary.nullable(boundary.string),

@@ -7,6 +7,7 @@ import {
   provisionSandbox,
   pushStartupScript,
   applyGitHubToken,
+  writeLocalEnv,
   readStartupLog,
   redact,
   setSandboxHostname,
@@ -346,4 +347,46 @@ test('applyGitHubToken removes the uploaded token file when the step never runs'
   const file = [...sandbox.files.keys()].find((name) => name.includes('/gh-token-')) ?? '';
   assert.ok(sandbox.scripts.some((script) => script.startsWith('shred -u ') && script.includes(file)), 'the file is removed');
   for (const script of sandbox.scripts) assert.ok(!script.includes(GITHUB_TOKEN), 'the token is in no command string');
+});
+
+const LOCAL_ENV = "export DOPPLER_TOKEN='FAKE-LOCAL-ENV-provision-SECRET'\n";
+
+test('writeLocalEnv sends the env only as file content, and an empty env removes the file', async () => {
+  const sandbox = recordingSandbox(new Map([['local-env-install', (args: string[]) => ({ ok: true, keys: args[0] ? 1 : 0, dropped: 0 })]]));
+  assert.deepEqual(await writeLocalEnv(sandbox.handle, LOCAL_ENV), { keys: 1, reserved: [] });
+  const [file] = sandbox.steps.find((step) => step.name === 'local-env-install')?.args ?? [];
+  assert.match(file, /^\/home\/user\/\.runpane-cloud\/local-env-[0-9a-f]{12}$/u);
+  assert.equal(sandbox.files.get(file), LOCAL_ENV);
+  for (const script of sandbox.scripts) assert.ok(!script.includes('FAKE-LOCAL-ENV'), 'no value in any command string');
+
+  assert.deepEqual(await writeLocalEnv(sandbox.handle, ''), { keys: 0, reserved: [] });
+  assert.deepEqual(sandbox.steps.at(-1), { name: 'local-env-install', args: [''] });
+});
+
+test('writeLocalEnv reports dropped reserved names and removes the upload when the step never runs', async () => {
+  const reserved = recordingSandbox(new Map([['local-env-install', answer({ ok: true, keys: 1, dropped: 1, reserved: ['PATH'] })]]));
+  assert.deepEqual(await writeLocalEnv(reserved.handle, LOCAL_ENV), { keys: 1, reserved: ['PATH'] });
+
+  const broken = recordingSandbox(new Map());
+  const runScript = broken.handle.runScript;
+  broken.handle.runScript = async (script, options) => {
+    if (script.includes("'local-env-install'")) throw new Error('boat exec failed');
+    return runScript(script, options);
+  };
+  await assert.rejects(writeLocalEnv(broken.handle, LOCAL_ENV), /boat exec failed/u);
+  const file = [...broken.files.keys()].find((name) => name.includes('/local-env-')) ?? '';
+  assert.ok(broken.scripts.some((script) => script.startsWith('shred -u ') && script.includes(file)), 'the upload is removed');
+});
+
+test('provisioning installs the local env before Pane, so the daemon starts with BASH_ENV', async () => {
+  const answers = freshSandboxAnswers();
+  answers.set('local-env-install', answer({ ok: true, keys: 1, dropped: 0 }));
+  const sandbox = fakeSandbox(answers);
+  await provisionSandbox(sandbox.handle, {
+    sessionId: 'abc12345xyz', label: 'Cloud', hostname: 'rp-abc12345', tailscale: fakeTailnet().api,
+    paneSource: { kind: 'deb-url', url: 'https://example.com/pane.deb', sha256: 'a'.repeat(64) },
+    localEnv: LOCAL_ENV, fetchImpl: healthFetch([`https://${FQDN}`]),
+  });
+  const names = sandbox.names();
+  assert.ok(names.indexOf('local-env-install') > -1 && names.indexOf('local-env-install') < names.indexOf('install-pane'));
 });

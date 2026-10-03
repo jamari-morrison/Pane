@@ -8,6 +8,7 @@ import { Textarea } from '../ui/Textarea';
 import { SettingsSection } from '../ui/SettingsSection';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { SettingRow } from './SettingRow';
+import { CloudSandboxSetupWarning } from './CloudSandboxSetupWarning';
 import { SegmentedControl } from './SettingsControls';
 import { API, type IPCResponse } from '../../utils/api';
 import { useCloudSandboxes } from '../../hooks/useCloudSandboxes';
@@ -16,6 +17,7 @@ import {
   formatCloudUptime,
   getCloudSandboxActions,
   getCloudGitHubNotice,
+  getCloudLocalStartNotice,
   getCloudSandboxBadge,
   getCloudSandboxRows,
   getCloudStartupScriptNotice,
@@ -23,9 +25,12 @@ import {
   STARTUP_SCRIPT_WARNING,
   type CloudSandboxRowAction,
 } from '../../utils/cloudSandboxPresentation';
+import { isWindows } from '../../utils/platformUtils';
 import {
   getCloudSandboxNameError,
   type CloudCredentialStatus,
+  type CloudLocalStartScript,
+  type CloudLocalStartScriptShell,
   type CloudCredentialsUpdate,
   type CloudSandboxCreateRequest,
   type CloudSandboxesSnapshot,
@@ -133,12 +138,14 @@ export function CloudSandboxesSettings({ onTerminalOpened }: { onTerminalOpened:
             description={canCreate ? 'Each sandbox shows up in the host switcher like any other remote host.' : 'Save the boat API key and Tailscale OAuth client first.'}
             align="start"
           >
+            <CloudSandboxSetupWarning githubTokenSet={snapshot.credentials.github} localStartScriptSet={snapshot.localStartScriptSet} />
             <AddCloudSandboxForm
               disabled={!canCreate}
               takenNames={snapshot.sandboxes.map((sandbox) => sandbox.label)}
               onCreate={(createRequest) => void send(() => API.remoteDaemon.createCloudSandbox(createRequest))}
             />
           </SettingRow>
+          <LocalStartScriptRow send={send} />
           <StartupScriptRow textareaRef={startupScriptRef} send={send} />
           {snapshot.sandboxes.length > 0 && (
             <ul className="divide-y divide-border-secondary" aria-label="Cloud sandboxes">
@@ -338,6 +345,89 @@ function StartupScriptRow({ textareaRef, send }: { textareaRef: RefObject<HTMLTe
   );
 }
 
+const LOCAL_SHELL_OPTIONS: Array<{ id: CloudLocalStartScriptShell; label: string }> = [
+  { id: 'powershell', label: 'PowerShell' },
+  { id: 'cmd', label: 'cmd' },
+];
+
+/**
+ * The local start script: it runs on THIS computer before each sandbox is created or started, and the KEY=VALUE lines
+ * it prints become variables on that one sandbox. Saving runs nothing and sends nothing.
+ */
+function LocalStartScriptRow({ send }: { send: SendCloudRequest }) {
+  const windows = isWindows();
+  const [shell, setShell] = useState<CloudLocalStartScriptShell>(windows ? 'powershell' : 'sh');
+  const [script, setScript] = useState('');
+  const [saved, setSaved] = useState<CloudLocalStartScript | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void API.remoteDaemon.getCloudLocalStartScript().then((response) => {
+      if (cancelled) return;
+      if (!response.success || !response.data) {
+        setLoadError(response.error || 'Could not read the local start script');
+        return;
+      }
+      setShell(response.data.shell);
+      setScript(response.data.script);
+      setSaved(response.data);
+    }).catch((error) => {
+      if (!cancelled) setLoadError(error instanceof Error ? error.message : 'Could not read the local start script');
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const unchanged = saved !== null && saved.script === script && saved.shell === shell;
+  const save = async () => {
+    setSaving(true);
+    try {
+      if (await send(() => API.remoteDaemon.saveCloudLocalStartScript({ shell, script }))) setSaved({ shell, script });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <SettingRow
+      settingId="remote-cloud-local-start-script"
+      label="Local start script"
+      description="Runs on this computer each time a sandbox is created or started. Every KEY=VALUE line it prints becomes a variable on that sandbox only, in its terminals, its agents' shells and its startup script."
+      align="start"
+    >
+      <div className="w-full space-y-3 sm:w-[460px]">
+        <p className="flex items-center gap-2 text-sm text-status-warning">
+          <AlertTriangle className="h-4 w-4 flex-none" aria-hidden="true" />
+          Fetch secrets here, don't paste them: the script is stored unencrypted.
+        </p>
+        {windows && <SegmentedControl label="Shell" columns={2} value={shell === 'sh' ? 'powershell' : shell} options={LOCAL_SHELL_OPTIONS} onChange={setShell} />}
+        <Textarea
+          aria-label="Local start script"
+          className="font-mono text-xs"
+          rows={5}
+          spellCheck={false}
+          value={script}
+          onChange={(event) => setScript(event.target.value)}
+          placeholder={shell === 'sh' ? 'echo "DOPPLER_TOKEN=$(doppler configure get token --plain)"' : shell === 'cmd' ? 'for /f %t in (\'doppler configure get token --plain\') do @echo DOPPLER_TOKEN=%t' : '"DOPPLER_TOKEN=$(doppler configure get token --plain)"'}
+          disabled={saved === null && !loadError}
+          error={loadError}
+          helperText="Stopped after 60 s. Values are never shown or logged; names like PATH, HOME or GITHUB_TOKEN are skipped."
+          fullWidth
+        />
+        <div className="flex items-center justify-end gap-2">
+          {unchanged && <span className="text-xs text-text-tertiary" role="status">Saved</span>}
+          <Button type="button" size="sm" loading={saving} disabled={saved === null || unchanged} onClick={() => void save()}>
+            Save Local Start Script
+          </Button>
+        </div>
+      </div>
+    </SettingRow>
+  );
+}
+
 /** The last 200 lines of a sandbox's startup log, read when the dialog opens. */
 function StartupLogDialog({ sandbox, onClose }: { sandbox: CloudSandboxView; onClose: () => void }) {
   const [log, setLog] = useState<string | null>(null);
@@ -487,6 +577,7 @@ function CloudSandboxRow({ sandbox, now, onAction, onViewLog }: {
   const badge = getCloudSandboxBadge(sandbox);
   const startupNotice = getCloudStartupScriptNotice(sandbox);
   const githubNotice = getCloudGitHubNotice(sandbox);
+  const localStartNotice = getCloudLocalStartNotice(sandbox);
   const details = [
     sandbox.hostname,
     sandbox.size,
@@ -551,6 +642,14 @@ function CloudSandboxRow({ sandbox, now, onAction, onViewLog }: {
           role={githubNotice.kind === 'ok' ? 'status' : 'alert'}
         >
           {githubNotice.text}
+        </p>
+      )}
+      {localStartNotice && (
+        <p
+          className={localStartNotice.kind === 'info' ? 'text-xs text-text-secondary' : 'text-xs text-status-warning'}
+          role={localStartNotice.kind === 'info' ? 'status' : 'alert'}
+        >
+          {localStartNotice.text}
         </p>
       )}
       {startupNotice?.kind === 'running' && (

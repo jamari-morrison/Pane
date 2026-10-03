@@ -24,6 +24,7 @@ import type {
 } from '../../shared/types/remoteDaemon';
 import type {
   CloudCredentialsUpdate,
+  CloudLocalStartScript,
   CloudSandboxCreateRequest,
   CloudSandboxesSnapshot,
 } from '../../shared/types/cloudSandboxes';
@@ -657,6 +658,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getCloudStartupScript: (): Promise<IPCResponse<{ script: string }>> => invokeIpc('remote-daemon:get-cloud-startup-script'),
     saveCloudStartupScript: (script: string): Promise<IPCResponse<CloudSandboxesSnapshot>> =>
       invokeIpc('remote-daemon:save-cloud-startup-script', script),
+    getCloudLocalStartScript: (): Promise<IPCResponse<CloudLocalStartScript>> => invokeIpc('remote-daemon:get-cloud-local-start-script'),
+    saveCloudLocalStartScript: (settings: CloudLocalStartScript): Promise<IPCResponse<CloudSandboxesSnapshot>> =>
+      invokeIpc('remote-daemon:save-cloud-local-start-script', settings),
     readCloudSandboxStartupLog: (id: string): Promise<IPCResponse<{ log: string }>> =>
       invokeIpc('remote-daemon:read-cloud-sandbox-startup-log', id),
     onProfilesChanged: (callback: () => void) => {

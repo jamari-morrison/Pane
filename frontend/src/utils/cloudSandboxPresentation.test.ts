@@ -6,6 +6,7 @@ import {
   getCloudSandboxActions,
   getCloudSandboxBadge,
   getCloudGitHubNotice,
+  getCloudLocalStartNotice,
   getCloudSandboxRows,
   getCloudStartupScriptNotice,
   getCloudStepLabel,
@@ -200,5 +201,19 @@ describe('getCloudSandboxRows', () => {
     // A failed create's row is not a create in progress.
     const failed = sandbox({ id: 'create:alpha', hostname: undefined, state: 'error', failedAction: 'create' });
     expect(getCloudSandboxRows([failed, listed]).map((row) => row.id)).toEqual(['create:alpha', 'rp-alpha']);
+  });
+});
+
+describe('getCloudLocalStartNotice', () => {
+  it.each<[string, CloudSandboxView['localStart'], ReturnType<typeof getCloudLocalStartNotice>]>([
+    ['ran fine or none', undefined, null],
+    ['non-zero exit', { state: 'failed', exitCode: 2 }, { kind: 'warning', text: '⚠ Local start script failed (exit 2)' }],
+    ['timed out', { state: 'timeout', seconds: 60 }, { kind: 'warning', text: '⚠ Local start script timed out after 60 s' }],
+    ["couldn't run", { state: 'error', message: "Couldn't start PowerShell for the local start script." },
+      { kind: 'warning', text: "⚠ Local start script didn't run: Couldn't start PowerShell for the local start script." }],
+    ['reserved names dropped', { state: 'ok', reserved: ['HOME', 'PATH'] },
+      { kind: 'info', text: 'Local start script: skipped reserved names HOME, PATH' }],
+  ])('%s', (_name, localStart, notice) => {
+    expect(getCloudLocalStartNotice(sandbox({ localStart }))).toEqual(notice);
   });
 });
