@@ -44,15 +44,21 @@ $names = @{ MODE = 'relay'; PANE_BIN = $exe; PANE_DATA_DIR = $PaneDir; WORK = $O
 foreach ($name in $names.Keys) { if ($names[$name]) { Set-Item "Env:\$name" $names[$name] } }
 $env:ELECTRON_RUN_AS_NODE = '1'
 $console = Join-Path $OutDir 'proof.console.txt'
+$code = 1
 try {
   # Piped, so PowerShell waits for it and every line (the pause instructions above all) shows as it happens.
+  # 'Continue': in Windows PowerShell 5.1 a native command's stderr line under 'Stop' is a terminating
+  # NativeCommandError, which cut the kit off at Electron's first warning (windows-latest launcher smoke).
+  $ErrorActionPreference = 'Continue'
   & $exe (Join-Path $kit 'real-user.mjs') 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $console
   $code = $LASTEXITCODE
 } finally {
+  $ErrorActionPreference = 'Stop'
   foreach ($name in @($names.Keys) + 'ELECTRON_RUN_AS_NODE') { Remove-Item "Env:\$name" -ErrorAction SilentlyContinue }
+  # The evidence goes back whatever happened.
+  $zip = "$OutDir.zip"
+  Compress-Archive -Path "$OutDir\*" -DestinationPath $zip -Force
+  Write-Host "Evidence: $OutDir"
+  Write-Host "Zip (send this back): $zip"
 }
-$zip = "$OutDir.zip"
-Compress-Archive -Path "$OutDir\*" -DestinationPath $zip -Force
-Write-Host "Evidence: $OutDir"
-Write-Host "Zip (send this back): $zip"
 exit $code
