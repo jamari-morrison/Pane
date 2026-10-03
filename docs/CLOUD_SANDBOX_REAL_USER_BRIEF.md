@@ -142,6 +142,22 @@ Main area tab:   [☁ testina · Terminal ×]
   - Create's progress shows "Running your startup script…" while it runs.
 - **Red's Doppler install is just his script content,** not product code. For example: `command -v doppler >/dev/null || curl -Ls --tlsv1.2 --proto "=https" https://cli.doppler.com/install.sh | sudo sh`. He then runs `doppler login` himself in the terminal.
 
+### E7. Local start script (Red, 2026-10-03 1:32 PM PT; cloud sandboxes; in the final build before Run 8)
+
+- **Where:** Settings > Cloud sandboxes > "Local start script". The user writes a script there. It runs on the user's LOCAL machine (Windows: PowerShell or cmd; macOS/Linux: sh).
+- **When:** on every sandbox Create and Start, BEFORE the remote startup script (E5).
+- **Output:** stdout lines in KEY=VALUE form are sent to the sandbox as an owner-only env file, e.g. `~/.config/runpane-cloud/local-env`, mode 0600.
+- **Use:** the remote startup script (E5) and agent/terminal shells source that file.
+- **Secrets:** values are never logged or printed. Logs show key names only.
+- **Failure:** it has a timeout, and failures show on the sandbox row like E5's.
+- **Docs example:** `doppler configure get token --plain` -> `DOPPLER_TOKEN=...`
+
+### E8. Setup warning on Create (Red, 2026-10-03 1:32 PM PT)
+
+- The Create sandbox dialog shows a NON-BLOCKING warning when no GitHub token (E6) is set, no local start script (E7) is set, or both are missing.
+- Each missing item gets a link that opens Settings with focus on that field.
+- The warning goes away once both are set.
+
 ### What exists today (answer to Red's question 4)
 - **Image:** boat's stock image. The app sends only size, `ttlSeconds:null` and `noEnv:true`, with no custom image, golden or fork. A fresh sandbox checked today has Ubuntu 24.04 with Claude Code 2.1.288, Codex 0.160.0, gh 2.97, git 2.43 and node 24, preinstalled by boat. Doppler is not there.
 - **Setup on Create** (`rp-bootstrap.sh`, run over the boat command API): identity reset, Tailscale install and join, firewall, Claude token, Claude prompts, Pane .deb install with linger, pairing, Serve, and the Claude model.
@@ -169,6 +185,11 @@ The test kit is a Playwright attach to the PaneCloudSandbox Electron window. It 
 | D9 | cleanup | The orchestrator removes the sandbox through the UI (Remove), and its tailnet device is gone. The draft PR stays open for Red to close. | screenshot |
 
 Regression checks: the local host is unchanged (the Browse dialog is native), Red's main Pane is untouched, and his testina sandbox is untouched.
+
+## Done-when additions (Red, 2026-10-03 1:32 PM PT; E7 + E8)
+
+7. Through the real Windows UI, Red sets a local start script that prints a test variable. The variable is present on the sandbox and in a pane terminal, checked by name only (the value is never printed).
+8. The Create dialog shows the warning, with links, when either the GitHub token or the local start script is unset. The warning goes away once both are set.
 
 ## Audit plan (cs-auditor, item by item)
 1. **E1 to E5 design vs code:** each requirement above maps to a commit plus a unit test. Tests: browse-directories (home-rooted, errors), Windows-path rejection, Open vs New semantics, clone error classification table, terminal prefill without Enter, startup unit and status parsing, and failure-chip logic.
