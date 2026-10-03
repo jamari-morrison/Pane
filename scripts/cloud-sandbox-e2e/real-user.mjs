@@ -1081,7 +1081,10 @@ async function d2Token() {
 }
 
 async function codexSignIn(panelId) {
-  await typeInVisibleTerminal('codex login --device-auth');
+  // From the Enter on, the terminal counts as showing a code (masked in shots, cut from the video) until it is cleared,
+  // whether or not the code's format is recognised: a WebGL terminal's text is invisible to the DOM backstops.
+  await typeInVisibleTerminal('codex login --device-auth', { panelId });
+  codeShown('codexDeviceCode', undefined);
   const codexShown = await until(async () => {
     const text = nonEmpty(await screenText(panelId)).slice(-12).join('\n');
     const codexCode = /https:\/\//.test(text) ? deviceCodeIn(text) : undefined;
@@ -1272,6 +1275,7 @@ async function d2() {
   // The user presses Enter on the prefilled line (D3), then answers gh's questions with their defaults.
   await page.locator('.xterm:visible').last().click();
   await page.keyboard.press('Enter');
+  codeShown('ghDeviceCode', undefined);
   let code;
   const shown = await until(async () => {
     const text = nonEmpty(await screenText(panelId)).slice(-8).join('\n');
@@ -1483,6 +1487,13 @@ async function d5() {
   const listed = new RegExp(`${escapeRegExp(session.worktreePath)}\\s+[0-9a-f]{7,}\\s+\\[${escapeRegExp(branch ?? '')}\\]`).test(worktrees.join(''));
   check('pane-branch', Boolean(branch) && listed, `branch ${branch}; worktree list ${JSON.stringify(worktrees)}`);
   await shot('pane-terminal-worktree', { result: true, oracle: { session: state.pane, lines } });
+  // LINK_SELFTEST=1: D8's link click on a URL printed in this terminal (it only records the URL outside SOBECK).
+  if (env.LINK_SELFTEST === '1') {
+    const url = 'https://github.com/jamari-morrison/montlakev2/pull/1';
+    await runInTerminal(panelId, `echo ${url}`);
+    const opened = await clickTerminalLink(/github\.com\/jamari-morrison\/montlakev2\/pull\/\d+/);
+    check('link-click-selftest', opened === url, `the click opened ${opened ?? 'nothing'}`);
+  }
 }
 
 async function agentWhere(agent, toolName) {
