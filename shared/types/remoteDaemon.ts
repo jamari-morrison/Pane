@@ -72,6 +72,19 @@ export interface RemoteDaemonClientRecord {
   lastUsedAt?: string;
 }
 
+/**
+ * Set on profiles for a cloud sandbox (packages/runpane/src/cloud): the host is a Pane daemon on a provider
+ * sandbox. `version` goes up whenever the address or the tailnet node changes.
+ */
+export interface RemotePaneCloudInfo {
+  provider: 'boat';
+  sandboxId: string;
+  sessionId: string;
+  nodeId: string;
+  hostname: string;
+  version: number;
+}
+
 export interface RemotePaneConnectionProfile {
   id: string;
   label: string;
@@ -79,6 +92,7 @@ export interface RemotePaneConnectionProfile {
   token: string;
   transport: RemoteDaemonTransport;
   tunnel?: PaneRemoteConnectionImportPayload['tunnel'];
+  cloud?: RemotePaneCloudInfo;
 }
 
 export interface RemoteDaemonHostAccess {
@@ -436,6 +450,14 @@ const remoteTunnelSchema: BoundarySchema<NonNullable<PaneRemoteConnectionImportP
   selected: boundary.boolean,
   tailscaleIp: boundary.optional(boundary.nonEmptyString),
 });
+const remoteCloudInfoSchema: BoundarySchema<RemotePaneCloudInfo> = boundary.object({
+  provider: boundary.literal('boat'),
+  sandboxId: boundary.nonEmptyString,
+  sessionId: boundary.nonEmptyString,
+  nodeId: boundary.string,
+  hostname: boundary.nonEmptyString,
+  version: boundary.number,
+});
 const remoteProfileSchema: BoundarySchema<RemotePaneConnectionProfile> = boundary.object({
   id: boundary.nonEmptyString,
   label: boundary.nonEmptyString,
@@ -443,6 +465,7 @@ const remoteProfileSchema: BoundarySchema<RemotePaneConnectionProfile> = boundar
   token: boundary.nonEmptyString,
   transport: boundary.literal('http+sse'),
   tunnel: boundary.optional(remoteTunnelSchema),
+  cloud: boundary.optional(remoteCloudInfoSchema),
 });
 const remoteImportSchema = boundary.object({
   v: boundary.literal(1),
