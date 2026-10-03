@@ -1014,14 +1014,26 @@ async function restoreLocalStartScript() {
   if (restored && original.localStart.copy) fs.rmSync(original.localStart.copy, { force: true });
 }
 
+// The saved boat wallet, read by its term (not by position) once the credentials have loaded: Run 8 attempt 1 read ""
+// right after Settings opened, before the values were there.
+async function savedWallet() {
+  const value = () => ui.settingsDialog().getByRole('term').filter({ hasText: /^boat wallet$/ }).first().locator('xpath=following-sibling::*[1]').innerText().then((text) => text.trim(), () => '');
+  return (await until(async () => (await value()) || undefined, 20_000, 500)) ?? await value();
+}
+// Create bills the saved wallet: it must be "test" at the start of D0 AND again right before Add (after PAUSE 1, whose
+// token save must not have changed it). Anything else FAILs and stops before Add, so no start is used.
+async function walletMustBeTest(when) {
+  if (!cloud) return;
+  await openCloud();
+  const wallet = await savedWallet();
+  check(`wallet-is-test-${when}`, wallet === 'test', `the saved boat wallet is "${wallet}"`);
+  if (wallet !== 'test') throw new Error(`the saved boat wallet is "${wallet}", not "test" (${when}): stopped before creating anything`);
+}
+
 async function d0() {
   await openCloud();
   await guardStartupScriptSave('d0');
-  if (relay) {
-    const status = await ui.credentialStatus().allTextContents();
-    check('wallet-is-test', status[1]?.trim() === 'test', `the saved boat wallet is "${status[1] ?? ''}"`);
-    if (status[1]?.trim() !== 'test') throw new Error('the saved boat wallet is not "test": stop before creating anything');
-  }
+  if (relay) await walletMustBeTest('at-start');
   const editor = ui.startupScript();
   await editor.waitFor({ timeout: 10_000 });
   // Whatever the user had there comes back at the end (D9); only its length and hash are recorded.
@@ -1071,6 +1083,8 @@ async function d0() {
     check('setup-warning-gone-when-both-set', tokenSet ? gone : null, tokenSet ? (gone ? 'no warning with a token and a local start script' : 'the warning is still shown') : 'no GitHub token in this run, so the warning stays (expected)');
     await shot('setup-warning-after', { result: true });
   }
+  // Right before Add (only the name fill comes between): the wallet again (orchestrator, exception #4).
+  await walletMustBeTest('before-add');
   // D0_DRY=1: everything up to the Add click (0 starts), to prove the editor and the credentials before spending one.
   if (env.D0_DRY === '1') {
     await ui.nameInput().fill('rp-loop-cs-e2e-dry');
