@@ -44,9 +44,9 @@ describe('saved host kind', () => {
   it('reads a cloud sandbox saved before host kinds existed as a cloud sandbox', () => {
     const cloud = { provider: 'boat' as const, sandboxId: 'bx_1', sessionId: 's1', nodeId: 'n1', hostname: 'rp-s1', version: 1 };
     const config = normalizeRemoteDaemonConfig({
-      client: { profiles: [profile({ label: 'testina', cloud }), profile({ id: 'plain', label: 'devbox' })], activeProfileId: null, mode: 'local' },
+      client: { profiles: [profile({ label: 'sandbox-1', cloud }), profile({ id: 'plain', label: 'devbox' })], activeProfileId: null, mode: 'local' },
     });
-    expect(describeHost(config.client.profiles[0])).toEqual({ name: 'testina', kindLabel: 'cloud sandbox', icon: 'cloud' });
+    expect(describeHost(config.client.profiles[0])).toEqual({ name: 'sandbox-1', kindLabel: 'cloud sandbox', icon: 'cloud' });
     expect(describeHost(config.client.profiles[1])).toEqual({ name: 'devbox', kindLabel: 'remote host', icon: 'server' });
   });
 
@@ -60,6 +60,21 @@ describe('saved host kind', () => {
       { name: 'GH_BROWSER', value: 'false' },
     ]);
     expect(config.client.profiles[1].hostTerminalEnv).toBeUndefined();
+  });
+
+  it('keeps whether gh on the host stores its token in a file', () => {
+    const config = normalizeRemoteDaemonConfig({
+      client: { profiles: [profile({ ghInsecureStorage: true }), profile({ id: 'plain' })], activeProfileId: null, mode: 'local' },
+    });
+    expect(config.client.profiles[0].ghInsecureStorage).toBe(true);
+    expect(config.client.profiles[1].ghInsecureStorage).toBeUndefined();
+  });
+
+  it('drops a profile whose token storage setting is not a boolean', () => {
+    const config = normalizeRemoteDaemonConfig({
+      client: { profiles: [{ ...profile(), ghInsecureStorage: 'yes' }], activeProfileId: null, mode: 'local' },
+    });
+    expect(config.client.profiles).toEqual([]);
   });
 
   it('drops a profile whose host kind has an unknown icon', () => {
