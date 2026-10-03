@@ -1359,7 +1359,8 @@ async function syncedModelOnSandbox() {
   const probe = created?.panelId ?? created?.panel?.id;
   return until(async () => {
     const screen = await daemonInvoke(host.baseUrl, token, 'runpane:panels:screen', { panelId: probe, limit: 40 });
-    const value = String(screen?.text ?? '').match(new RegExp(`${marker}=(\\S*)`))?.[1];
+    // The panel also shows the typed command (`…=$(cat …`); only a model id, or nothing, at a line's end is the output.
+    const value = String(screen?.text ?? '').match(new RegExp(`${marker}=(claude-[A-Za-z0-9._\\[\\]-]+|)[ \\t]*$`, 'm'))?.[1];
     return value === undefined ? undefined : value || null;
   }, 20_000, 1000);
 }
