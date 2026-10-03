@@ -5,7 +5,7 @@ import { EnhancedInput } from './ui/EnhancedInput';
 import { FieldWithTooltip } from './ui/FieldWithTooltip';
 import { API } from '../utils/api';
 import { useNavigationStore } from '../stores/navigationStore';
-import { useCloneDraftStore } from '../stores/cloneDraftStore';
+import { EMPTY_CLONE_DRAFT, LOCAL_CLONE_HOST, useCloneDraftStore, type CloneDraft } from '../stores/cloneDraftStore';
 import { useRemoteRuntimeState } from '../hooks/useRemoteRuntimeState';
 import { openHostTerminal } from '../utils/hostTerminal';
 import { CloneSignInNotice } from './CloneSignInNotice';
@@ -28,10 +28,14 @@ function GitHubIcon({ className }: { className?: string }) {
 }
 
 export function CloneFromGitHubDialog({ isOpen, onClose }: CloneFromGitHubDialogProps) {
-  const { url, destPath, error, signInHost, update: updateDraft, reset: resetDraft } = useCloneDraftStore();
   const [cloning, setCloning] = useState(false);
   const [terminalError, setTerminalError] = useState('');
   const { connectionState } = useRemoteRuntimeState();
+  const hostId = connectionState.mode === 'remote' ? connectionState.activeProfileId ?? LOCAL_CLONE_HOST : LOCAL_CLONE_HOST;
+  const storedDraft = useCloneDraftStore();
+  const { url, destPath, error, signInHost } = storedDraft.hostId === hostId ? storedDraft : EMPTY_CLONE_DRAFT;
+  const updateDraft = (draft: Partial<CloneDraft>) => storedDraft.update(hostId, draft);
+  const resetDraft = storedDraft.reset;
 
   const navigateToProject = useNavigationStore(s => s.navigateToProject);
 

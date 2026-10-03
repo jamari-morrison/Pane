@@ -105,3 +105,27 @@ test('this computer keeps the plain sign-in message', async ({ page }, testInfo)
   await expect(dialog.getByRole('button', { name: 'Try again' })).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath('local-https-message.png') });
 });
+
+test('a sign-in draft stays with its host when the user switches hosts', async ({ page }, testInfo) => {
+  await installElectronApiMock(page);
+  await page.goto('/');
+  await connectRemote(page);
+  await failClonesWithAuth(page, LOCAL_HTTPS_MESSAGE);
+
+  const dialog = await fillAndClone(page);
+  await expect(dialog.getByRole('alert')).toContainText("devbox isn't signed in to GitHub.");
+  await dialog.getByRole('button', { name: 'Open terminal on devbox to sign in' }).click();
+  await expect(dialog).toHaveCount(0);
+
+  await page.evaluate(() => window.electronAPI.remoteDaemon.updateClientState({ mode: 'local', activeProfileId: null }));
+  await expect(page.getByRole('button', { name: 'Agents run on This computer. Switch host' })).toBeVisible();
+  await page.getByRole('button', { name: 'GitHub', exact: true }).click();
+  const local = page.getByRole('dialog');
+  await expect(local.getByPlaceholder('https://github.com/user/repo')).toHaveValue('');
+  await expect(local.getByPlaceholder('Select a destination folder...')).toHaveValue('');
+  await expect(local.getByText(/isn't signed in to GitHub/)).toHaveCount(0);
+  await expect(local.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath('switched-host-clean-dialog.png') });
+  await local.getByRole('button', { name: 'Cancel' }).click();
+  expect(await page.evaluate(() => window.__cloneProbe?.cloneCalls.length)).toBe(1);
+});
