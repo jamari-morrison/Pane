@@ -77,6 +77,14 @@ export function RemoteHostSwitcher({
     await switchTo(profileId);
   };
 
+  const openTerminal = async () => {
+    try {
+      await openHostTerminal();
+    } catch (error) {
+      console.error('Failed to open the host terminal:', error);
+    }
+  };
+
   const items: DropdownItem[] = [
     ...profiles.map((profile) => {
       const sandbox = cloudSandboxes.find((candidate) => candidate.profileId === profile.id);
@@ -100,9 +108,7 @@ export function RemoteHostSwitcher({
         action: active && !cloudEntry ? {
           label: getHostTerminalPresentation(profile).openLabel,
           icon: SquareTerminal,
-          onClick: () => {
-            openHostTerminal().catch((error: unknown) => console.error('Failed to open the host terminal:', error));
-          },
+          onClick: () => void openTerminal(),
         } : undefined,
       };
     }),
