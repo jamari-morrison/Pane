@@ -334,6 +334,16 @@ Detection is best effort. Known limits:
   Only devices tagged `tag:rp-session` under the sandbox's name are deleted. Any other device with that name is
   left alone and reported.
 
+### Signing in on a sandbox
+
+Nobody sits at a sandbox's screen, so its saved host tells Pane two things:
+
+- The sandbox's host terminal starts with `BROWSER=false` and `GH_BROWSER=false`. `gh auth login` and `codex login`
+  print their sign-in URL and code instead of opening a browser on the sandbox.
+- On cloud sandboxes, Pane stores the GitHub token in ~/.config/gh/hosts.yml (owner-only). The sandbox's keyring
+  can't be unlocked without someone at its screen, so when Pane signs gh in on a sandbox it uses
+  `gh auth login --insecure-storage`. Self-hosted remotes keep gh's default, the keyring.
+
 ## Import Locally
 
 On your local desktop machine:

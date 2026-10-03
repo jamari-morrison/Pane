@@ -599,6 +599,8 @@ function withCloudSandboxHostKind(profile: RemotePaneConnectionProfile): RemoteP
     ...profile,
     hostKind: profile.hostKind ?? { label: 'cloud sandbox', icon: 'cloud' },
     hostTerminalEnv: profile.hostTerminalEnv ?? CLOUD_SANDBOX_HOST_TERMINAL_ENV,
+    // Nobody can unlock a sandbox's keyring, so gh keeps its token in ~/.config/gh/hosts.yml.
+    ghInsecureStorage: profile.ghInsecureStorage ?? true,
   };
 }
 

@@ -1252,6 +1252,7 @@ describe('cloud sandbox IPC', () => {
     ...cloudProfile,
     hostKind: { label: 'cloud sandbox', icon: 'cloud' as const },
     hostTerminalEnv: [{ name: 'BROWSER', value: 'false' }, { name: 'GH_BROWSER', value: 'false' }],
+    ghInsecureStorage: true,
   };
 
   const alpha: CloudSandboxInfo = {
