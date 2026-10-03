@@ -514,8 +514,10 @@ const ui = {
   credential: (label) => ui.settingsDialog().getByLabel(label, { exact: true }),
   saveCredentials: () => page.getByRole('button', { name: /Save credentials/i }),
   // E6: the GitHub token in the credentials form, its Set/Not set status, the clone error's route there, the row result.
-  githubTokenField: () => ui.settingsDialog().getByLabel(/^GitHub token/),
-  credentialStatusOf: (term) => ui.settingsDialog().getByRole('term').filter({ hasText: term }).first().locator('xpath=following-sibling::*[1]'),
+  // Its own section in Settings > Remote Access: status term "Saved token", textbox "GitHub token", button "Save GitHub Token".
+  githubTokenField: () => ui.settingsDialog().getByRole('textbox', { name: 'GitHub token', exact: true }),
+  saveGithubToken: () => ui.settingsDialog().getByRole('button', { name: 'Save GitHub Token', exact: true }),
+  githubTokenStatus: () => ui.settingsDialog().getByRole('term').filter({ hasText: /^Saved token$/ }).first().locator('xpath=following-sibling::*[1]'),
   addTokenNotice: () => page.getByRole('alert').filter({ hasText: 'Add a GitHub token in Settings' }),
   openSettingsForToken: () => page.getByRole('button', { name: 'Open Settings', exact: true }),
   rowGithubSignedIn: (label) => ui.row(label).getByText(/GitHub: signed in as \S+/),
@@ -807,10 +809,28 @@ async function d0() {
   await ui.saveStartupScript().click();
   check('startup-script-saved', await visible(ui.settingsDialog().getByText('Saved', { exact: true }), 10_000), 'the editor says Saved');
   await shot('startup-script-saved', { result: true });
+  if (cloud) {
+    const tokenStatus = ((await ui.githubTokenStatus().innerText().catch(() => '')) || '').trim();
+    results.githubTokenStatusBeforeAdd = tokenStatus;
+    if (relay) check('github-token-set', tokenStatus === 'Set', `GitHub token: ${tokenStatus || 'unread'}`);
+    else check('github-token-not-set', tokenStatus !== 'Set', `GitHub token: ${tokenStatus || 'unread'} (a rehearsal carries no GitHub credential)`);
+    await inView('github-token-status', ui.githubTokenStatus());
+    await shot('github-token-status');
+  }
   // D0_DRY=1: everything up to the Add click (0 starts), to prove the editor and the credentials before spending one.
   if (env.D0_DRY === '1') {
     await ui.nameInput().fill('rp-loop-cs-e2e-dry');
     check('add-button-ready', await ui.addSandbox().isEnabled(), 'Add cloud sandbox enabled (not clicked: D0_DRY)');
+    // DRY_SAVE_DUMMY=1: the dummy token's save path, in this throwaway profile only.
+    if (env.DRY_SAVE_DUMMY === '1') {
+      await ui.githubTokenField().fill(DUMMY_GITHUB_TOKEN);
+      await ui.saveGithubToken().click();
+      const set = await until(async () => ((await ui.githubTokenStatus().innerText().catch(() => '')) || '').trim() === 'Set', 60_000, 1000);
+      check('dry-dummy-token-saved', Boolean(set), `Saved token: ${((await ui.githubTokenStatus().innerText().catch(() => '')) || '').trim()}`);
+      const leftover = (await page.locator('input, textarea').evaluateAll((inputs) => inputs.map((input) => input.value))).includes(DUMMY_GITHUB_TOKEN);
+      check('dry-token-not-shown-after-save', !leftover, 'no field holds the token after saving');
+      await shot('dry-dummy-token-saved');
+    }
     await shot('dry-before-add');
     await ui.nameInput().fill('');
     return;
@@ -818,20 +838,12 @@ async function d0() {
 
   // E6 (D2, Red 12:21): Red pastes his GitHub token into Settings BEFORE Add; the kit takes no screenshot meanwhile.
   if (relay && env.SKIP_GITHUB_TOKEN !== '1') {
-    await inView('credentials', ui.credentialStatusOf(/^GitHub token/));
-    const saved = await waitForFlag('github-token-saved', 'In the Pane window: Settings > Remote Access > Cloud sandboxes > Change Credentials, paste your GitHub token (fine-grained: montlakev2, Contents + Pull requests Read/Write) into "GitHub token", then Save Credentials. Do not type it anywhere else.');
+    await inView('github-token-section', ui.githubTokenField());
+    const saved = await waitForFlag('github-token-saved', 'In the Pane window (Settings > Remote Access, already open): paste your GitHub token (fine-grained: montlakev2, Contents + Pull requests Read and write) into the "GitHub token" box, then click "Save GitHub Token". "Saved token" then reads Set. Do not type it anywhere else.');
     check('github-token-flag', saved, 'Red saved the GitHub token');
     const registered = registerSavedCredentials().filter((entry) => /github/i.test(entry));
     log(`GitHub token registered for the exact-value scan: ${registered.join(', ') || 'none found in the saved credentials'}`);
     check('github-token-registered-for-scan', registered.length > 0, registered.length ? 'by name, length and sha256[:12] only' : 'the saved credentials hold no GitHub token');
-  }
-  if (cloud) {
-    const tokenStatus = ((await ui.credentialStatusOf(/^GitHub token/).innerText().catch(() => '')) || '').trim();
-    results.githubTokenStatusBeforeAdd = tokenStatus;
-    if (relay) check('github-token-set', tokenStatus === 'Set', `GitHub token: ${tokenStatus || 'unread'}`);
-    else check('github-token-not-set', tokenStatus !== 'Set', `GitHub token: ${tokenStatus || 'unread'} (a rehearsal carries no GitHub credential)`);
-    await inView('github-token-status', ui.credentialStatusOf(/^GitHub token/));
-    await shot('github-token-status');
   }
 
   state.label = env.LABEL ?? (relay ? `e2e-${stamp}` : `rp-loop-cs-e2e-${stamp}`);
@@ -1018,16 +1030,17 @@ async function d3AddToken() {
   await inView('add-token-notice', ui.addTokenNotice());
   await shot('clone-add-token-notice', { result: true });
   await ui.openSettingsForToken().click();
-  check('open-settings-shows-token-field', await visible(ui.settingsDialog(), 10_000) && await inView('github-token-field', ui.credentialStatusOf(/^GitHub token/).or(ui.githubTokenField())), 'Settings opened at the GitHub token');
+  check('open-settings-shows-token-field', await visible(ui.settingsDialog(), 10_000) && await inView('github-token-field', ui.githubTokenField()), 'Settings opened at the GitHub token');
+  const focused = await ui.githubTokenField().evaluate((element) => element === document.activeElement).catch(() => false);
+  check('open-settings-focuses-token-field', focused, focused ? 'the GitHub token box has the focus' : 'not focused');
   await shot('settings-github-token', { result: true });
   if (relay || env.DUMMY_GITHUB_TOKEN === '0') return;
   addSecret('dummyGithubToken', DUMMY_GITHUB_TOKEN);
-  if (await visible(ui.changeCredentials(), 1000)) await ui.changeCredentials().click();
   await ui.githubTokenField().fill(DUMMY_GITHUB_TOKEN);
-  await ui.saveCredentials().click();
-  const set = await until(async () => ((await ui.credentialStatusOf(/^GitHub token/).innerText().catch(() => '')) || '').trim() === 'Set', 60_000, 1000);
+  await ui.saveGithubToken().click();
+  const set = await until(async () => ((await ui.githubTokenStatus().innerText().catch(() => '')) || '').trim() === 'Set', 60_000, 1000);
   check('dummy-token-saved', Boolean(set), 'GitHub token: Set (a dummy, to prove the invalid-token row)');
-  const shown = (await page.locator('input').evaluateAll((inputs) => inputs.map((input) => input.value))).includes(DUMMY_GITHUB_TOKEN);
+  const shown = (await page.locator('input, textarea').evaluateAll((inputs) => inputs.map((input) => input.value))).includes(DUMMY_GITHUB_TOKEN);
   check('token-not-shown-after-save', !shown, 'no input holds the token after saving');
   await shot('dummy-token-saved');
   state.dummyToken = true;
