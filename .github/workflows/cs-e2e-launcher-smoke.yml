@@ -1,0 +1,57 @@
+name: Cloud sandbox Run 8 launcher smoke (fork)
+# Runs SOBECK's exact Run 8 command (kit\run-real-user.ps1: Pane.exe as Node, live console through Tee-Object, evidence
+# zip) against a published cs-desktop-* release on windows-latest. No cloud credentials exist here, so relay mode stops
+# at D0's wallet check before any Add: it proves the launcher, the kit's start, the console and the zip, never a sandbox.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The cs-desktop-* release to smoke
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    if: github.repository != 'greenfield-inc/Pane'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+    steps:
+    - name: Lay out the release like sobeck-install.ps1 does (app\, kit\)
+      shell: bash
+      run: |
+        set -euo pipefail
+        gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir rel --pattern '*.zip' --pattern SHA256SUMS.txt
+        (cd rel && grep -E -- '\.zip$' SHA256SUMS.txt | sha256sum -c -)
+        root="$USERPROFILE/PaneCloudSandbox"
+        mkdir -p "$root/app" "$root/kit" unz
+        unzip -q rel/*-Windows-x64.zip -d unz/app && cp -r unz/app/*/. "$root/app/"
+        unzip -q rel/*relay-kit*.zip -d unz/kit && cp -r unz/kit/relay-kit/. "$root/kit/"
+        ls "$root/app/Pane.exe" "$root/kit/real-user.mjs" "$root/kit/ms-playwright/ffmpeg-1011/ffmpeg-win64.exe"
+
+    - name: The Run 8 command, as on SOBECK
+      shell: powershell
+      run: |
+        $out = "$env:USERPROFILE\PaneCloudSandbox\evidence\smoke"
+        powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\PaneCloudSandbox\kit\run-real-user.ps1" `
+          -DebUrl 'https://example.invalid/none.deb' -DebSha256 ('0' * 64) -OutDir $out -CloseRunning
+        "exit code: $LASTEXITCODE"
+        if (-not (Test-Path "$out.zip")) { throw 'no evidence zip' }
+        $console = Get-Content "$out\proof.console.txt" -Raw
+        if ($console -notmatch 'mode relay') { throw 'the kit did not start in relay mode' }
+        if ($console -notmatch 'wallet') { throw 'the run did not reach the wallet check' }
+        if ($console -match 'boat start') { throw 'a start was counted: must never happen here' }
+        if (-not (Test-Path "$out\results.json")) { throw 'no results.json' }
+        "launcher smoke PASS: live console, relay mode, stopped at the wallet check, results.json + zip written"
+
+    - uses: actions/upload-artifact@v7
+      if: always()
+      with:
+        name: launcher-smoke
+        path: ~/PaneCloudSandbox/evidence
+        if-no-files-found: warn
