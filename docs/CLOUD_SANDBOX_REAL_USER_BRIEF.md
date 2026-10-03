@@ -89,6 +89,20 @@ Main area tab:   [☁ testina · Terminal ×]
   - SSH fails in about 1 s with "Host key verification failed".
   - montlakev2 is private.
 
+### E3 v2. Sign in to GitHub from Pane (Red, 2026-10-03 12:10 PM PT; REPLACES E3's main path; generic, upstream-able)
+**Why:** gh's device flow doesn't start polling until Enter is pressed at "Press Enter to open github.com in your browser…". On a sandbox, that Enter opened Chrome on the SANDBOX's own desktop (with GCM DEPRECATED_ENDPOINT spam), so Red's approval on github.com never completed. Red: "horrible UX". He wants sign-in directly integrated.
+- **Main path:** the clone sign-in notice's **"Sign in to GitHub"** action runs gh's device flow FROM PANE, non-interactively, on the ACTIVE host (daemon side):
+  1. On the host it runs `BROWSER=false GH_BROWSER=false gh auth login --web --git-protocol https --hostname github.com`, with a newline fed to stdin automatically (or an equivalent that never waits for Enter and never opens a browser on the host).
+  2. It parses the one-time code from gh's output and shows it in Pane's UI with a **[Copy]** button, plus an **"Open github.com/login/device"** link that opens on the user's LOCAL computer (shell.openExternal on the desktop, never on the host). The state reads **"Waiting for you to approve on GitHub…"**, with **Cancel**.
+  3. When gh finishes, it runs `gh auth setup-git` on the host, then shows **"Signed in to GitHub as <user>"** (from `gh api user` or gh's own line), with **[Try again]** for the clone.
+  4. Failures (timeout or expired code, gh missing, non-zero exit) show a clear message plus the terminal fallback.
+- **Fallback (stays):** "Open terminal on <host>" with the prefill `BROWSER=false gh auth login --web --git-protocol https && gh auth setup-git` (typed, not submitted), and the hint "Open github.com/login/device on your computer, enter the code, and wait here." BROWSER=false and GH_BROWSER=false are also set in the host terminal's env on cloud sandboxes.
+- **SSH line (E3-O2, approved 11:56):** for SSH clone failures on a remote only: "This is an SSH URL; after signing in, use the HTTPS URL instead."
+- **Generic:** works for any remote, on remote/host-repo-actions, with no cloud/ imports.
+- **Secrets:** never print or log the token. The device code may be shown in the UI, but never in ledgers, logs or committed screenshots (blurred in evidence).
+- **Keyring:** gh stores the token in the system keyring first. If a desktop keyring session on the host could prompt or hang after approval, that must be checked on a real sandbox. The fallback `--insecure-storage` (hosts.yml, 0600, host only) is a security trade-off: ESCALATE it to Red; don't decide it.
+- **Done when:** D3 completes the sign-in from Pane's UI with no terminal and no Ctrl-C. The evidence shows the code screen (blurred), then "Signed in as …", then a successful `gh auth status` in the host terminal. No browser process starts on the host. Unit tests cover the code parsing, the states, Cancel, the failures and the local-only link; mutation-checked.
+
 ### E4. Codex login (docs only)
 - **Today:** the sandbox image has Codex 0.160.0, but it isn't signed in. The identity reset deletes `~/.codex/auth.json` on purpose.
 - **This pass:** the user runs `codex login --device-auth` in the E2 terminal. Docs get one line. Claude stays signed in automatically, as today.
@@ -130,7 +144,7 @@ The test kit is a Playwright attach to the PaneCloudSandbox Electron window. It 
 | D0 | (setup) | Settings > Cloud sandboxes > Startup script: paste a test script that writes a marker line and the date. Add cloud sandbox "e2e-<date>". | screenshots of the progress and "Running your startup script…" |
 | D1 | 5 + E2 | Host switcher > [>_] Open terminal on e2e. `whoami; hostname; pwd` shows `user`, `rp-…`, `/home/user`. | screenshot of the terminal tab and its title |
 | D2 | 5, 3 | In that terminal: **Red** completes `gh auth login --web` and `codex login --device-auth` (device codes; the kit pauses for him). Then `gh auth status` and `codex login status` show logged in. | screenshots with no tokens visible |
-| D3 | 2 + E3 | *Negative check, before D2 on a second clone attempt:* GitHub > Clone montlakev2 shows "isn't signed in to GitHub" with the Open-terminal button. Clicking it opens the prefilled terminal. | screenshots |
+| D3 | 2 + E3 v2 | *Negative check, before D2 on a second clone attempt:* GitHub > Clone montlakev2 shows "isn't signed in to GitHub". **E3 v2:** "Sign in to GitHub" shows the device code (Copy, plus "Open github.com/login/device" opening locally) and "Waiting for you to approve on GitHub…"; Red approves on github.com; Pane shows "Signed in to GitHub as <user>" with NO terminal and NO Ctrl-C; Try again clones. No browser process on the sandbox. The terminal fallback (prefilled, not submitted) is also shown. | screenshots (code blurred) + `gh auth status` in the host terminal |
 | D4 | 1, 2 + E1 | Home > GitHub: URL `https://github.com/jamari-morrison/montlakev2`, Browse shows the **sandbox's** folders (`/home/user`), destination `~`, Clone. Repo opens. Also: Open project with a typed Windows path is rejected, and Open project via the remote picker on an existing sandbox repo works. | screenshots of the remote picker, the host chip and the project |
 | D5 | 3 | New pane in montlakev2. Terminal panel: `pwd; git rev-parse --show-toplevel; git branch --show-current; git worktree list` shows the pane's worktree on the sandbox. | screenshot |
 | D6 | 3 | Claude Code panel: ask it to print `pwd` and the branch, which must match D5. Codex panel: the same. | screenshots of both transcripts |
