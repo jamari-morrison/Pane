@@ -235,6 +235,11 @@ jobs:
         cp rckit/scripts/cloud-dist/sobeck/{install.ps1,remove.ps1} "$kit/"
         cp scripts/cloud-sandbox-e2e/sobeck/* scripts/cloud-sandbox-e2e/{e2e.mjs,real-user.mjs,secrets.mjs,oracles.mjs,fake-claude.mjs} "$kit/"
         (cd "$kit" && echo '{"private":true}' > package.json && npm install --no-audit --no-fund --no-package-lock "playwright-core@$playwright")
+        # Playwright's own Windows ffmpeg (revision 1011, pinned by hash): the real-user kit records its video with it and
+        # cuts device-code intervals out of the recording. playwright-core alone has no ffmpeg, so there'd be no video.
+        curl -sfLo ffmpeg-win64.zip https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-win64.zip
+        echo "8d08827c019ad36e7b9d49d3648447d884534cb2acf200e71c715f6dd834cc50  ffmpeg-win64.zip" | sha256sum -c -
+        mkdir -p "$kit/ms-playwright/ffmpeg-1011" && unzip -q ffmpeg-win64.zip -d "$kit/ms-playwright/ffmpeg-1011" && rm ffmpeg-win64.zip
         (cd kit && zip -qr "../release/Pane-CloudSandbox-relay-kit-$VERSION.zip" relay-kit)
         cp rckit/scripts/cloud-dist/sobeck/install.ps1 release/sobeck-install.ps1
 
@@ -337,7 +342,7 @@ jobs:
         node -e '
           const r = require("./work-real/evidence/results.json");
           for (const s of r.steps) console.log(s.id, s.verdict, s.error ?? "", (s.checks ?? []).filter((c) => c.verdict === "FAIL").map((c) => c.name).join(","));
-          console.log("video:", r.video.join(", "));
+          console.log("video:", JSON.stringify(r.video), "cuts:", JSON.stringify(r.videoCuts ?? []));
           console.log("secret scan:", JSON.stringify(r.secretScan));
         ' | tee -a "$GITHUB_STEP_SUMMARY"
         node -e '

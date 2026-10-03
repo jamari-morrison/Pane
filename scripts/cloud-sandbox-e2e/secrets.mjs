@@ -29,12 +29,16 @@ export function secretNames() {
   return [...values.keys()];
 }
 
+// gh and Codex one-time device codes (XXXX-XXXX, XXXX-XXXXX): secrets in every output, masked even when the run never
+// learned the value.
+const DEVICE_CODE = /\b[A-Z0-9]{4,5}-[A-Z0-9]{4,5}\b/g;
+
 export function redact(text) {
   let out = String(text);
   for (const [name, value] of values) {
     if (value.length >= 8) out = out.split(value).join(`<${name}>`);
   }
-  return out;
+  return out.replace(DEVICE_CODE, '<device-code>');
 }
 
 /** Every file under `roots` that contains a secret value: [{ file, names }]. Reads bytes, so zips and
@@ -77,6 +81,7 @@ const TOKEN_PATTERNS = [
   ['jwt', new RegExp(`\\b${'ey'}J[A-Za-z0-9_-]{20,}\\.[A-Za-z0-9_-]{20,}\\.`)],
   ['tailscale key', new RegExp(`${'tskey'}-(auth|api|client)-[A-Za-z0-9]{8,}`)],
   ['pane pairing code', new RegExp(`${'pane-remote'}://${'ey'}`)],
+  ['device code', /\b[A-Z0-9]{4,5}-[A-Z0-9]{4,5}\b/],
 ];
 
 /** Names of the token shapes found in `text` (never the matches themselves). */

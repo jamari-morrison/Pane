@@ -11,7 +11,6 @@
 //   MODE=fake   Self-hosted remote, 0 starts: a second headless daemon of the same build on loopback, saved as a
 //               plain remote host. D1 D3 D4 D5 D6 (Claude) D9; the cloud-only steps are SKIP.
 // STEPS=D1,D3 runs a subset (D9 cleanup always runs unless NO_REMOVE=1).
-import { _electron as electron } from 'playwright-core';
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -19,9 +18,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { addSecret, loadSecret, redact, scanForSecrets, scanForTokenShapes, secretNames, secretValue, tokenShapes } from './secrets.mjs';
-import { boatSandbox, daemonInvoke, health, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
+import { boatExec, boatSandbox, daemonInvoke, health, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
 
 const env = process.env;
+// Video needs Playwright's ffmpeg: the Windows kit ships it in kit/ms-playwright (cs-desktop.yml). Playwright reads this
+// when it loads, so it is imported after.
+const kitBrowsers = fileURLToPath(new URL('./ms-playwright', import.meta.url));
+if (!env.PLAYWRIGHT_BROWSERS_PATH && fs.existsSync(kitBrowsers)) env.PLAYWRIGHT_BROWSERS_PATH = kitBrowsers;
+const { _electron: electron } = await import('playwright-core');
 const required = (name) => {
   if (!env[name]) throw new Error(`real-user: set ${name}`);
   return env[name];
@@ -53,7 +57,8 @@ const maxStarts = Number(env.MAX_STARTS ?? 2);
 const startsLog = env.STARTS_LOG ?? (relay ? path.join(out, 'starts.txt') : path.join(realHome, 'rc-loop/evidence/cs-e2e/starts-real.txt'));
 
 const now = new Date();
-const stamp = `${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCDate()).padStart(2, '0')}-${String(now.getUTCHours()).padStart(2, '0')}${String(now.getUTCMinutes()).padStart(2, '0')}`;
+// MMDDtHHMM: not shaped like a device code (XXXX-XXXX), which every scan treats as a secret.
+const stamp = `${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCDate()).padStart(2, '0')}t${String(now.getUTCHours()).padStart(2, '0')}${String(now.getUTCMinutes()).padStart(2, '0')}`;
 // The repo every user clones (private, so an unsigned host fails D3). Rehearsals clone a public one in D4.
 const PRIVATE_REPO = env.PRIVATE_REPO_URL ?? 'https://github.com/jamari-morrison/montlakev2';
 const cloneUrl = env.REPO_URL ?? (relay ? PRIVATE_REPO : 'https://github.com/octocat/Hello-World');
@@ -64,13 +69,16 @@ const openRepoDir = 'e2e-open-repo';
 const prRepo = env.PR_REPO ?? 'jamari-morrison/montlakev2';
 const prBranch = `e2e/${stamp}`;
 const WINDOWS_PATH = String.raw`C:\runpane-temp-home\montlakev2`;
-const GH_PREFILL = 'gh auth login --web --git-protocol https && gh auth setup-git';
+// REAL-2 (Red 12:07 PT): BROWSER=false so gh never opens a browser on the host. GH_PREFILL overrides it for older drops.
+const D3_FOLDER = 'e2e-d3';
+const GH_PREFILL = env.GH_PREFILL ?? 'BROWSER=false gh auth login --web --git-protocol https && gh auth setup-git';
 const MARKER = 'E2E_MARKER';
 const STARTUP_MARKER_LOG = '~/e2e-startup-marker.log';
 const startupScript = `# cs-e2e marker (Run 8): one line per run\necho "${MARKER} $(date -Is)" >> ${STARTUP_MARKER_LOG}\necho ${MARKER}\n`;
 
 const allSteps = ['D0', 'D1', 'D3', 'D2', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9'];
 const wanted = new Set(env.STEPS ? env.STEPS.split(',') : allSteps);
+// NO_REMOVE=1: the sandbox stays for a report first; Remove is a later STEPS=D9 run (orchestrator, rehearsal 2).
 if (env.NO_REMOVE !== '1') wanted.add('D9');
 fs.mkdirSync(out, { recursive: true });
 fs.mkdirSync(paneDir, { recursive: true, mode: 0o700 });
@@ -267,18 +275,28 @@ let shotIndex = 0;
 async function launch({ video = true } = {}) {
   app = await electron.launch({
     executablePath: paneBin,
-    args: windows ? [] : ['--no-sandbox'],
+    args: ['--no-sandbox'],
     env: appEnv,
     timeout: 120_000,
     // One recording of the whole run; no Playwright trace (it would record the launch environment).
-    ...(video ? { recordVideo: { dir: path.join(out, 'video'), size: { width: 1440, height: 900 } } } : {}),
+    ...(video && env.VIDEO !== '0' ? { recordVideo: { dir: path.join(out, 'video'), size: { width: 1440, height: 900 } } } : {}),
   });
   const mainLog = path.join(out, 'app-main.log');
   for (const stream of [app.process().stdout, app.process().stderr]) stream?.on('data', (chunk) => fs.appendFileSync(mainLog, redact(chunk.toString())));
-  page = await app.firstWindow();
+  await app.firstWindow();
+  // The app's own window (index.html), whichever opens first; every window's URL is logged for diagnosis.
+  page = await until(async () => {
+    const pages = app.windows();
+    log(`windows: ${pages.map((entry) => entry.url().replace(/^.*[\\/]/, '')).join(', ') || 'none'}`);
+    return pages.find((entry) => /index\.html/.test(entry.url()));
+  }, 120_000, 2000) ?? app.windows()[0];
   if (video) videoStartedAt = Date.now();
   page.on('console', (message) => fs.appendFileSync(path.join(out, 'app-console.log'), `${redact(`[${message.type()}] ${message.text()}`)}\n`));
-  await page.waitForLoadState('domcontentloaded');
+  // The UI is up when the sidebar's Home button renders; a load event can be missed or late.
+  if (!(await visible(page.getByRole('button', { name: 'Home', exact: true }), 120_000))) {
+    await page.screenshot({ path: path.join(out, 'launch-no-ui.png') }).catch(() => undefined);
+    throw new Error('the app window shows no UI within 120 s');
+  }
   if (!windows) await page.setViewportSize({ width: 1440, height: 900 }).catch(() => undefined);
   await sleep(4000);
   // Observers in the main process (they change nothing a user sees): which URLs a click handed to the browser, and
@@ -303,19 +321,69 @@ async function launch({ video = true } = {}) {
 async function closeApp() {
   const video = page?.video();
   await app?.close().catch(() => undefined);
-  if (video) results.video.push(path.relative(out, await video.path().catch(() => '')));
   app = undefined;
+  if (!video) return;
+  const file = await video.path().catch(() => '');
+  if (!file || !fs.existsSync(file)) return;
+  if (codeOnScreenSince !== null) codeIntervals.push([codeOnScreenSince, null]);
+  if (codeIntervals.length === 0) {
+    results.video.push(path.relative(out, file));
+    return;
+  }
+  cutCodeFromVideo(file);
+}
+
+// Cuts every interval that showed a device code (2 s margins) out of the recording with Playwright's own ffmpeg, keeping
+// the rest as numbered parts; results.video gives each part's offset in the run. If cutting fails the recording is
+// deleted: it is never kept with a code in it.
+function cutCodeFromVideo(file) {
+  const browsers = env.PLAYWRIGHT_BROWSERS_PATH ?? (windows ? path.join(env.LOCALAPPDATA ?? '', 'ms-playwright') : path.join(realHome, '.cache', 'ms-playwright'));
+  const ffmpeg = path.join(browsers, 'ffmpeg-1011', windows ? 'ffmpeg-win64.exe' : 'ffmpeg-linux');
+  const cuts = codeIntervals.map(([from, to]) => [Math.max(0, from - 2), to === null ? null : to + 2]).sort((a, b) => a[0] - b[0]);
+  const keep = [];
+  let at = 0;
+  for (const [from, to] of cuts) {
+    if (from > at) keep.push([at, from]);
+    if (to === null) {
+      at = null;
+      break;
+    }
+    at = Math.max(at, to);
+  }
+  if (at !== null) keep.push([at, null]);
+  let ok = fs.existsSync(ffmpeg);
+  const parts = [];
+  for (const [index, [from, to]] of keep.entries()) {
+    if (!ok) break;
+    const part = file.replace(/\.webm$/, `-part${index + 1}.webm`);
+    const run = spawnSync(ffmpeg, ['-y', '-loglevel', 'error', '-i', file, '-ss', String(from), ...(to === null ? [] : ['-to', String(to)]), '-c:v', 'libvpx', '-b:v', '1M', '-an', part], { encoding: 'utf8', timeout: 600_000 });
+    ok = run.status === 0 && fs.existsSync(part);
+    if (ok) parts.push({ file: path.relative(out, part), from, to });
+  }
+  fs.rmSync(file, { force: true });
+  results.videoCuts = cuts.map(([from, to]) => ({ from, to }));
+  if (ok) {
+    results.video.push(...parts);
+    log(`video: cut ${cuts.length} device-code interval(s); ${parts.length} part(s) kept`);
+  } else {
+    for (const part of parts) fs.rmSync(path.join(out, part.file), { force: true });
+    check('video-code-cut', false, `could not cut the device code out (${fs.existsSync(ffmpeg) ? 'ffmpeg failed' : `no ${ffmpeg}`}); the recording was deleted`);
+  }
 }
 const videoAt = () => (videoStartedAt ? Math.round((Date.now() - videoStartedAt) / 100) / 10 : null);
 
 // A screenshot of the window, its accessibility snapshot and (when given) the oracle read that decided the check,
 // all secret-scanned before they are written. `result: true` marks the shot that shows the step's result.
 async function shot(what, { oracle, result = false } = {}) {
+  const entry0 = {};
   const base = path.join(out, `${String(++shotIndex).padStart(3, '0')}-${current?.id ?? 'setup'}-${what}`);
-  await page.screenshot({ path: `${base}.png` }).catch(() => undefined);
+  // While a device code is on screen the terminal is masked in the shot (Red's rule: never show it in evidence).
+  const mask = codeOnScreenSince === null ? [] : await codeMask();
+  await page.screenshot({ path: `${base}.png`, mask }).catch(() => undefined);
+  if (mask.length > 0) entry0.masked = 'the device code (on screen at this shot)';
   const aria = redact(await page.locator('body').ariaSnapshot().catch(() => ''));
   fs.writeFileSync(`${base}.aria.yml`, aria);
-  const entry = { file: path.basename(`${base}.png`), videoAt: videoAt(), result };
+  const entry = { ...entry0, file: path.basename(`${base}.png`), videoAt: videoAt(), result };
   if (oracle !== undefined) {
     const text = redact(JSON.stringify(oracle, null, 2));
     fs.writeFileSync(`${base}.oracle.json`, `${text}\n`);
@@ -388,6 +456,12 @@ const ui = {
   signInAlert: (scope, label) => scope.getByRole('alert').filter({ hasText: `${label} isn't signed in to GitHub.` }),
   signInOpenTerminal: (label) => page.getByRole('button', { name: `Open terminal on ${label} to sign in`, exact: true }),
   tryAgain: () => page.getByRole('button', { name: 'Try again', exact: true }),
+  // E3 v2 in-app sign-in (names proposed in the cs-e2e E3 v2 contract; adapt here to the builder's AGREE).
+  signInGitHub: () => page.getByRole('button', { name: 'Sign in to GitHub', exact: true }),
+  deviceCode: () => page.getByLabel('GitHub device code', { exact: true }),
+  copyCode: () => page.getByRole('button', { name: 'Copy code', exact: true }),
+  openDeviceLink: () => page.getByRole('link', { name: 'Open github.com/login/device' }).or(page.getByRole('button', { name: 'Open github.com/login/device' })).first(),
+  signedInAs: () => page.getByText(/^Signed in to GitHub as /),
   settingsButton: () => page.getByRole('button', { name: 'Settings', exact: true }).first(),
   settingsDialog: () => page.getByRole('dialog', { name: /Pane Settings/ }),
   remoteAccessNav: () => ui.settingsDialog().getByRole('button', { name: 'Remote Access', exact: true }),
@@ -417,6 +491,19 @@ const ui = {
   tool: (name) => page.getByRole('menuitem', { name: new RegExp(`^${escapeRegExp(name)}`) }),
   panelTab: (name) => page.getByRole('tab', { name: new RegExp(`^${escapeRegExp(name)}`) }),
 };
+// A7: the shot must SHOW the result, not just hold it in the aria tree (rehearsal D0: the progress line was below the
+// fold of the Settings dialog). Scrolls it into view and checks it is inside the window before the shot.
+async function inView(name, locator) {
+  const target = locator.first();
+  await target.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => undefined);
+  await sleep(300);
+  const shown = await target.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    return box.height > 0 && box.top >= 0 && box.bottom <= window.innerHeight && box.left >= 0 && box.right <= window.innerWidth;
+  }).catch(() => false);
+  check(`in-view:${name}`, shown, shown ? 'scrolled into the window' : 'not inside the window for the shot');
+  return shown;
+}
 const visible = (locator, timeout = 1000) => locator.first().waitFor({ state: 'visible', timeout }).then(() => true, () => false);
 
 async function dismissFirstRun() {
@@ -526,11 +613,14 @@ async function typeInVisibleTerminal(text, { enter = true } = {}) {
 }
 // The last screen row where `command` ends. A long prompt plus command wraps over several rows (DROP 1 D5: the
 // worktree prompt pushed the command past the terminal width), so up to 4 consecutive rows are joined.
+// Whitespace is ignored: a row that wraps right after a space loses that space to the trim (rehearsal D2).
+const squeeze = (text) => text.replace(/\s+/g, '');
 function commandEnd(lines, command) {
+  const wanted = squeeze(command);
   for (let end = lines.length - 1; end >= 0; end--) {
     for (let start = end; start >= Math.max(0, end - 3); start--) {
       // It ends on `end`: the rows up to `end` hold it, the rows before `end` alone don't.
-      if (lines.slice(start, end + 1).join('').includes(command) && !lines.slice(start, end).join('').includes(command)) return end;
+      if (squeeze(lines.slice(start, end + 1).join('')).includes(wanted) && !squeeze(lines.slice(start, end).join('')).includes(wanted)) return end;
     }
   }
   return -1;
@@ -691,6 +781,7 @@ async function d0() {
     }
     if (!sawStartup && steps.some((text) => /Running your startup script…/.test(text))) {
       sawStartup = true;
+      await inView('startup-progress-line', ui.progress(state.label).getByText(/Running your startup script…/));
       await shot('add-running-startup-script', { result: true });
     }
     if (await visible(ui.row(state.label).getByRole('alert').filter({ hasNotText: /Startup script failed/ }), 100)) {
@@ -703,6 +794,7 @@ async function d0() {
   if (rowError) throw new Error(`Add cloud sandbox failed: ${rowError}`);
   check('add-listed-running', Boolean(running), `row ${state.label} Running after ${Math.round((Date.now() - startedAt) / 1000)} s; ${progress.length} progress lines`);
   check('add-showed-startup-script-step', sawStartup, sawStartup ? '"Running your startup script…" shown during Add' : `progress: ${JSON.stringify(progress)}`);
+  await inView('row-running', ui.row(state.label));
   await shot('sandbox-running', { result: true, oracle: { progress } });
   const host = savedHosts(paneDir).find((entry) => entry.label === state.label);
   check('saved-host-written', Boolean(host?.cloud?.sandboxId), JSON.stringify(host ?? null));
@@ -744,6 +836,8 @@ async function d1() {
     check('pwd-home', cwd?.trim() === expected.home, `${cwd} (want ${expected.home})`);
   }
   await shot('host-terminal-whoami', { result: true, oracle: { panelId, lines } });
+  // K1: a time mark on the host before any sign-in; later no browser profile may be newer than it.
+  await runInTerminal(panelId, `touch ${SIGN_IN_MARK}`);
   // No repo is needed for it: the host's project list has nothing called host-terminal.
   const projects = (await hostInvoke('projects:get-all').catch(() => [])) ?? [];
   check('host-terminal-not-a-project', !projects.some((project) => /host-terminal/.test(`${project.name} ${project.path}`)), `${projects.length} projects`);
@@ -767,10 +861,29 @@ async function d3() {
   await dialog.getByLabel('Repository URL').fill(PRIVATE_REPO);
   const destination = await dialog.getByLabel('Destination').inputValue().catch(() => '');
   check('clone-destination-default-home', destination === '~', `destination "${destination}"`);
+  // D3's clone lands in a new folder ~/e2e-d3 made with the picker (New folder is offered for a Clone destination), so
+  // D4 can still clone the same repo into ~ itself (cs-e2e E3 v2 contract, sequencing note).
+  await dialog.getByRole('button', { name: /^Browse/ }).click();
+  const picker = ui.picker(state.label);
+  await picker.waitFor({ timeout: 10_000 });
+  check('clone-picker-offers-new-folder', await visible(ui.pickerNewFolder(picker), 3000), '"New folder" in the Clone browser');
+  await ui.pickerNewFolder(picker).click();
+  await picker.getByLabel('New folder name').fill(D3_FOLDER);
+  await picker.getByRole('button', { name: 'Create folder', exact: true }).click();
+  if (await visible(ui.pickerEntry(picker, D3_FOLDER, false), 5000)) await ui.pickerEntry(picker, D3_FOLDER, false).click();
+  const inFolder = await until(async () => ((await ui.pickerCurrent(picker).first().innerText().catch(() => '')) || '').trim() === hostPath(expected.home, D3_FOLDER), 10_000, 300);
+  check('clone-picker-new-folder', Boolean(inFolder), `Current folder ${hostPath(expected.home, D3_FOLDER)}`);
+  await shot('clone-picker-new-folder');
+  await ui.pickerConfirm(picker).click();
+  await picker.waitFor({ state: 'hidden', timeout: 5000 });
+  check('clone-destination-new-folder', samePath(await dialog.getByLabel('Destination').inputValue(), hostPath(expected.home, D3_FOLDER)), await dialog.getByLabel('Destination').inputValue());
   await dialog.getByRole('button', { name: /^Clone/ }).last().click();
   const alert = ui.signInAlert(page, state.label);
   check('sign-in-error-shown', await visible(alert, 60_000), `"${state.label} isn't signed in to GitHub."`);
   check('sign-in-error-buttons', await visible(ui.signInOpenTerminal(state.label), 1000) && await visible(ui.tryAgain(), 1000), 'Open terminal … to sign in + Try again');
+  await inView('sign-in-alert', alert);
+  // E3.9: the fallback's hint, so the user signs in from their own computer.
+  check('sign-in-hint', await visible(page.getByText(/Open github\.com\/login\/device on your computer/), 2000), '"Open github.com/login/device on your computer, enter the code, and wait here."');
   await shot('clone-not-signed-in', { result: true });
   // Try again keeps the URL and destination and fails the same way.
   await ui.tryAgain().click();
@@ -789,45 +902,239 @@ async function d3() {
     return lines.at(-1)?.trimEnd().endsWith(GH_PREFILL) ? lines : undefined;
   }, 20_000, 500);
   const lastLine = shown?.at(-1) ?? nonEmpty(await screenText(panelId)).at(-1) ?? '';
-  check('prefill-typed-not-submitted', Boolean(shown) && lastLine.trimEnd().endsWith(GH_PREFILL) && !lastLine.trimEnd().startsWith('gh '),
+  check('prefill-typed-not-submitted', Boolean(shown) && lastLine.trimEnd().endsWith(GH_PREFILL) && !lastLine.trimEnd().startsWith(GH_PREFILL),
     `last line: ${lastLine}`);
   await sleep(1000);
   await shot('terminal-prefilled', { result: true, oracle: { panelId, lastLines: (shown ?? []).slice(-4) } });
   // Nothing ran: still the same a few seconds later.
   await sleep(3000);
   check('prefill-still-unsubmitted', nonEmpty(await screenText(panelId)).at(-1) === lastLine, 'no output appeared');
+
+  // E3 v2: back to Home > GitHub (the draft and the notice are kept), then the in-app sign-in.
+  const again = await openCloneDialog();
+  check('draft-kept-after-terminal', (await again.getByLabel('Repository URL').inputValue()) === PRIVATE_REPO && await visible(ui.signInAlert(page, state.label), 5000), 'URL and notice back');
+  if (!(await visible(ui.signInGitHub(), 3000))) {
+    // Before E3 v2 (drop 6): only the fallback exists. Run 8 needs it.
+    check('sign-in-to-github-offered', relay ? false : null, 'no "Sign in to GitHub" in this build');
+    await closeMenus();
+    return;
+  }
+  await d3SignIn(again);
+}
+
+// The in-app device flow (E3 v2): code screen (code masked), local link, Red approves (SOBECK; a rehearsal cancels),
+// "Signed in to GitHub as <user>" with no terminal and no Ctrl-C, Try again clones, then gh auth status on the host.
+async function d3SignIn(dialog) {
+  startBrowserSampler('in-app-sign-in');
+  await ui.signInGitHub().click();
+  const code = await until(async () => (await ui.deviceCode().first().innerText().catch(() => '')).trim() || undefined, 60_000, 500);
+  // Exactly one code element: mask it; anything else: mask the whole dialog.
+  codeShown('ghDeviceCode', code, async () => ((await ui.deviceCode().count().catch(() => 0)) === 1 ? [ui.deviceCode()] : [dialog]));
+  check('in-app-device-code', Boolean(code), code ? 'a device code is shown in Pane (masked in all evidence)' : 'no code');
+  check('in-app-copy-and-link', await visible(ui.copyCode(), 2000) && await visible(ui.openDeviceLink(), 2000), '"Copy code" + "Open github.com/login/device"');
+  check('in-app-waiting', await visible(page.getByText('Waiting for you to approve on GitHub…'), 5000), '"Waiting for you to approve on GitHub…"');
+  check('no-terminal-for-sign-in', !(await visible(ui.hostTerminalTab(state.label), 500)) || (await dialog.isVisible()), 'the sign-in stays in the dialog');
+  await shot('in-app-code', { result: true });
+  if (mode === 'live' && state.cloud?.sandboxId) {
+    const { stdout } = await boatExec(state.cloud.sandboxId, boatOrg, `ps -eo comm= | grep -ciE '${BROWSER_PATTERN}' || true`).catch(() => ({ stdout: '' }));
+    const during = Number(String(stdout).trim().split('\n').at(-1));
+    check('no-browser-while-waiting', during === 0, `browser processes on the sandbox while gh waits (boat exec ps): ${during}`);
+  }
+  if (!relay && env.D3V2_COMPLETE !== '1') {
+    // Rehearsal: no real sign-in. Cancel, and the code is gone.
+    await page.getByRole('button', { name: 'Cancel', exact: true }).last().click();
+    check('in-app-cancel', await ui.deviceCode().first().waitFor({ state: 'hidden', timeout: 10_000 }).then(() => true, () => false), 'the code is gone after Cancel');
+    codeHidden();
+    stopBrowserSampler();
+    await shot('in-app-cancelled');
+    return;
+  }
+  // The link opens on THIS computer (the desktop hands it to the OS), never on the host.
+  const before = (await app.evaluate(() => globalThis.__e2eOpened.slice())).length;
+  await ui.openDeviceLink().click();
+  const opened = await until(async () => (await app.evaluate(() => globalThis.__e2eOpened.slice())).slice(before).find((url) => /github\.com\/login\/device/.test(url)), 10_000, 300);
+  check('device-link-opens-locally', Boolean(opened), opened ? `the desktop opened ${opened}` : 'nothing opened locally');
+  const approved = await waitForFlag('gh-signed-in', 'In the browser that just opened ON THIS PC (github.com/login/device), enter the code shown in the Pane window (use its Copy button) and approve. Then wait until Pane shows "Signed in to GitHub as …". Nothing to type in any terminal.');
+  check('gh-flag', approved, 'Red approved on github.com');
+  const signedIn = await until(async () => (await visible(ui.signedInAs(), 500)) && await ui.signedInAs().first().innerText(), 300_000, 1500);
+  check('signed-in-in-app', /Signed in to GitHub as \S+/.test(signedIn ?? ''), signedIn ?? 'no "Signed in to GitHub as …"');
+  if (!(await visible(ui.deviceCode(), 300))) codeHidden();
+  check('signed-in-without-terminal', !(await visible(ui.hostTerminalTab(state.label).filter({ has: page.locator('[aria-selected="true"]') }), 300)), 'no terminal was needed');
+  await inView('signed-in', ui.signedInAs());
+  await shot('signed-in-as', { result: true });
+  await ui.tryAgain().click();
+  const cloned = await until(async () => (await projectsOnHost()).find((project) => samePath(project.path, hostPath(expected.home, D3_FOLDER, 'montlakev2'))), 300_000, 2000);
+  check('try-again-clones', Boolean(cloned), JSON.stringify(cloned ?? null));
+  await shot('d3-cloned', { result: Boolean(cloned), oracle: { cloned } });
+  stopBrowserSampler();
+  const panelId = await openHostTerminalFromSwitcher(state.label);
+  const { lines } = await runInTerminal(panelId, 'gh auth status', { timeoutMs: 60_000 });
+  check('gh-auth-status-logged-in', lines.some((line) => /Logged in to github\.com/i.test(line)), lines.filter((line) => /github\.com|Logged/i.test(line)).join(' | '));
+  await shot('gh-auth-status', { result: true, oracle: { lines } });
+  const browsers = await browserProcesses(panelId, 'after-in-app-sign-in');
+  check('no-browser-on-host', browsers.count === 0, `browser processes on the host: ${browsers.count}`);
+  // E3v2-KEYRING (Red 12:19): on a sandbox gh stores its token in hosts.yml (--insecure-storage), with no keyring prompt.
+  // Only the file's MODE and a prompter count are read, never its contents.
+  const { lines: keyring } = await runInTerminal(panelId, "echo PROMPTERS=$(pgrep -c 'gcr-prompter|pinentry|gnome-keyring' || true) HOSTS_MODE=$(stat -c %a ~/.config/gh/hosts.yml 2>/dev/null || echo none)");
+  const keyText = keyring.join(' ');
+  check('no-keyring-prompt', /PROMPTERS=0\b/.test(keyText), keyText.match(/PROMPTERS=\S+/)?.[0] ?? 'unread');
+  if (cloud) check('gh-hosts-file-0600', /HOSTS_MODE=600\b/.test(keyText), keyText.match(/HOSTS_MODE=\S+/)?.[0] ?? 'unread');
+  await shot('keyring-and-hosts-mode', { oracle: { keyring } });
+  state.ghSignedInByD3 = true;
+  saveState();
 }
 
 // ---------------------------------------------------------------- D2: Red signs the host in (SOBECK)
+// Red's rule (12:07 PT): no browser may open ON the host; gh only prints the code and the URL, and completes WITHOUT
+// Ctrl-C. Device codes never reach the evidence: they are redacted from text, shots mask the terminal while one is on
+// screen, the user then clears the screen, and the video intervals that showed one are cut out at the end.
+const BROWSER_PATTERN = 'chrom|firefox|xdg-open|sensible-browser|x-www-browser|git-credential-manager';
+const codeIntervals = [];
+let codeOnScreenSince = null;
+// What a shot masks while a code is on screen: the terminal by default, the code element for the in-app flow.
+let codeMask = async () => [page.locator('.xterm:visible')];
+function codeShown(name, code, mask) {
+  if (code) addSecret(name, code);
+  if (mask) codeMask = mask;
+  if (codeOnScreenSince === null) codeOnScreenSince = videoAt();
+}
+function codeHidden() {
+  if (codeOnScreenSince !== null) codeIntervals.push([codeOnScreenSince, videoAt()]);
+  codeOnScreenSince = null;
+  codeMask = async () => [page.locator('.xterm:visible')];
+}
+async function codeCleared(panelId) {
+  // Like a user, before anything else is shown: wipe the code off the window (screen and scrollback).
+  await page.locator('.xterm:visible').last().click();
+  await page.keyboard.type('clear', { delay: 15 });
+  await page.keyboard.press('Enter');
+  await until(async () => nonEmpty(await screenText(panelId)).length <= 1, 10_000, 300);
+  await sleep(800);
+  codeHidden();
+}
+// The host's browser processes as the user can see them, typed in the host terminal; on a sandbox boat exec counts them too.
+async function browserProcesses(panelId, what) {
+  const { lines } = await runInTerminal(panelId, `echo BROWSERS=$(pgrep -fci '${BROWSER_PATTERN}'); pgrep -fil '${BROWSER_PATTERN}' | cut -c1-60`);
+  const count = Number(lines.join('\n').match(/BROWSERS=(\d+)/)?.[1] ?? NaN);
+  // A browser that started and exited still leaves its profile: none may be newer than the D1 mark.
+  const { lines: profileLines } = await runInTerminal(panelId, `echo PROFILES=$(find ~/.config ~/.cache ~/.mozilla ~/snap ~/.gcm -maxdepth 2 -newer ${SIGN_IN_MARK} \\( -iname '*chrom*' -o -iname '*firefox*' -o -iname '.mozilla' -o -iname '*gcm*' -o -iname 'git-credential-manager' \\) 2>/dev/null | wc -l)`);
+  const profiles = Number(profileLines.join('\n').match(/PROFILES=(\d+)/)?.[1] ?? NaN);
+  check(`no-browser-profile-${what}`, profiles === 0, `browser/GCM profile dirs newer than the D1 mark: ${profiles}`);
+  let boat = null;
+  if (mode === 'live' && state.cloud?.sandboxId) {
+    const { stdout } = await boatExec(state.cloud.sandboxId, boatOrg, `ps -eo comm= | grep -ciE '${BROWSER_PATTERN}' || true`).catch(() => ({ stdout: '' }));
+    boat = Number(String(stdout).trim().split('\n').at(-1));
+  }
+  await shot(`browsers-${what}`, { oracle: { count, boat, lines } });
+  return { count, boat, lines };
+}
+const SIGN_IN_MARK = '/tmp/e2e-before-sign-in';
+// K1 (live only): boat exec counts browser processes on the sandbox every 2 s over a sign-in window, counts only.
+let sampler = null;
+function startBrowserSampler(what) {
+  if (mode !== 'live' || !state.cloud?.sandboxId) return;
+  const samples = [];
+  let busy = false;
+  const timer = setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    const { stdout } = await boatExec(state.cloud.sandboxId, boatOrg, `ps -eo comm= | grep -ciE '${BROWSER_PATTERN}' || true`, 15).catch(() => ({ stdout: 'x' }));
+    samples.push(Number(String(stdout).trim().split('\n').at(-1)));
+    busy = false;
+  }, 2000);
+  sampler = { what, samples, timer };
+}
+function stopBrowserSampler() {
+  if (!sampler) return;
+  clearInterval(sampler.timer);
+  const read = sampler.samples.filter((value) => Number.isFinite(value));
+  check(`no-browser-sampled-${sampler.what}`, read.length > 0 && read.every((value) => value === 0), `${read.length} samples (every 2 s), max ${Math.max(0, ...read)}, unreadable ${sampler.samples.length - read.length}`);
+  results.browserSamples = { ...(results.browserSamples ?? {}), [sampler.what]: { samples: read.length, max: Math.max(0, ...read) } };
+  sampler = null;
+}
+const deviceCodeIn = (text) => text.match(/\b([A-Z0-9]{4,5}-[A-Z0-9]{4,5})\b/)?.[1];
+
 async function d2() {
   const panelId = state.hostTerminalPanelId ?? await openHostTerminalFromSwitcher(state.label);
   if (!(await visible(ui.hostTerminalTab(state.label), 1000))) await openHostTerminalFromSwitcher(state.label);
   const ghLast = nonEmpty(await screenText(panelId)).at(-1) ?? '';
   check('gh-prefill-present', ghLast.trimEnd().endsWith(GH_PREFILL), `last line: ${ghLast}`);
-  // The user presses Enter on the prefilled line (D3), then answers gh's prompts with their defaults.
+  // The baseline needs the prompt free: it is read from a boat exec only (live); the typed count follows the sign-in.
+  startBrowserSampler('fallback-sign-in');
+  // The user presses Enter on the prefilled line (D3), then answers gh's questions with their defaults.
   await page.locator('.xterm:visible').last().click();
   await page.keyboard.press('Enter');
-  const codeShown = await until(async () => {
+  let code;
+  const shown = await until(async () => {
     const text = nonEmpty(await screenText(panelId)).slice(-8).join('\n');
-    if (/one-time code/i.test(text)) return true;
-    if (/\?\s.*(GitHub\.com|Authenticate Git|preferred protocol)/i.test(text.split('\n').at(-1) ?? '')) await page.keyboard.press('Enter');
+    if (/one-time code/i.test(text)) {
+      code = deviceCodeIn(text.split(/one-time code/i).at(-1) ?? '');
+      codeShown('ghDeviceCode', code);
+      return true;
+    }
+    const last = text.split('\n').at(-1) ?? '';
+    if (/^\s*\?\s/.test(last)) await page.keyboard.press('Enter');
     return undefined;
   }, 90_000, 1500);
-  if (codeShown && /Press Enter to open/i.test(nonEmpty(await screenText(panelId)).slice(-3).join('\n'))) await page.keyboard.press('Enter');
-  check('gh-device-code-shown', Boolean(codeShown), 'gh shows a one-time code');
-  await shot('gh-device-code');
-  const ghFlag = await waitForFlag('gh-signed-in', `In YOUR browser open https://github.com/login/device, enter the one-time code shown in the Pane window's "${state.label} · Terminal" tab, and approve. Wait until the terminal is back at its prompt.`);
+  check('gh-device-code-shown', Boolean(shown && code), shown ? 'gh shows a one-time code (masked in all evidence)' : 'no one-time code');
+  // "Press Enter to open github.com in your browser": the key a user presses. With the fix gh opens nothing on the host.
+  if (/Press Enter to open/i.test(nonEmpty(await screenText(panelId)).slice(-4).join('\n'))) await page.keyboard.press('Enter');
+  await sleep(8000);
+  const screenAfterEnter = nonEmpty(await screenText(panelId)).slice(-8);
+  check('gh-prints-url', screenAfterEnter.some((line) => /github\.com\/login\/device/.test(line)), 'the github.com/login/device URL is printed');
+  await shot('gh-code-and-url', { result: true, oracle: { lastLines: screenAfterEnter } });
+  if (mode === 'live' && state.cloud?.sandboxId) {
+    const { stdout } = await boatExec(state.cloud.sandboxId, boatOrg, `ps -eo comm= | grep -ciE '${BROWSER_PATTERN}' || true`).catch(() => ({ stdout: '' }));
+    const during = Number(String(stdout).trim().split('\n').at(-1));
+    check('no-browser-while-gh-waits', during === 0, `browser processes on the sandbox while gh waits (boat exec ps): ${during}`);
+  }
+  if (!relay && env.D2_COMPLETE !== '1') {
+    // Rehearsal: no real sign-in. Cancelled here (the only Ctrl-C), then the screen is cleared and the host checked.
+    await page.keyboard.press('Control+C');
+    await until(async () => promptLine.test(nonEmpty(await screenText(panelId)).at(-1) ?? ''), 10_000, 300);
+    await codeCleared(panelId);
+    stopBrowserSampler();
+    const after = await browserProcesses(panelId, 'after-gh-cancel');
+    check('no-browser-on-host', after.count === 0 && (after.boat === null || after.boat === 0), `typed count ${after.count}, boat exec ${after.boat ?? '-'}: ${after.lines.slice(1, -1).join(' | ') || 'none'}`);
+    check('gh-sign-in-rehearsed', true, 'code + URL printed, no browser; cancelled (no real sign-in in a rehearsal)');
+    return;
+  }
+  const ghFlag = await waitForFlag('gh-signed-in', `In YOUR browser (on this PC) open https://github.com/login/device, enter the one-time code shown in the Pane window's "${state.label} · Terminal" tab, and approve. Then wait until that terminal shows "Logged in as" and is back at its prompt. Do NOT press Ctrl-C.`);
   check('gh-flag', ghFlag, 'Red finished the GitHub sign-in');
-  await until(async () => promptLine.test(nonEmpty(await screenText(panelId)).at(-1) ?? ''), 120_000, 1000);
-  await runInTerminal(panelId, 'codex login --device-auth', { timeoutMs: 60_000, done: (after) => /code|https:\/\//i.test(after) });
-  await shot('codex-device-code');
-  const codexFlag = await waitForFlag('codex-signed-in', `In YOUR browser open the URL shown in the "${state.label} · Terminal" tab (auth.openai.com/codex/device), enter the code shown there, and approve. Wait until the terminal is back at its prompt.`);
+  // gh completes by itself: "Logged in as …" and the prompt back, with no Ctrl-C from anyone.
+  const done = await until(async () => {
+    const lines = nonEmpty(await screenText(panelId)).slice(-12);
+    return lines.some((line) => /Logged in as/i.test(line)) && promptLine.test(lines.at(-1) ?? '') ? lines : undefined;
+  }, 300_000, 1500);
+  check('gh-completed-without-ctrl-c', Boolean(done), done ? '"Logged in as …" and the prompt came back; the kit sent no Ctrl-C' : 'gh did not finish within 5 min of the flag');
+  await shot('gh-logged-in', { result: Boolean(done), oracle: { lastLines: done ?? nonEmpty(await screenText(panelId)).slice(-12) } });
+  if (!done) {
+    await page.keyboard.press('Control+C');
+    check('gh-needed-ctrl-c', false, 'the kit had to cancel gh to go on');
+  }
+  await codeCleared(panelId);
+  const afterGh = await browserProcesses(panelId, 'after-gh');
+  check('no-browser-on-host', afterGh.count === 0, `browser processes on the host after the sign-in: ${afterGh.count} ${afterGh.lines.slice(1, -1).join(' | ')}`);
+
+  await typeInVisibleTerminal('codex login --device-auth');
+  const codexShown = await until(async () => {
+    const text = nonEmpty(await screenText(panelId)).slice(-12).join('\n');
+    const codexCode = /https:\/\//.test(text) ? deviceCodeIn(text) : undefined;
+    if (codexCode) codeShown('codexDeviceCode', codexCode);
+    return codexCode;
+  }, 60_000, 1000);
+  check('codex-device-code-shown', Boolean(codexShown), codexShown ? 'Codex shows a URL and a one-time code (masked)' : 'no Codex code');
+  await shot('codex-code-and-url', { result: true });
+  const codexFlag = await waitForFlag('codex-signed-in', `In YOUR browser open the URL shown in the "${state.label} · Terminal" tab, enter the code shown there, and approve. Then wait until that terminal is back at its prompt. Do NOT press Ctrl-C.`);
   check('codex-flag', codexFlag, 'Red finished the Codex sign-in');
-  await until(async () => promptLine.test(nonEmpty(await screenText(panelId)).at(-1) ?? ''), 120_000, 1000);
+  const codexDone = await until(async () => promptLine.test(nonEmpty(await screenText(panelId)).at(-1) ?? ''), 300_000, 1500);
+  check('codex-completed-without-ctrl-c', Boolean(codexDone), codexDone ? 'the prompt came back' : 'codex login did not finish within 5 min of the flag');
+  if (!codexDone) await page.keyboard.press('Control+C');
+  await codeCleared(panelId);
   const { lines } = await runInTerminal(panelId, 'gh auth status; codex login status', { timeoutMs: 60_000 });
   const text = lines.join('\n');
   check('gh-logged-in', /Logged in to github\.com/i.test(text), lines.filter((line) => /github\.com|account|Logged/i.test(line)).join(' | '));
-  check('codex-logged-in', /Logged in using/i.test(text), lines.filter((line) => /Logged in|Not logged/i.test(line)).join(' | '));
+  check('codex-logged-in', /Logged in using/i.test(text), lines.filter((line) => /^\s*(Logged in using|Not logged in)/i.test(line)).join(' | ') || 'no codex status line');
   check('no-token-text', tokenShapes(text).length === 0, `token shapes: ${JSON.stringify(tokenShapes(text))}`);
   await shot('signed-in-status', { result: true, oracle: { panelId, lines } });
 }
@@ -890,6 +1197,7 @@ async function windowsPathRejected() {
   check('windows-path-rejected', await visible(add.getByText(sentence, { exact: false }), 15_000), sentence);
   const after = await projectsOnHost();
   check('windows-path-created-nothing', after.length === before.length, `projects ${before.length} → ${after.length}`);
+  await inView('windows-path-alert', add.getByText(sentence, { exact: false }));
   await shot('windows-path-rejected', { result: true, oracle: { projectsBefore: before.length, projectsAfter: after.length } });
   await add.getByRole('button', { name: 'Cancel', exact: true }).click();
 }
@@ -941,8 +1249,14 @@ async function d4OpenAndNew() {
 async function d5() {
   if (!(await connectTo(state.label))) throw new Error('not connected');
   const repo = state.repoName ?? repoName;
-  await ui.openMainWorkspace(repo).click();
-  await ui.newPaneIn(repo).first().click();
+  // K2: D3 may have cloned a second project with the same name (~/e2e-d3/montlakev2); the one used is D4's, at
+  // ~/<repo>. The sidebar lists projects in the host's order, so its row is picked by that index and checked below.
+  const sameName = (await projectsOnHost()).filter((project) => project.name === repo);
+  const index = Math.max(0, sameName.findIndex((project) => samePath(project.path, hostPath(expected.home, repo))));
+  state.repoIndex = index;
+  saveState();
+  await ui.openMainWorkspace(repo).nth(index).click();
+  await ui.newPaneIn(repo).nth(index).click();
   const dialog = page.getByRole('dialog', { name: /^New Pane/ });
   const nameField = dialog.getByPlaceholder('Enter a name for your pane');
   await until(async () => (await nameField.inputValue()) !== '', 10_000, 300);
@@ -970,6 +1284,7 @@ async function d5() {
   saveState();
   check('pane-terminal-in-worktree', cwd === session.worktreePath && top === session.worktreePath, `pwd ${cwd}, toplevel ${top}, worktree ${session.worktreePath}`);
   check('pane-worktree-not-main', session.worktreePath !== hostPath(expected.home, repo), 'the Pane has its own worktree');
+  check('pane-in-d4-project', String(session.worktreePath ?? '').startsWith(`${hostPath(expected.home, repo)}${hostIsWindows ? '\\' : '/'}`), `${session.worktreePath} is under ${hostPath(expected.home, repo)} (row ${index + 1} of ${sameName.length} named ${repo})`);
   // `git worktree list` rows can wrap: judged on the rows joined.
   const listed = new RegExp(`${escapeRegExp(session.worktreePath)}\\s+[0-9a-f]{7,}\\s+\\[${escapeRegExp(branch ?? '')}\\]`).test(worktrees.join(''));
   check('pane-branch', Boolean(branch) && listed, `branch ${branch}; worktree list ${JSON.stringify(worktrees)}`);
@@ -1018,6 +1333,7 @@ async function d7() {
   await openCloud();
   check('row-no-chip-after-ok-run', !(await visible(ui.startupChip(state.label), 1000)), 'no ⚠ chip');
   check('row-open-terminal-while-running', await visible(ui.rowOpenTerminal(state.label), 2000), 'Open terminal in the Running row');
+  await inView('row-with-open-terminal', ui.row(state.label));
   await shot('row-running', { result: true });
   // The row's Open terminal opens the same host terminal (E2's second entry point).
   await ui.rowOpenTerminal(state.label).click();
@@ -1035,12 +1351,20 @@ async function d7() {
   }, Number(env.STOP_WAIT_MS ?? 1_000_000), 1500);
   check('row-stopped', Boolean(stopped), await rowText(state.label));
   check('stopped-hides-open-terminal', !sawOpenTerminalWhileNotRunning && !(await visible(ui.rowOpenTerminal(state.label), 1000)), 'no Open terminal while stopping/stopped');
+  await inView('row-stopped', ui.row(state.label));
   await shot('row-stopped', { result: true });
 
   countStart('start');
   await ui.rowAction('Start', state.label).click();
-  const running = await until(async () => rowBadge(await rowText(state.label), 'Running'), 900_000, 2000);
+  let sawOpenTerminalWhileStarting = false;
+  const running = await until(async () => {
+    const row = await rowText(state.label);
+    if (!rowBadge(row, 'Running') && await visible(ui.rowOpenTerminal(state.label), 200)) sawOpenTerminalWhileStarting = true;
+    return rowBadge(row, 'Running');
+  }, 900_000, 1500);
   check('row-running-again', Boolean(running), await rowText(state.label));
+  check('starting-hides-open-terminal', !sawOpenTerminalWhileStarting, 'no Open terminal until the row is Running again');
+  await inView('row-running-again', ui.row(state.label));
   await shot('row-running-again');
   await closeSettings();
   check('reconnected', await connectTo(state.label, 180_000), state.label);
@@ -1063,6 +1387,7 @@ async function d7() {
   await ui.saveStartupScript().click();
   const chip = await until(async () => (await visible(ui.startupChip(state.label), 500)) && await ui.startupChip(state.label).innerText(), 660_000, 3000);
   check('failing-script-chip', /Startup script failed \(exit 1\)/.test(chip ?? ''), `chip: ${chip ?? 'none'}`);
+  await inView('startup-chip', ui.startupChip(state.label));
   await shot('startup-chip', { result: true, oracle: { chip } });
   await ui.viewLog(state.label).click();
   const logDialog = ui.startupLog(state.label);
@@ -1176,6 +1501,21 @@ async function d9() {
   check('row-gone', Boolean(gone), state.label);
   check('saved-host-gone', !savedHosts(paneDir).some((host) => host.label === state.label), 'no saved host');
   await shot('removed', { result: true });
+  // The switcher after the last sandbox is gone: no entry for it (on an empty profile no switcher at all), and the
+  // window is on This computer.
+  await closeSettings();
+  const others = savedHosts(paneDir).length;
+  const chip = await visible(ui.switcherChip(), 3000);
+  let stale = false;
+  if (chip) {
+    await openSwitcher();
+    stale = await visible(ui.hostItem(state.label), 1000);
+    await shot('switcher-after-remove');
+    await closeMenus();
+  }
+  check('switcher-after-last-remove', !stale && (others > 0 || !chip), `switcher shown ${chip}, stale entry ${stale}, other saved hosts ${others}`);
+  await goHome();
+  await shot('home-after-remove', { result: true });
   if (mode === 'live' && state.cloud) {
     const sandbox = await until(async () => {
       const answer = await boatSandbox(state.cloud.sandboxId, boatOrg);
@@ -1273,13 +1613,15 @@ async function main() {
     if (!state.label) throw new Error('no host to run on');
     await step('D1', 'Host terminal from the switcher: whoami; hostname; pwd', d1);
     await step('D3', 'Clone while not signed in → sign-in error → prefilled terminal', d3);
-    await step('D2', 'Red signs the host in to GitHub and Codex (device codes)', d2, { applies: relay, why: 'needs Red (SOBECK only)' });
+    // D2=1 (fake only): the flow up to the device codes, never completed (no flag), to prove the kit's prompt handling.
+    await step('D2', 'Red signs the host in to GitHub and Codex (device codes)', d2, { applies: relay || env.D2 === '1', why: 'needs Red (SOBECK only)' });
     await step('D4', 'Clone via Home > GitHub; Windows path rejected; Open via the remote picker', d4);
     await step('D5', 'New Pane: its terminal is in the Pane\'s worktree', d5);
     await step('D6', 'Claude Code (and Codex) print pwd and branch = D5', d6);
     await step('D7', 'Startup status, Stop/Start re-runs it, a failing script shows the chip', d7, { applies: cloud, why: 'cloud sandboxes only' });
     await step('D8', 'Claude edits, commits, pushes and opens a draft PR', d8, { applies: relay || env.D8 === '1', why: 'needs Red\'s GitHub sign-in (SOBECK only)' });
   } finally {
+    stopBrowserSampler();
     if (state.label) await step('D9', 'Remove through the UI', d9);
     current = undefined;
     await restoreStartupScript().catch((error) => log('restore startup script failed:', error.message));

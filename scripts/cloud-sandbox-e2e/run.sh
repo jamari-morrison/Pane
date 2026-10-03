@@ -63,7 +63,9 @@ cleanup() {
     [ -f "$HOME/.pane_cloudsandbox/config.json" ] && shred -u "$HOME/.pane_cloudsandbox/config.json"
     rm -rf "$HOME/.pane_cloudsandbox"; echo "deleted a staged $HOME/.pane_cloudsandbox"
   fi
-  if [ "${KEEP_CREDENTIALS:-0}" != 1 ]; then
+  # NO_REMOVE=1 leaves the sandbox for a report first: its saved host and the credentials stay so the later
+  # STEPS=D9 run can Remove it through the UI (that run, without NO_REMOVE, shreds them).
+  if [ "${KEEP_CREDENTIALS:-0}" != 1 ] && [ "${NO_REMOVE:-0}" != 1 ]; then
     find "$work/home/.config/runpane-cloud" "$work/home/.pane/config.json" "$work/home/.claude/.credentials.json" -type f -exec shred -u {} + 2>/dev/null || true
     echo "shredded staged credentials and saved host tokens under $work/home"
   fi
