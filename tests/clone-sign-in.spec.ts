@@ -7,7 +7,6 @@ const LOCAL_HTTPS_MESSAGE = 'Authentication failed — check your credentials or
 
 interface CloneProbe {
   cloneCalls: Array<[string, string]>;
-  terminalInputs: Array<string | undefined>;
 }
 
 declare global {
@@ -16,10 +15,10 @@ declare global {
   }
 }
 
-/** Makes every clone fail the way the host's daemon reports a sign-in failure, and records clones and terminal opens. */
+/** Makes every clone fail the way the host's daemon reports a sign-in failure, and records the clones. */
 async function failClonesWithAuth(page: Page, error: string) {
   await page.evaluate((error) => {
-    const probe: CloneProbe = { cloneCalls: [], terminalInputs: [] };
+    const probe: CloneProbe = { cloneCalls: [] };
     window.__cloneProbe = probe;
     Object.assign(window.electronAPI.git, {
       cloneRepo: async (url: string, destDir: string) => {
@@ -27,10 +26,17 @@ async function failClonesWithAuth(page: Page, error: string) {
         return { success: false, error, code: 'GIT_CLONE_AUTH_REQUIRED' };
       },
     });
-    window.addEventListener('pane:host-terminal-stub-open', (event) => {
-      if (event instanceof CustomEvent) probe.terminalInputs.push(event.detail.input);
-    });
   }, error);
+}
+
+async function hostTerminalOpenRequests(page: Page) {
+  return page.evaluate(() => {
+    // SAFETY: installElectronApiMock defines __paneTestElectronMock with getInvokeCalls.
+    const mock = (window as typeof window & { __paneTestElectronMock: {
+      getInvokeCalls: (channel: string) => Array<{ args: unknown[] }>;
+    } }).__paneTestElectronMock;
+    return mock.getInvokeCalls('host-terminal:open').map((call) => call.args[0] ?? null);
+  });
 }
 
 async function connectRemote(page: Page) {
@@ -77,12 +83,14 @@ test('a remote host that is not signed in offers its terminal, prefilled, and a 
 
   await notice.getByRole('button', { name: 'Open terminal on devbox to sign in' }).click();
   await expect(dialog).toHaveCount(0);
-  const inputs = await page.evaluate(() => window.__cloneProbe?.terminalInputs);
-  expect(inputs).toEqual([SIGN_IN_COMMAND]);
-  expect(inputs?.[0]).not.toMatch(/[\r\n]/);
+  await expect(page.getByRole('tab', { name: 'devbox · Terminal' })).toBeVisible();
+  const requests = await hostTerminalOpenRequests(page);
+  expect(requests).toEqual([{ input: SIGN_IN_COMMAND }]);
+  expect(SIGN_IN_COMMAND).not.toMatch(/[\r\n]/);
   await page.screenshot({ path: testInfo.outputPath('remote-terminal-opened.png') });
 
   // Coming back after signing in finds the same URL and destination.
+  await page.getByRole('button', { name: 'Home', exact: true }).click();
   await page.getByRole('button', { name: 'GitHub', exact: true }).click();
   const reopened = page.getByRole('dialog');
   await expect(reopened.getByPlaceholder('https://github.com/user/repo')).toHaveValue(REPO_URL);
@@ -119,6 +127,7 @@ test('a sign-in draft stays with its host when the user switches hosts', async (
 
   await page.evaluate(() => window.electronAPI.remoteDaemon.updateClientState({ mode: 'local', activeProfileId: null }));
   await expect(page.getByRole('button', { name: 'Agents run on This computer. Switch host' })).toBeVisible();
+  await page.getByRole('button', { name: 'Home', exact: true }).click();
   await page.getByRole('button', { name: 'GitHub', exact: true }).click();
   const local = page.getByRole('dialog');
   await expect(local.getByPlaceholder('https://github.com/user/repo')).toHaveValue('');
