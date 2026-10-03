@@ -824,6 +824,9 @@ async function waitForFlag(name, instructions, timeoutMs = Number(env.PAUSE_TIME
 // E5 has ONE startup script for every sandbox and saving it runs it on every running sandbox: with another sandbox up
 // (Red's testina) a save would run the kit's script there. Every save is refused while any other row is active.
 async function otherActiveSandboxes() {
+  // The rows come in the same snapshot as the credentials: wait for that snapshot (the wallet's value) before listing,
+  // or an active sandbox could be missed while Settings is still loading.
+  if (!(await savedWallet())) throw new Error('the cloud sandboxes did not load; not saving anything');
   const rows = page.getByRole('listitem', { name: /^Cloud sandbox / });
   const active = [];
   for (const row of await rows.all()) {
@@ -865,8 +868,8 @@ async function setupWarningAndLocalScript() {
   // Done-when 8: shown while the GitHub token and/or the local start script is unset; each link opens its field.
   const shownWarning = await visible(ui.setupWarning(), 5000);
   const warningText = shownWarning ? ((await ui.setupWarning().innerText().catch(() => '')) || '').replace(/\s+/g, ' ') : '';
-  const localSet = Boolean((await ui.localStartScript().inputValue().catch(() => '')).trim());
-  const tokenSet = ((await ui.githubTokenStatus().innerText().catch(() => '')) || '').trim() === 'Set';
+  const localSet = Boolean((await loadedLocalStartScript()).trim());
+  const tokenSet = (await loadedTokenStatus()) === 'Set';
   check('setup-warning-shown', !(localSet && tokenSet) ? shownWarning : null, `warning: ${warningText || 'none'}; token set ${tokenSet}, local start script set ${localSet}`);
   if (shownWarning) {
     await inView('setup-warning', ui.setupWarning());
@@ -880,7 +883,7 @@ async function setupWarningAndLocalScript() {
   }
   // Red's own local start script: a copy beside the file (sha256 only), restored at the end like the startup script.
   const bytes = fs.existsSync(localStartFile) ? fs.readFileSync(localStartFile) : null;
-  original.localStart = { bytes, sha: bytes ? sha256Of(bytes) : null, script: await ui.localStartScript().inputValue().catch(() => '') };
+  original.localStart = { bytes, sha: bytes ? sha256Of(bytes) : null, script: await loadedLocalStartScript() };
   if (bytes) {
     original.localStart.copy = `${localStartFile}.e2e-original-${original.localStart.sha.slice(0, 12)}`;
     fs.writeFileSync(original.localStart.copy, bytes, { mode: 0o600 });
@@ -1014,6 +1017,45 @@ async function restoreLocalStartScript() {
   if (restored && original.localStart.copy) fs.rmSync(original.localStart.copy, { force: true });
 }
 
+function registerUserScripts() {
+  try {
+    const startup = readStartupFile().toString('utf8');
+    if (startup.trim().length >= 8) addSecret('redStartupScript', startup.replace(/\s+$/, ''));
+  } catch {
+    // No file: nothing to hide.
+  }
+  try {
+    const local = fs.existsSync(localStartFile) ? String(JSON.parse(fs.readFileSync(localStartFile, 'utf8')).script ?? '') : '';
+    if (local.trim().length >= 8) addSecret('redLocalStartScript', local.replace(/\s+$/, ''));
+  } catch {
+    // Unreadable: the editor is masked in every shot regardless.
+  }
+}
+
+// Values that load after Settings opens, each waited for against its source of truth: the script editors until they
+// hold what the desktop's own files hold (the files it pushes from), the token status until it reads Set/Not set.
+// A textarea reports CRLF as LF: the wait compares with line endings normalized (the restore compares exact bytes).
+const sameText = (a, b) => a !== null && String(a).replace(/\r\n/g, '\n') === String(b).replace(/\r\n/g, '\n');
+async function loadedStartupScript() {
+  const want = readStartupFile().toString('utf8');
+  const value = () => ui.startupScript().inputValue().catch(() => null);
+  return (await until(async () => { const got = await value(); return sameText(got, want) ? got : undefined; }, 20_000, 300)) ?? (await value()) ?? '';
+}
+async function loadedLocalStartScript() {
+  let want = '';
+  try {
+    want = fs.existsSync(localStartFile) ? String(JSON.parse(fs.readFileSync(localStartFile, 'utf8')).script ?? '') : '';
+  } catch {
+    want = '';
+  }
+  const value = () => ui.localStartScript().inputValue().catch(() => null);
+  return (await until(async () => { const got = await value(); return sameText(got, want) ? got : undefined; }, 20_000, 300)) ?? (await value()) ?? '';
+}
+async function loadedTokenStatus() {
+  const value = () => ui.githubTokenStatus().innerText().then((text) => text.trim(), () => '');
+  return (await until(async () => (await value()) || undefined, 20_000, 300)) ?? '';
+}
+
 // The saved boat wallet, read by its term (not by position) once the credentials have loaded: Run 8 attempt 1 read ""
 // right after Settings opened, before the values were there.
 async function savedWallet() {
@@ -1037,7 +1079,7 @@ async function d0() {
   const editor = ui.startupScript();
   await editor.waitFor({ timeout: 10_000 });
   // Whatever the user had there comes back at the end (D9); only its length and hash are recorded.
-  original.startupScript = await editor.inputValue();
+  original.startupScript = await loadedStartupScript();
   if (original.startupScript.length >= 8) addSecret('redStartupScript', original.startupScript);
   // The user's script exactly as the desktop keeps it (the FILE it pushes from on every Create/Start), saved next to it
   // so it can be put back even if the UI restore can't run. Never printed, never in the evidence: length + sha256 only.
@@ -1068,7 +1110,7 @@ async function d0() {
   }
 
   if (cloud) {
-    const tokenStatus = ((await ui.githubTokenStatus().innerText().catch(() => '')) || '').trim();
+    const tokenStatus = await loadedTokenStatus();
     results.githubTokenStatusBeforeAdd = tokenStatus;
     if (relay) check('github-token-set', tokenStatus === 'Set', `GitHub token: ${tokenStatus || 'unread'}`);
     else if (state.dummyToken) check('github-token-dummy-set', tokenStatus === 'Set', `GitHub token: ${tokenStatus || 'unread'} (the rehearsal's dummy)`);
@@ -1079,7 +1121,7 @@ async function d0() {
   // Done-when 8: with both set the warning is gone.
   if (env.E7 !== '0') {
     const gone = !(await visible(ui.setupWarning(), 3000));
-    const tokenSet = ((await ui.githubTokenStatus().innerText().catch(() => '')) || '').trim() === 'Set';
+    const tokenSet = (await loadedTokenStatus()) === 'Set';
     check('setup-warning-gone-when-both-set', tokenSet ? gone : null, tokenSet ? (gone ? 'no warning with a token and a local start script' : 'the warning is still shown') : 'no GitHub token in this run, so the warning stays (expected)');
     await shot('setup-warning-after', { result: true });
   }
@@ -1088,7 +1130,7 @@ async function d0() {
   // D0_DRY=1: everything up to the Add click (0 starts), to prove the editor and the credentials before spending one.
   if (env.D0_DRY === '1') {
     await ui.nameInput().fill('rp-loop-cs-e2e-dry');
-    check('add-button-ready', await ui.addSandbox().isEnabled(), 'Add cloud sandbox enabled (not clicked: D0_DRY)');
+    check('add-button-ready', Boolean(await until(() => ui.addSandbox().isEnabled(), 10_000, 300)), 'Add cloud sandbox enabled (not clicked: D0_DRY)');
     // DRY_SAVE_DUMMY=1: the dummy token's save path, in this throwaway profile only.
     if (env.DRY_SAVE_DUMMY === '1') {
       await ui.githubTokenField().fill(DUMMY_GITHUB_TOKEN);
@@ -1205,7 +1247,7 @@ async function d3() {
   const icon = await ui.hostChip(dialog, state.label, hostKind).locator('xpath=..').getAttribute('data-host-icon').catch(() => null);
   check('host-chip-icon', icon === (cloud ? 'cloud' : 'server'), `icon ${icon}`);
   await dialog.getByLabel('Repository URL').fill(PRIVATE_REPO);
-  const destination = await dialog.getByLabel('Destination').inputValue().catch(() => '');
+  const destination = await until(async () => (await dialog.getByLabel('Destination').inputValue().catch(() => '')) || undefined, 5000, 250) ?? '';
   check('clone-destination-default-home', destination === '~', `destination "${destination}"`);
   // D3's clone lands in a new folder ~/e2e-d3 made with the picker (New folder is offered for a Clone destination), so
   // D4 can still clone the same repo into ~ itself (cs-e2e E3 v2 contract, sequencing note).
@@ -1222,7 +1264,8 @@ async function d3() {
   await shot('clone-picker-new-folder');
   await ui.pickerConfirm(picker).click();
   await picker.waitFor({ state: 'hidden', timeout: 5000 });
-  check('clone-destination-new-folder', samePath(await dialog.getByLabel('Destination').inputValue(), hostPath(expected.home, D3_FOLDER)), await dialog.getByLabel('Destination').inputValue());
+  const newDestination = await until(async () => { const value = await dialog.getByLabel('Destination').inputValue(); return samePath(value, hostPath(expected.home, D3_FOLDER)) ? value : undefined; }, 5000, 250);
+  check('clone-destination-new-folder', Boolean(newDestination), newDestination ?? await dialog.getByLabel('Destination').inputValue());
   await dialog.getByRole('button', { name: /^Clone/ }).last().click();
   // E6: with a token the clone simply works; without one a cloud sandbox points to Settings.
   const outcome = await until(async () => {
@@ -1244,7 +1287,7 @@ async function d3() {
   // Try again keeps the URL and destination and fails the same way.
   await ui.tryAgain().click();
   await sleep(1500);
-  check('try-again-keeps-input', (await dialog.getByLabel('Repository URL').inputValue()) === PRIVATE_REPO, 'URL kept');
+  check('try-again-keeps-input', Boolean(await until(async () => (await dialog.getByLabel('Repository URL').inputValue()) === PRIVATE_REPO, 5000, 250)), 'URL kept');
   check('try-again-fails-the-same', await visible(alert, 60_000), 'the notice is back');
   await shot('clone-try-again');
   await ui.signInOpenTerminal(state.label).click();
@@ -1606,7 +1649,7 @@ async function d4() {
   await shot('clone-remote-picker', { result: true, oracle: await hostInvoke('fs:browse-directories', { path: '~' }).then((listing) => ({ path: listing?.path, home: listing?.home, entries: listing?.entries?.length })).catch((error) => ({ error: String(error) })) });
   await ui.pickerConfirm(picker).click();
   await picker.waitFor({ state: 'hidden', timeout: 5000 });
-  const destination = await dialog.getByLabel('Destination').inputValue();
+  const destination = await until(async () => { const value = await dialog.getByLabel('Destination').inputValue(); return value === '~' || value === expected.home ? value : undefined; }, 5000, 250) ?? await dialog.getByLabel('Destination').inputValue();
   check('clone-destination-home', destination === '~' || destination === expected.home, `destination "${destination}"`);
   await shot('clone-filled');
   await dialog.getByRole('button', { name: /^Clone/ }).last().click();
@@ -1674,7 +1717,7 @@ async function d4OpenAndNew() {
   await ui.pickerConfirm(openPicker).click();
   await openPicker.waitFor({ state: 'hidden', timeout: 5000 });
   if (!(await ui.projectName(add).inputValue())) await ui.projectName(add).fill(openRepoDir);
-  check('open-path-from-picker', (await add.getByLabel('Repository Path').inputValue()) === hostPath(expected.home, openRepoDir), await add.getByLabel('Repository Path').inputValue());
+  check('open-path-from-picker', Boolean(await until(async () => (await add.getByLabel('Repository Path').inputValue()) === hostPath(expected.home, openRepoDir), 5000, 250)), await add.getByLabel('Repository Path').inputValue());
   await shot('open-filled');
   await add.getByRole('button', { name: 'Open', exact: true }).click();
   const opened = await until(async () => (await projectsOnHost()).find((project) => samePath(project.path, hostPath(expected.home, openRepoDir))), 60_000, 2000);
@@ -2158,14 +2201,17 @@ async function liveCredentials() {
     await ui.saveCredentials().click();
     await until(async () => !(await ui.saveCredentials().isVisible().catch(() => false)) || !(await ui.saveCredentials().isDisabled()), 60_000, 1000);
   }
-  const status = await ui.credentialStatus().allTextContents();
-  log(`credentials: ${status.map((text) => text.trim()).join(' / ')}`);
-  if (status[1]?.trim() !== 'test') throw new Error('credentials not saved for the test wallet');
+  const wallet = await savedWallet();
+  log(`credentials: boat wallet "${wallet}"`);
+  if (wallet !== 'test') throw new Error('credentials not saved for the test wallet');
   await closeApp();
 }
 
 // ---------------------------------------------------------------- main
 async function main() {
+  // The user's own scripts, from the desktop's files, are redaction secrets BEFORE the first screenshot: the editors show
+  // them in every aria snapshot until the kit replaces them (a seeded dry run found them in the first two snapshots).
+  registerUserScripts();
   // E6-c (auditor): the dummy GitHub token's exact value is in the exact-value scan from the start of every run that
   // may type it, reported only by name, length and sha256[:12].
   if (!relay) {
