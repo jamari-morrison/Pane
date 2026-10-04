@@ -37,6 +37,10 @@ on:
         description: Build this ref/sha instead of .github/cs-e2e/app-ref (a drop; empty = the file)
         type: string
         default: ''
+      ps_token_selftest:
+        description: Only test the relay's PowerShell 5.1 GitHub-token length/sha256 one-liner on a fake credentials file
+        type: boolean
+        default: false
       launcher_smoke_tag:
         description: Only smoke SOBECK's exact Run 8 command (kit\run-real-user.ps1) on this published cs-desktop-* release; builds and publishes nothing
         type: string
@@ -84,7 +88,7 @@ jobs:
 
   windows:
     name: Windows x64 (side-by-side)
-    if: github.repository != 'greenfield-inc/Pane' && !inputs.app_from && !inputs.launcher_smoke_tag
+    if: github.repository != 'greenfield-inc/Pane' && !inputs.app_from && !inputs.launcher_smoke_tag && !inputs.ps_token_selftest
     runs-on: windows-2022
     timeout-minutes: 60
     outputs:
@@ -435,3 +439,36 @@ jobs:
         name: launcher-smoke
         path: ~/PaneCloudSandbox/evidence
         if-no-files-found: warn
+
+  # The relay's one-liner that reports Red's SAVED GitHub token as length + sha256 only (AUDIT RUN8), run exactly as posted
+  # in Windows PowerShell 5.1 against a fake credentials file: the output must be exactly "len=<n> sha256=<hex>" and
+  # must never contain the (fake) value.
+  ps-token-selftest:
+    name: PowerShell 5.1 token len/sha256 one-liner
+    if: github.repository != 'greenfield-inc/Pane' && inputs.ps_token_selftest
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+    - name: Fake credentials and the exact one-liner
+      shell: powershell
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $dir = "$env:USERPROFILE\.config\runpane-cloud"
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        $fake = 'github_' + 'pat_' + 'FAKE' + ('x' * 70)
+        Set-Content -LiteralPath "$dir\credentials.json" -Value ('{"boat":{"apiKey":"k"},"github":{"token":"' + $fake + '"}}') -Encoding ASCII
+        $want = "len=$($fake.Length) sha256=$(([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($fake)))).Replace('-','').ToLower())"
+        $out = powershell -NoProfile -Command {
+          $c = Get-Content -Raw "$env:USERPROFILE\.config\runpane-cloud\credentials.json" | ConvertFrom-Json; $t = [string]$c.github.token; $b = [Text.Encoding]::UTF8.GetBytes($t); "len=$($t.Length) sha256=$(([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b))).Replace('-','').ToLower())"
+        } | Out-String
+        $out = $out.Trim()
+        if ($out -match [regex]::Escape($fake)) { throw 'the one-liner printed the value' }
+        if ($out -notmatch '^len=\d+ sha256=[0-9a-f]{64}$') { throw "unexpected output shape: $out" }
+        if ($out -ne $want) { throw "len/sha256 differ from the expected ones" }
+        Remove-Item -LiteralPath "$dir\credentials.json" -Force
+        "PASS: output is exactly '$out' (the fake token's length and sha256; the value never printed)"
+        # The no-token case: len=0.
+        Set-Content -LiteralPath "$dir\credentials.json" -Value '{"boat":{"apiKey":"k"}}' -Encoding ASCII
+        $none = (powershell -NoProfile -Command { $c = Get-Content -Raw "$env:USERPROFILE\.config\runpane-cloud\credentials.json" | ConvertFrom-Json; $t = [string]$c.github.token; $b = [Text.Encoding]::UTF8.GetBytes($t); "len=$($t.Length) sha256=$(([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b))).Replace('-','').ToLower())" } | Out-String).Trim()
+        if (-not $none.StartsWith('len=0 ')) { throw "no-token case: $none" }
+        "PASS: no saved token -> '$none'"

@@ -802,8 +802,36 @@ async function waitAgentReady(panelId, agent, timeoutMs = 120_000) {
   }
   throw new Error(`${agent} was not ready within ${Math.round(timeoutMs / 1000)} s`);
 }
+// K-R8C (Run 8 attempt 2): a prompt typed key by key reached Codex's composer garbled ("ch t esc / Run the shell commands
+// 'd 'git bra"); an agent TUI handles a fast stream of single keys unlike a paste. A prompt now goes in the way a user puts
+// in a long one: on the clipboard and Ctrl+V (Pane's terminal turns that into terminal.paste: a bracketed paste when the
+// TUI asks for it). Enter is pressed only once the screen shows the prompt's end (or the TUI's own "[Pasted …]"
+// placeholder); otherwise nothing is submitted and the step fails. The user's clipboard text is put back afterwards.
+async function pasteIntoAgent(panelId, prompt) {
+  const before = await app.evaluate(({ clipboard }) => clipboard.readText()).catch(() => '');
+  try {
+    await app.evaluate(({ clipboard }, text) => clipboard.writeText(text), prompt);
+    const terminal = page.locator('.xterm:visible').last();
+    await terminal.click();
+    await sleep(400);
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+V' : 'Control+V');
+    const tail = squeeze(prompt).slice(-32);
+    return Boolean(await until(async () => {
+      const recent = squeeze(nonEmpty(await screenText(panelId, 80)).slice(-30).join(''));
+      return recent.includes(tail) || /\[Pasted/i.test(recent) ? true : undefined;
+    }, 8000, 300));
+  } finally {
+    await app.evaluate(({ clipboard }, text) => clipboard.writeText(text), before).catch(() => undefined);
+  }
+}
 async function askAgent(panelId, prompt, answered, timeoutMs = 300_000) {
-  await typeInVisibleTerminal(prompt);
+  const arrived = await pasteIntoAgent(panelId, prompt);
+  check('prompt-arrived-whole', arrived, arrived ? 'the whole prompt is in the composer' : 'the prompt did not arrive whole: NOT submitted');
+  if (!arrived) {
+    await shot('prompt-not-arrived');
+    return undefined;
+  }
+  await page.keyboard.press('Enter');
   const found = await until(async () => answered(await screenText(panelId, 200)), timeoutMs, 2000);
   await sleep(1500);
   return found;
