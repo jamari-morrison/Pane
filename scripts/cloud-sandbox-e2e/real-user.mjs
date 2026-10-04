@@ -16,6 +16,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { addSecret, loadSecret, redact, scanForSecrets, scanForTokenShapes, secretNames, secretValue, tokenShapes } from './secrets.mjs';
 import { boatExec, boatSandbox, daemonInvoke, health, savedHostToken, savedHosts, tailnetDevices } from './oracles.mjs';
@@ -311,6 +312,9 @@ async function launch({ video = true } = {}) {
     return pages.find((entry) => /index\.html/.test(entry.url()));
   }, 120_000, 2000) ?? app.windows()[0];
   if (video) videoStartedAt = Date.now();
+  if (video && !relay && env.VIDEO_EDITOR_SELFTEST === '1') {
+    await page.addStyleTag({ content: 'textarea { background: #13579b !important; color: #13579b !important; caret-color: #13579b !important; }' }).catch(() => undefined);
+  }
   if (video) startCodeWatch();
   page.on('console', (message) => fs.appendFileSync(path.join(out, 'app-console.log'), `${redact(`[${message.type()}] ${message.text()}`)}\n`));
   // The UI is up when the sidebar's Home button renders; a load event can be missed or late.
@@ -382,6 +386,20 @@ function cutCodeFromVideo(file) {
     ok = run.status === 0 && fs.existsSync(part);
     if (ok) parts.push({ file: path.relative(out, part), from, to });
   }
+  // K-R8V: no kept part may contain a moment an editor was seen (the 500 ms timeline).
+  if (ok) {
+    const inKept = editorSamples.filter((t) => parts.some(({ from, to }) => t >= from && (to === null || t <= to)));
+    check('video-no-editor-frames', inKept.length === 0, `${editorSamples.length} editor-visible samples, ${inKept.length} inside a kept part`);
+  }
+  // VIDEO_EDITOR_SELFTEST=1 (tests only): the editors were painted a canary colour; frames of the ORIGINAL must show it
+  // (the detector works) and frames of every KEPT part must not.
+  if (ok && !relay && env.VIDEO_EDITOR_SELFTEST === '1') {
+    const original = canaryFrames(ffmpeg, file);
+    const kept = parts.map((part) => canaryFrames(ffmpeg, path.join(out, part.file)));
+    const keptHits = kept.reduce((sum, entry) => sum + entry.hits, 0);
+    check('video-canary-detector-works', original.hits > 0, `original recording: ${original.hits} of ${original.frames} frames show the editor canary`);
+    check('video-canary-not-kept', keptHits === 0, `kept parts: ${keptHits} of ${kept.reduce((sum, entry) => sum + entry.frames, 0)} frames show the editor canary`);
+  }
   fs.rmSync(file, { force: true });
   results.videoCuts = cuts.map(([from, to]) => ({ from, to }));
   if (ok) {
@@ -390,6 +408,71 @@ function cutCodeFromVideo(file) {
   } else {
     for (const part of parts) fs.rmSync(path.join(out, part.file), { force: true });
     check('video-code-cut', false, `could not cut the device code out (${fs.existsSync(ffmpeg) ? 'ffmpeg failed' : `no ${ffmpeg}`}); the recording was deleted`);
+  }
+}
+// The test's canary: every textarea painted #13579b (VIDEO_EDITOR_SELFTEST). Frames at 4 fps (-r 4: this ffmpeg build has no fps filter) via Playwright's ffmpeg (PNG),
+// decoded here (8-bit RGB/RGBA, no interlace); a frame "shows the editor" when >= 400 pixels are within 18 of the canary.
+const CANARY = [0x13, 0x57, 0x9b];
+function decodePng(buffer) {
+  let at = 8;
+  let width = 0;
+  let height = 0;
+  let channels = 3;
+  const idat = [];
+  while (at < buffer.length) {
+    const length = buffer.readUInt32BE(at);
+    const type = buffer.toString('ascii', at + 4, at + 8);
+    const data = buffer.subarray(at + 8, at + 8 + length);
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      channels = data[9] === 6 ? 4 : 3;
+    } else if (type === 'IDAT') idat.push(data);
+    at += 12 + length;
+  }
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = width * channels;
+  const pixels = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)];
+    for (let x = 0; x < stride; x++) {
+      const value = raw[y * (stride + 1) + 1 + x];
+      const left = x >= channels ? pixels[y * stride + x - channels] : 0;
+      const up = y > 0 ? pixels[(y - 1) * stride + x] : 0;
+      const upLeft = y > 0 && x >= channels ? pixels[(y - 1) * stride + x - channels] : 0;
+      let predicted = 0;
+      if (filter === 1) predicted = left;
+      else if (filter === 2) predicted = up;
+      else if (filter === 3) predicted = (left + up) >> 1;
+      else if (filter === 4) {
+        const p = left + up - upLeft;
+        const pa = Math.abs(p - left);
+        const pb = Math.abs(p - up);
+        const pc = Math.abs(p - upLeft);
+        predicted = pa <= pb && pa <= pc ? left : pb <= pc ? up : upLeft;
+      }
+      pixels[y * stride + x] = (value + predicted) & 0xff;
+    }
+  }
+  return { width, height, channels, pixels };
+}
+function canaryFrames(ffmpeg, video) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cse2e-frames-'));
+  try {
+    spawnSync(ffmpeg, ['-loglevel', 'error', '-i', video, '-r', '4', '-c:v', 'png', '-f', 'image2', path.join(dir, 'f%05d.png')], { timeout: 600_000 });
+    let hits = 0;
+    const files = fs.readdirSync(dir).filter((name) => name.endsWith('.png'));
+    for (const name of files) {
+      const { pixels, channels } = decodePng(fs.readFileSync(path.join(dir, name)));
+      let count = 0;
+      for (let index = 0; index + 2 < pixels.length; index += channels) {
+        if (Math.abs(pixels[index] - CANARY[0]) <= 18 && Math.abs(pixels[index + 1] - CANARY[1]) <= 18 && Math.abs(pixels[index + 2] - CANARY[2]) <= 18) count += 1;
+      }
+      if (count >= 400) hits += 1;
+    }
+    return { frames: files.length, hits };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 const videoAt = () => (videoStartedAt ? Math.round((Date.now() - videoStartedAt) / 100) / 10 : null);
@@ -1606,19 +1689,32 @@ const DEVICE_CODE_SHAPE = /\b[A-Z0-9]{4,5}-[A-Z0-9]{4,5}\b/;
 // Backstop for the video: once a second, any device-code-shaped text in the window (or the code element) opens an
 // interval that is cut out of the recording, whether or not the kit's own steps flagged it.
 let codeWatch = null;
+// Also K-R8V: any visible text editor in Settings (the startup script and local start script boxes can show the user's
+// own scripts) is cut from the video like a device code. Every 500 ms sample is kept as a timeline (editorSamples) so
+// the cut can be checked against it: no kept part may contain a sample.
+const editorSamples = [];
 function startCodeWatch() {
   let since = null;
   const timer = setInterval(async () => {
-    const shown = await page.evaluate((source) => {
+    const seen = await page.evaluate((source) => {
       const shape = new RegExp(source);
-      return shape.test(document.body?.innerText ?? '') || Boolean(document.querySelector('[data-secret="github-device-code"], [aria-label="One-time code"]'));
-    }, DEVICE_CODE_SHAPE.source).catch(() => false);
+      const code = shape.test(document.body?.innerText ?? '') || Boolean(document.querySelector('[data-secret="github-device-code"], [aria-label="One-time code"]'));
+      const editor = [...document.querySelectorAll('textarea')].some((element) => {
+        const box = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return box.width > 0 && box.height > 0 && box.bottom > 0 && box.top < window.innerHeight && box.right > 0 && box.left < window.innerWidth
+          && style.visibility !== 'hidden' && style.display !== 'none';
+      });
+      return { code, editor };
+    }, DEVICE_CODE_SHAPE.source).catch(() => ({ code: false, editor: false }));
+    if (seen.editor) editorSamples.push(videoAt());
+    const shown = seen.code || seen.editor;
     if (shown && since === null) since = videoAt();
     if (!shown && since !== null) {
       codeIntervals.push([since, videoAt()]);
       since = null;
     }
-  }, 1000);
+  }, 500);
   codeWatch = { timer, open: () => since };
 }
 function stopCodeWatch() {
