@@ -1545,4 +1545,16 @@ export class WorktreeManager {
       return null;
     }
   }
+
+  /**
+   * The origin branch a main-repo session's history is compared against, or
+   * null when the repo has none. Main-repo sessions usually store
+   * `origin/<branch>` as their base (always, right after a clone), so the
+   * comparison ref is already the answer; probing `origin/` on top of it
+   * would look for `origin/origin/<branch>` and report no origin.
+   */
+  async getMainRepoOriginBranch(worktreePath: string, comparisonBranch: string, commandRunner: CommandRunner): Promise<string | null> {
+    if (comparisonBranch.startsWith('origin/')) return comparisonBranch;
+    return this.getOriginBranch(worktreePath, comparisonBranch, commandRunner);
+  }
 }

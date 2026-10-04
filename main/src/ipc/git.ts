@@ -1672,11 +1672,10 @@ export function registerGitHandlers(
       // Get current branch name
       const currentBranch = (await ctx.commandRunner.execAsync('git branch --show-current', session.worktreePath)).stdout.trim();
 
-      // Only call getOriginBranch for legacy isMainRepo sessions where baseBranch is not set.
-      // When baseBranch is set it already includes the origin/ prefix if applicable — calling
-      // getOriginBranch with it would produce a double-origin/ probe.
-      const originBranch = (session.isMainRepo && !session.baseBranch)
-        ? await worktreeManager.getOriginBranch(session.worktreePath, comparisonBranch, ctx.commandRunner)
+      // The main repo's Changes view reads originBranch to tell "compared with origin" from
+      // "no origin, showing local commits".
+      const originBranch = session.isMainRepo
+        ? await worktreeManager.getMainRepoOriginBranch(session.worktreePath, comparisonBranch, ctx.commandRunner)
         : null;
 
       const rebaseCommands = worktreeManager.generateRebaseCommands(comparisonBranch);

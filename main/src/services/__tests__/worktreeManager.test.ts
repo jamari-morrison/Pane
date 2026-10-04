@@ -503,3 +503,34 @@ describe('WorktreeManager.getSessionLocalBaseBranch', () => {
     expect(localBaseBranch).toBe('release');
   });
 });
+
+describe('WorktreeManager.getMainRepoOriginBranch', () => {
+  it('reports the comparison ref itself once it is already on origin, as for a fresh clone', async () => {
+    const runner = commandRunner(async command => {
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    await expect(new WorktreeManager().getMainRepoOriginBranch('/repo', 'origin/master', runner))
+      .resolves.toBe('origin/master');
+    expect(runner.execAsync).not.toHaveBeenCalled();
+  });
+
+  it('finds origin/<branch> for a local comparison branch', async () => {
+    const runner = commandRunner(async command => {
+      if (command === 'git rev-parse --verify origin/main') return { stdout: 'abc\n', stderr: '' };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    await expect(new WorktreeManager().getMainRepoOriginBranch('/repo', 'main', runner))
+      .resolves.toBe('origin/main');
+  });
+
+  it('reports no origin branch when the repo has none', async () => {
+    const runner = commandRunner(async () => {
+      throw new Error('fatal: Needed a single revision');
+    });
+
+    await expect(new WorktreeManager().getMainRepoOriginBranch('/repo', 'main', runner))
+      .resolves.toBeNull();
+  });
+});
