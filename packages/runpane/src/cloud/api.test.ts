@@ -68,7 +68,14 @@ function fakeProvider(clock: FakeClock, orgs: ListedBoatOrg[] = [{ id: 'team_tes
         sandboxes.set(id, created);
         return { ...created, state: 'starting', providerState: 'provisioning' };
       },
+      async getWithoutWallet(id) {
+        calls.push(`get-without-wallet ${id}`);
+        return sandboxes.get(id) ?? { id, name: '', state: 'gone', providerState: 'not_found' };
+      },
       async get(id) {
+        // boat scopes every call to the wallet in X-Boat-Org: a sandbox in another wallet answers 404.
+        const scoped = sandboxes.get(id);
+        if (org && scoped?.org && scoped.org.id !== org) return { id, name: '', state: 'gone', providerState: 'not_found' };
         if (slow.destroy && slow.destroyAcceptedAt !== undefined && slow.destroy.goneAfterMs !== 'never'
           && clock.now() - slow.destroyAcceptedAt >= slow.destroy.goneAfterMs) sandboxes.delete(id);
         const current = sandboxes.get(id);
@@ -96,6 +103,8 @@ function fakeProvider(clock: FakeClock, orgs: ListedBoatOrg[] = [{ id: 'team_tes
       },
       async destroy(id) {
         calls.push(`destroy ${id}`);
+        const scoped = sandboxes.get(id);
+        if (org && scoped?.org && scoped.org.id !== org) return;
         if (slow.destroy) slow.destroyAcceptedAt = clock.now();
         else sandboxes.delete(id);
       },
@@ -119,6 +128,8 @@ function fakeProvider(clock: FakeClock, orgs: ListedBoatOrg[] = [{ id: 'team_tes
 /** Set `device` to re-add it once after a delete (a node that rejoins while its sandbox still runs). */
 class TailnetRejoin {
   device?: TailscaleDevice;
+  /** Node ids whose delete answers 200 but leaves the device listed. */
+  stuck = new Set<string>();
 }
 
 function fakeTailnet() {
@@ -128,8 +139,10 @@ function fakeTailnet() {
     mintAuthKey: async () => ({ id: 'k', key: 'tskey-fake-SECRET' }),
     listDevices: async () => devices,
     findDevicesByHostname: async (hostname) => devices.filter((device) => device.hostname === hostname),
+    getDevice: async (nodeId) => devices.find((device) => device.nodeId === nodeId) ?? null,
     async deleteDevice(nodeId) {
       const index = devices.findIndex((device) => device.nodeId === nodeId);
+      if (rejoin.stuck.has(nodeId)) return true;
       if (index !== -1) devices.splice(index, 1);
       if (rejoin.device) {
         devices.push(rejoin.device);
@@ -481,6 +494,67 @@ test('remove keeps the record and says so when boat accepts the delete but keeps
 
   assert.equal(h.saved.has(sessionId), true, 'the saved host stays');
   assert.deepEqual((await h.cloud.list()).map((info) => info.hostname), [hostname], 'the record stays, so the row does too');
+});
+
+function rewriteRecord(h: ReturnType<typeof harness>, hostname: string, change: (record: { meta: { boatOrg?: { id: string; name: string } } }) => void) {
+  const file = path.join(h.dir, 'hosts', `${hostname}.json`);
+  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  change(record);
+  fs.writeFileSync(file, JSON.stringify(record));
+}
+
+test('remove never takes a sandbox it can\'t see in the host\'s wallet as gone', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname, sessionId, sandboxId, label } = await h.cloud.create();
+  // The record names another wallet: its scoped GET and DELETE answer 404 though the sandbox still exists.
+  rewriteRecord(h, hostname, (record) => { record.meta.boatOrg = { id: 'team_other', name: 'other' }; });
+
+  await assert.rejects(h.cloud.remove(hostname, h.onProgress), new RegExp(
+    `Remove didn't finish: boat doesn't show ${label}'s sandbox ${sandboxId} in this host's wallet \\(other\\), but it still exists`, 'u'));
+
+  assert.equal(h.provider.sandboxes.has(sandboxId), true, 'the sandbox was not deleted blind');
+  assert.equal(h.saved.has(sessionId), true);
+  assert.deepEqual((await h.cloud.list()).map((info) => info.hostname), [hostname], 'the record and the row stay');
+});
+
+test('remove deletes the recorded tailnet node by id, even when its name no longer matches', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname } = await h.cloud.create();
+  const [device] = h.tailnet.devices;
+  h.tailnet.devices[0] = { ...device, hostname: 'localhost', name: 'localhost-1.tail1234.ts.net' };
+
+  await h.cloud.remove(hostname, h.onProgress);
+
+  assert.deepEqual(h.tailnet.devices, []);
+});
+
+test('remove checks the recorded node by id: a delete that left it behind keeps the record', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname, sessionId } = await h.cloud.create();
+  const [device] = h.tailnet.devices;
+  // Renamed, so a name search can't see it, and its delete "succeeds" without removing it.
+  h.tailnet.devices[0] = { ...device, hostname: 'localhost', name: 'localhost-1.tail1234.ts.net' };
+  h.tailnet.rejoin.stuck.add(device.nodeId);
+
+  await assert.rejects(h.cloud.remove(hostname, h.onProgress),
+    new RegExp(`Remove didn't finish: the tailnet still lists ${hostname}'s node ${device.nodeId} after deleting it`, 'u'));
+  assert.equal(h.saved.has(sessionId), true);
+});
+
+test('remove clears a sandbox boat no longer has in any wallet without deleting anything', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname, sandboxId } = await h.cloud.create();
+  h.provider.sandboxes.delete(sandboxId);
+
+  await h.cloud.remove(hostname, h.onProgress);
+
+  assert.ok(!h.provider.calls.includes(`destroy ${sandboxId}`), 'nothing left to delete');
+  assert.ok(h.provider.calls.includes(`get-without-wallet ${sandboxId}`), 'checked outside the wallet before calling it gone');
+  assert.deepEqual(await h.cloud.list(), []);
 });
 
 test('host records hold the paired token but never a provider or Tailscale secret', async () => {

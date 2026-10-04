@@ -61,6 +61,8 @@ interface BoatRequest {
   headers?: Record<string, string>;
   /** Safe to resend: reads, and creates carrying an Idempotency-Key. */
   retry?: boolean;
+  /** Send without the wallet header (X-Boat-Org). */
+  withoutWallet?: boolean;
 }
 
 interface BoatResponse {
@@ -129,7 +131,7 @@ export function createBoatProvider(options: BoatProviderOptions): CloudProvider 
       const headers = new Headers(request.headers);
       headers.set('Authorization', `Bearer ${options.apiKey}`);
       headers.set('Accept', 'application/json');
-      if (options.org && !headers.has('X-Boat-Org')) headers.set('X-Boat-Org', options.org);
+      if (options.org && !request.withoutWallet && !headers.has('X-Boat-Org')) headers.set('X-Boat-Org', options.org);
       if (request.body) headers.set('Content-Type', 'application/json');
       try {
         const response = await fetchImpl(`${baseUrl}${request.path}`, {
@@ -173,8 +175,8 @@ export function createBoatProvider(options: BoatProviderOptions): CloudProvider 
     return toCloudSandbox(envelope.sandbox ?? decode(body, sandboxSchema, request));
   }
 
-  async function getSandbox(sandboxId: string): Promise<CloudSandbox> {
-    const request: BoatRequest = { method: 'GET', path: `/sandboxes/${encodeId(sandboxId)}`, retry: true };
+  async function getSandbox(sandboxId: string, withoutWallet = false): Promise<CloudSandbox> {
+    const request: BoatRequest = { method: 'GET', path: `/sandboxes/${encodeId(sandboxId)}`, retry: true, withoutWallet };
     const response = await send(request);
     if (response.status === 404) return goneSandbox(sandboxId);
     if (response.status !== 200) throw boatError(request, response.status, response.body);
@@ -255,7 +257,8 @@ export function createBoatProvider(options: BoatProviderOptions): CloudProvider 
       }
       return { ...sandbox, name: request.name };
     },
-    get: getSandbox,
+    get: (sandboxId) => getSandbox(sandboxId),
+    getWithoutWallet: (sandboxId) => getSandbox(sandboxId, true),
     async list() {
       const sandboxes: CloudSandbox[] = [];
       let cursor: string | undefined;

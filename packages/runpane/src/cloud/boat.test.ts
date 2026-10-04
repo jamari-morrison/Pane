@@ -58,6 +58,17 @@ test('maps boat states and treats 404 as gone', async () => {
   assert.equal((await boat.get('bx_abcdefgh')).state, 'gone');
 });
 
+test('getWithoutWallet asks boat without the wallet header, so another wallet\'s sandbox shows', async () => {
+  const { calls, boat } = fakeBoat([
+    { status: 404, body: { code: 'not_found' } },
+    { status: 200, body: { sandbox: sandbox() } },
+  ], 'team_test');
+  assert.equal((await boat.get('bx_abcdefgh')).state, 'gone');
+  assert.equal((await boat.getWithoutWallet('bx_abcdefgh')).state, 'running');
+  assert.equal(calls[0].headers.get('x-boat-org'), 'team_test');
+  assert.equal(calls[1].headers.has('x-boat-org'), false);
+});
+
 test('destroy confirms the delete and counts a 404 as deleted', async () => {
   const { calls, boat } = fakeBoat([{ status: 404 }]);
   await boat.destroy('bx_abcdefgh');

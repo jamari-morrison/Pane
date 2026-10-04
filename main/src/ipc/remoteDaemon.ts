@@ -898,7 +898,14 @@ export function registerRemoteDaemonHandlers(
   ipcMain.handle('remote-daemon:remove-cloud-sandbox', async (_event, id: PaneCommandValue) => {
     try {
       const sandboxId = decodeBoundary(id, boundary.nonEmptyString);
-      await leaveCloudSandboxIfActive(sandboxId);
+      try {
+        await leaveCloudSandboxIfActive(sandboxId);
+      } catch (error) {
+        // The window may be resyncing and miss this reply: the row keeps the reason too.
+        const reason = `Remove didn't start: couldn't switch this window off the sandbox first (${getCloudErrorMessage(error, 'unknown error')}).`;
+        cloudSandboxes.recordFailure(sandboxId, 'remove', reason);
+        return { success: false, error: reason };
+      }
       return { success: true, data: await cloudSandboxes.remove(sandboxId) };
     } catch (error) {
       return { success: false, error: getCloudErrorMessage(error, 'Failed to remove cloud sandbox') };

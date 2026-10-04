@@ -76,6 +76,11 @@ export interface CloudProvider {
   create(request: CreateSandboxRequest): Promise<CloudSandbox>;
   /** Returns a `gone` sandbox (never throws) when the provider answers 404. */
   get(sandboxId: string): Promise<CloudSandbox>;
+  /**
+   * The same lookup without the wallet scope, to tell "not in this host's wallet" from "gone": a scoped 404 alone
+   * can't say which. Returns `gone` on 404.
+   */
+  getWithoutWallet(sandboxId: string): Promise<CloudSandbox>;
   list(): Promise<CloudSandbox[]>;
   rename(sandboxId: string, name: string): Promise<void>;
   /** Snapshots the disk and powers the sandbox off; a stopped sandbox costs nothing. */

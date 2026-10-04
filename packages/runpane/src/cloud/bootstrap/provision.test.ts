@@ -58,6 +58,7 @@ function fakeTailnet(devices: TailscaleDevice[] = []) {
     mintAuthKey: async () => ({ id: 'k1', key: 'tskey-fake-k1-SECRET' }),
     listDevices: async () => devices,
     findDevicesByHostname: async () => devices,
+    getDevice: async (nodeId) => devices.find((device) => device.nodeId === nodeId) ?? null,
     deleteDevice: async (nodeId) => {
       deleted.push(nodeId);
       return true;

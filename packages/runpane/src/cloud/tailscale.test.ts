@@ -41,6 +41,19 @@ test('a failed OAuth exchange names the status, never the client secret', async 
   });
 });
 
+test('getDevice reads one node by id and answers null when the tailnet says 404', async () => {
+  const { calls, api } = fakeTailscale((_method, path) => {
+    if (path === '/oauth/token') return { status: 200, body: { access_token: 'fake-access', expires_in: 3600 } };
+    if (path === '/device/n-live') return { status: 200, body: { nodeId: 'n-live', id: 'n-live', hostname: 'rp-a', name: 'rp-a.tail1234.ts.net.', tags: ['tag:rp-session'] } };
+    return { status: 404 };
+  });
+  assert.deepEqual(await api.getDevice('n-live'), {
+    nodeId: 'n-live', id: 'n-live', hostname: 'rp-a', name: 'rp-a.tail1234.ts.net', addresses: [], tags: ['tag:rp-session'], lastSeen: undefined,
+  });
+  assert.equal(await api.getDevice('n-gone'), null);
+  assert.deepEqual(calls.filter((call) => call.path.startsWith('/device/')).map((call) => `${call.method} ${call.path}`), ['GET /device/n-live', 'GET /device/n-gone']);
+});
+
 test('deleteOwnedDevices deletes tagged devices under the name and leaves a member\'s machine alone', async () => {
   const deleted: string[] = [];
   const warnings: string[] = [];
