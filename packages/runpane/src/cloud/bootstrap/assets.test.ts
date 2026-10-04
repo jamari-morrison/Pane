@@ -613,7 +613,7 @@ const FAKE_GITHUB_TOKEN = 'FAKE-GH-TOKEN-0123456789-SECRET';
  * Runs `github-auth` with gh faked: it records each argv line in `<home>/gh-argv` and what `auth login` read from
  * stdin in `<home>/gh-stdin`, and answers as `mode` says.
  */
-function runGitHubAuth(mode: 'valid' | 'bad-credentials' | 'missing-scope' | 'offline' | 'setup-git-fails' | 'already-logged-in' | 'no-user-api') {
+function runGitHubAuth(mode: 'valid' | 'bad-credentials' | 'missing-scope' | 'offline' | 'setup-git-fails' | 'already-logged-in' | 'no-user-api' | 'refused-old-signed-in') {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
   const state = path.join(home, 'state');
   fs.mkdirSync(state, { mode: 0o700 });
@@ -621,7 +621,7 @@ function runGitHubAuth(mode: 'valid' | 'bad-credentials' | 'missing-scope' | 'of
   fs.writeFileSync(tokenFile, `${FAKE_GITHUB_TOKEN}\n`, { mode: 0o644 });
   const argv = path.join(home, 'gh-argv');
   const stdin = path.join(home, 'gh-stdin');
-  const loginFails = mode === 'bad-credentials'
+  const loginFails = mode === 'bad-credentials' || mode === 'refused-old-signed-in'
     ? `echo 'error validating token: HTTP 401: Bad credentials (https://api.github.com/)' >&2; return 1;`
     : mode === 'missing-scope'
       ? `echo "error validating token: missing required scope 'read:org'" >&2; return 1;`
@@ -631,7 +631,8 @@ function runGitHubAuth(mode: 'valid' | 'bad-credentials' | 'missing-scope' | 'of
         : mode === 'already-logged-in'
           ? `mkdir -p "$HOME/.config/gh"; : > "$HOME/.config/gh/hosts.yml"; echo 'already logged in' >&2; return 1;`
           : '';
-  const signedIn = mode === 'valid' || mode === 'setup-git-fails' || mode === 'already-logged-in' || mode === 'no-user-api';
+  // refused-old-signed-in: GitHub refuses the new token while an older one from an earlier start still signs gh in.
+  const signedIn = mode === 'valid' || mode === 'setup-git-fails' || mode === 'already-logged-in' || mode === 'no-user-api' || mode === 'refused-old-signed-in';
   const gh = `() { echo "$*" >> '${argv}';
     case "$1 $2" in
       "auth login") cat > '${stdin}'; ${loginFails} mkdir -p "$HOME/.config/gh"; printf 'github.com:\\n  oauth_token: %s\\n' "$(cat '${stdin}')" > "$HOME/.config/gh/hosts.yml"; chmod 644 "$HOME/.config/gh/hosts.yml"; echo 'Logged in as octo-cat (token FAKE-GH-***)' >&2 ;;
@@ -827,4 +828,12 @@ test('github-auth judges by gh auth status: signed in counts even when a step ex
   assert.deepEqual(runGitHubAuth('no-user-api').payload, { ok: true, state: 'signed-in', user: 'octo-cat' });
   // setup-git is tried again once before the status decides.
   assert.equal(runGitHubAuth('setup-git-fails').argv.match(/^auth setup-git/gmu)?.length, 2);
+});
+
+test('github-auth calls a refused token invalid even when an older token still signs gh in (D12-1)', () => {
+  const run = runGitHubAuth('refused-old-signed-in');
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.deepEqual(run.payload, { ok: true, state: 'invalid' });
+  assert.equal(fs.existsSync(run.tokenFile), false);
+  assert.doesNotMatch(run.stdout + run.stderr, /SECRET|FAKE-GH-TOKEN|Bad credentials/u);
 });
