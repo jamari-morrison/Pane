@@ -57,6 +57,8 @@ import type { AnalyticsIdentity, TerminalShortcut } from './types/config';
 import type { ResumableSession } from '../../shared/types/panels';
 import type { Project } from './types/project';
 import type { SettingsCategoryId, SettingsOpenRequest, SettingsTarget } from './types/settings';
+import { onOpenHostGitHubSettings } from './utils/hostSettings';
+import { onOpenSettingsAt } from './utils/settingsLinks';
 import type {
   PanePermissionRequest,
   PanePermissionResolvedEvent,
@@ -681,6 +683,11 @@ function App() {
     return () => cancelAnimationFrame(frame);
   }, [isLoaded]);
 
+  // A host whose GitHub sign-in lives in Settings (e.g. from a clone error) opens it here.
+  useEffect(() => onOpenHostGitHubSettings(openSettings), [openSettings]);
+  // Links to a Settings field from anywhere, e.g. the cloud sandbox setup warning.
+  useEffect(() => onOpenSettingsAt(openSettings), [openSettings]);
+
   useEffect(() => window.electronAPI?.events?.onAppMenuAction?.((action) => {
     if (action === 'open-settings') openSettings();
     else setIsAboutOpen(true);
@@ -880,6 +887,7 @@ function App() {
         )}
         <AddProjectDialog
           isOpen={showAddProjectDialog}
+          mode="new"
           onClose={() => setShowAddProjectDialog(false)}
         />
         <Help isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
