@@ -44,6 +44,7 @@ export interface CloudCredentialsUpdate {
  * message is fixed text, never gh's output.
  */
 export type CloudSandboxGitHubView =
+  /** `user` is '' when gh is signed in but the account name couldn't be read. */
   | { state: 'signed-in'; user: string }
   | { state: 'invalid' }
   | { state: 'error'; message: string };

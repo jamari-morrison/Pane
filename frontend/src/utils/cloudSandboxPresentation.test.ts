@@ -183,6 +183,7 @@ describe('getCloudGitHubNotice', () => {
   it.each([
     ['no token', undefined, null],
     ['signed in', { state: 'signed-in', user: 'octo-cat' }, { kind: 'ok', text: 'GitHub: signed in as octo-cat' }],
+    ['signed in, account name unknown', { state: 'signed-in', user: '' }, { kind: 'ok', text: 'GitHub: signed in' }],
     ['invalid', { state: 'invalid' }, { kind: 'warning', text: '⚠ GitHub token invalid' }],
     ['could not apply', { state: 'error', message: "gh isn't installed on the sandbox." },
       { kind: 'warning', text: "⚠ GitHub sign-in didn't finish: gh isn't installed on the sandbox." }],

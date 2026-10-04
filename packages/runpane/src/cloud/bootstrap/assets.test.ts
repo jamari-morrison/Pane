@@ -613,7 +613,7 @@ const FAKE_GITHUB_TOKEN = 'FAKE-GH-TOKEN-0123456789-SECRET';
  * Runs `github-auth` with gh faked: it records each argv line in `<home>/gh-argv` and what `auth login` read from
  * stdin in `<home>/gh-stdin`, and answers as `mode` says.
  */
-function runGitHubAuth(mode: 'valid' | 'bad-credentials' | 'missing-scope' | 'offline' | 'setup-git-fails') {
+function runGitHubAuth(mode: 'valid' | 'bad-credentials' | 'missing-scope' | 'offline' | 'setup-git-fails' | 'already-logged-in' | 'no-user-api') {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-home-'));
   const state = path.join(home, 'state');
   fs.mkdirSync(state, { mode: 0o700 });
@@ -627,13 +627,17 @@ function runGitHubAuth(mode: 'valid' | 'bad-credentials' | 'missing-scope' | 'of
       ? `echo "error validating token: missing required scope 'read:org'" >&2; return 1;`
       : mode === 'offline'
         ? `echo 'error validating token: Get "https://api.github.com/": dial tcp: lookup api.github.com: no such host' >&2; return 1;`
-        : '';
+        // gh exits non-zero although the host is (and stays) signed in, e.g. a token already stored in hosts.yml.
+        : mode === 'already-logged-in'
+          ? `mkdir -p "$HOME/.config/gh"; : > "$HOME/.config/gh/hosts.yml"; echo 'already logged in' >&2; return 1;`
+          : '';
+  const signedIn = mode === 'valid' || mode === 'setup-git-fails' || mode === 'already-logged-in' || mode === 'no-user-api';
   const gh = `() { echo "$*" >> '${argv}';
     case "$1 $2" in
       "auth login") cat > '${stdin}'; ${loginFails} mkdir -p "$HOME/.config/gh"; printf 'github.com:\\n  oauth_token: %s\\n' "$(cat '${stdin}')" > "$HOME/.config/gh/hosts.yml"; chmod 644 "$HOME/.config/gh/hosts.yml"; echo 'Logged in as octo-cat (token FAKE-GH-***)' >&2 ;;
       "auth setup-git") ${mode === 'setup-git-fails' ? 'return 1;' : ''} ;;
-      "auth status") echo 'Token: FAKE-GH-***' ;;
-      "api user") echo 'octo-cat' ;;
+      "auth status") ${signedIn ? "echo '  ✓ Logged in to github.com account octo-cat (/home/user/.config/gh/hosts.yml)' >&2; echo 'Token: FAKE-GH-***'" : "echo 'You are not logged into any GitHub hosts.' >&2; return 1"} ;;
+      "api user") ${mode === 'no-user-api' ? 'return 1' : "echo 'octo-cat'"} ;;
     esac; }`;
   const result = runStep('github-auth', [tokenFile], new Map([['gh', gh]]), home);
   const payload = JSON.parse(result.stdout.trim().split('\n').pop()?.replace(/^RP_RESULT /u, '') ?? '{}');
@@ -670,9 +674,7 @@ test('github-auth calls a token GitHub refuses invalid, and anything else an err
   const offline = runGitHubAuth('offline');
   assert.deepEqual(offline.payload, { ok: true, state: 'error', reason: 'login-failed' });
   assert.equal(fs.existsSync(offline.tokenFile), false);
-  const setupGit = runGitHubAuth('setup-git-fails');
-  assert.deepEqual(setupGit.payload, { ok: true, state: 'error', reason: 'setup-git-failed' });
-  assert.equal(fs.existsSync(setupGit.tokenFile), false);
+  assert.equal(fs.existsSync(runGitHubAuth('setup-git-fails').tokenFile), false);
 
   assert.match(runStep('github-auth', ['/nonexistent/gh-token']).stdout, /"error": "github-auth: no token file"/u);
 });
@@ -810,4 +812,19 @@ test('startup-run if-changed runs again when the local env changed since the las
   assert.equal(runStartupStep(home, 'startup-run', ['if-changed'], idle).payload.state, 'skipped');
   fs.rmSync(localEnvFile(home));
   assert.equal(runStartupStep(home, 'startup-run', ['if-changed'], idle).payload.state, 'started', 'the env was removed');
+});
+
+test('github-auth judges by gh auth status: signed in counts even when a step exited non-zero', () => {
+  // R8-GHWARN: a sandbox signed in to GitHub must never show the warning because one step's exit code was not 0.
+  for (const mode of ['already-logged-in', 'setup-git-fails'] as const) {
+    const run = runGitHubAuth(mode);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.deepEqual(run.payload, { ok: true, state: 'signed-in', user: 'octo-cat' }, mode);
+    assert.equal(fs.existsSync(run.tokenFile), false);
+    assert.doesNotMatch(run.stdout + run.stderr, /SECRET|FAKE-GH-TOKEN|\*\*\*/u);
+  }
+  // The account name comes from gh auth status when the API can't be asked.
+  assert.deepEqual(runGitHubAuth('no-user-api').payload, { ok: true, state: 'signed-in', user: 'octo-cat' });
+  // setup-git is tried again once before the status decides.
+  assert.equal(runGitHubAuth('setup-git-fails').argv.match(/^auth setup-git/gmu)?.length, 2);
 });

@@ -33,6 +33,8 @@ interface SlowStop {
 class SlowBoat {
   stop?: SlowStop;
   acceptedAt?: number;
+  /** Commands fail this many more times, as right after a resume before the sandbox takes commands. */
+  commandsFailing = 0;
 }
 
 function fakeProvider(clock: FakeClock, orgs: ListedBoatOrg[] = [{ id: 'team_test', name: 'test', active: false }]) {
@@ -92,6 +94,10 @@ function fakeProvider(clock: FakeClock, orgs: ListedBoatOrg[] = [{ id: 'team_tes
         writeFile: async () => undefined,
         async runScript(script) {
           calls.push(`run ${id} ${script}`);
+          if (slow.commandsFailing > 0) {
+            slow.commandsFailing -= 1;
+            throw new Error('boat command failed: sandbox agent not ready');
+          }
           return { exitCode: 0, stdout: '', stderr: '' };
         },
       }),
@@ -128,6 +134,8 @@ interface BootstrapScript {
   hostnameFails?: boolean;
   /** What applying the GitHub token reports (default: signed in); a thrown Error when the sandbox fails. */
   github?: GitHubAuthStatus | Error;
+  /** applyGitHubToken throws this many times first (a sandbox that isn't ready yet), then answers `github`. */
+  githubFailsFirst?: number;
   startupRunFails?: boolean;
 }
 
@@ -187,6 +195,10 @@ function fakeBootstrap(tailnet: ReturnType<typeof fakeTailnet>, script: Bootstra
       events.push('github');
       githubTokens.push(token);
       if (!token) return { state: 'none' };
+      if ((script.githubFailsFirst ?? 0) > 0) {
+        script.githubFailsFirst = (script.githubFailsFirst ?? 0) - 1;
+        throw new Error('cloud bootstrap step "github-auth" failed: no result (exit null)');
+      }
       if (script.github instanceof Error) throw script.github;
       return script.github ?? { state: 'signed-in', user: 'octo-cat' };
     },
@@ -361,7 +373,7 @@ test('stop flushes then stops; start resumes and waits for the daemon', async ()
   const started = await h.cloud.start(hostname, h.onProgress);
   assert.equal(started.state, 'running');
   assert.deepEqual(started.health, { ok: true, version: '2.4.146' });
-  assert.equal(h.provider.calls.at(-1), `resume ${sandboxId}`);
+  assert.deepEqual(h.provider.calls.slice(-2), [`resume ${sandboxId}`, `run ${sandboxId} true`], "resumed, then waited until it takes commands");
   assert.deepEqual(h.boot.repairs, [], 'a healthy start needs no repair');
 });
 
@@ -539,7 +551,7 @@ test('Start waits through a Stop that boat is still archiving, then resumes', as
   await h.provider.factory('k').stop(sandboxId);
   const started = await h.cloud.start(hostname);
   assert.equal(started.state, 'running');
-  assert.equal(h.provider.calls.at(-1), `resume ${sandboxId}`);
+  assert.deepEqual(h.provider.calls.slice(-2), [`resume ${sandboxId}`, `run ${sandboxId} true`], "resumed, then waited until it takes commands");
 });
 
 test('create pushes the startup script and runs it once, showing "Running your startup script…"', async () => {
@@ -778,4 +790,36 @@ test('saving the GitHub token or any other credential keeps the saved boat walle
     assert.deepEqual((await h.cloud.getCredentialsStatus()).boat.org, { id: 'team_test', name: 'test' }, `after saving ${Object.keys(update).join(', ')}`);
   }
   assert.equal(JSON.parse(fs.readFileSync(path.join(h.dir, 'settings.json'), 'utf8')).boatOrg.name, 'test');
+});
+
+test('R8-GHWARN: start waits until the resumed sandbox takes commands before signing GitHub in', async () => {
+  const h = harness();
+  await withCredentials(h);
+  await h.cloud.setup({ githubToken: GITHUB_TOKEN });
+  const created = await h.cloud.create();
+  await h.cloud.stop(created.hostname);
+  h.boot.events.length = 0;
+  h.provider.slow.commandsFailing = 3;
+  const started = await h.cloud.start(created.hostname);
+  assert.equal(h.provider.slow.commandsFailing, 0, 'it asked until the sandbox answered');
+  assert.deepEqual(started.github, { state: 'signed-in', user: 'octo-cat' });
+  assert.ok(h.boot.events.indexOf('github') < h.boot.events.indexOf('health'));
+});
+
+test('R8-GHWARN: a GitHub apply that fails while the sandbox settles is tried again before any warning', async () => {
+  const script: BootstrapScript = {};
+  const h = harness(script);
+  await withCredentials(h);
+  await h.cloud.setup({ githubToken: GITHUB_TOKEN });
+  const created = await h.cloud.create();
+  await h.cloud.stop(created.hostname);
+  script.githubFailsFirst = 2;
+  const started = await h.cloud.start(created.hostname);
+  assert.deepEqual(started.github, { state: 'signed-in', user: 'octo-cat' }, 'no warning after a retry succeeds');
+
+  await h.cloud.stop(created.hostname);
+  script.githubFailsFirst = 3;
+  assert.deepEqual((await h.cloud.start(created.hostname)).github, { state: 'error', message: "Couldn't apply the GitHub token on the sandbox." },
+    'the warning only after every try failed');
+  assert.equal(script.githubFailsFirst, 0, 'three tries');
 });

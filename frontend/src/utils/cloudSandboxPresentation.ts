@@ -94,7 +94,7 @@ export function getCloudStartupScriptNotice(sandbox: CloudSandboxView): CloudSta
 export function getCloudGitHubNotice(sandbox: CloudSandboxView): { kind: 'ok' | 'warning'; text: string } | null {
   const github = sandbox.github;
   if (!github) return null;
-  if (github.state === 'signed-in') return { kind: 'ok', text: `GitHub: signed in as ${github.user}` };
+  if (github.state === 'signed-in') return { kind: 'ok', text: github.user ? `GitHub: signed in as ${github.user}` : 'GitHub: signed in' };
   if (github.state === 'invalid') return { kind: 'warning', text: '⚠ GitHub token invalid' };
   return { kind: 'warning', text: `⚠ GitHub sign-in didn't finish: ${github.message}` };
 }

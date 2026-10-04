@@ -333,7 +333,8 @@ test('applyGitHubToken skips quietly without a token and maps every outcome to f
     { state: 'error', message: "gh couldn't sign in on the sandbox (GitHub may be unreachable from it)." });
   assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'setup-git-failed' }), { state: 'error', message: 'gh signed in, but setting up git failed.' });
   assert.deepEqual(await outcome({ ok: true, state: 'error', reason: 'something-new' }), { state: 'error', message: "Couldn't apply the GitHub token on the sandbox." });
-  await assert.rejects(outcome({ ok: true, state: 'signed-in' }), /malformed result/u, 'signed-in needs the user');
+  // Signed in counts even when the account name couldn't be read.
+  assert.deepEqual(await outcome({ ok: true, state: 'signed-in', user: '' }), { state: 'signed-in', user: '' });
 });
 
 test('applyGitHubToken removes the uploaded token file when the step never runs', async () => {
