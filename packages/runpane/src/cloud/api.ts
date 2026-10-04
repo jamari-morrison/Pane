@@ -32,7 +32,16 @@ import {
   type CloudStore,
   type PaneSource,
 } from './store';
-import { CLOUD_SESSION_TAG, createTailscaleApi, deletableNodeIds, deleteOwnedDevices, type TailscaleApi, type TailscaleOAuthCredentials } from './tailscale';
+import {
+  CLOUD_SESSION_TAG,
+  createTailscaleApi,
+  deletableNodeIds,
+  deleteOwnedDevices,
+  describeForeignDevice,
+  type TailscaleApi,
+  type TailscaleDevice,
+  type TailscaleOAuthCredentials,
+} from './tailscale';
 
 /**
  * Cloud sandboxes: Pane daemons on boat.dev sandboxes, joined to the user's tailnet and saved as remote hosts.
@@ -488,6 +497,16 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
     const { label } = record.profile;
     const progress = (message: string) => onProgress?.({ step: 'removing', message });
 
+    // The recorded node id is deleted only when that device is this sandbox's: its name AND runpane's tag. A wrong
+    // id (another sandbox's node, a member's machine) stops the remove before anything is deleted.
+    const belongsHere = (device: TailscaleDevice) => (device.tags ?? []).includes(CLOUD_SESSION_TAG)
+      && [device.hostname, device.name.split('.')[0]].some((name) => name.toLowerCase() === hostname.toLowerCase());
+    const recordedNode = nodeId ? await tailnet.getDevice(nodeId) : null;
+    if (recordedNode && !belongsHere(recordedNode)) {
+      throw new Error(`Remove didn't finish: the recorded tailnet device doesn't belong to this sandbox: ${nodeId} is `
+        + `${describeForeignDevice(recordedNode)}, not ${hostname} tagged ${CLOUD_SESSION_TAG}. Nothing was deleted.`);
+    }
+
     let sandboxGone = (await provider.get(sandboxId)).state === 'gone';
     if (sandboxGone) {
       const anywhere = await provider.getWithoutWallet(sandboxId);
@@ -498,9 +517,11 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
       progress(`boat no longer has ${label}'s sandbox; removing what is left...`);
     }
 
-    if (nodeId) {
-      const deleted = await tailnet.deleteDevice(nodeId);
+    if (recordedNode) {
+      const deleted = await tailnet.deleteDevice(recordedNode.nodeId);
       progress(`Tailnet node ${nodeId}: ${deleted ? 'deleted' : 'already gone'}.`);
+    } else if (nodeId) {
+      progress(`Tailnet node ${nodeId}: already gone.`);
     }
     await deleteOwnedDevices(tailnet, hostname, undefined, () => undefined);
 
@@ -524,7 +545,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
 
     // The sandbox can't rejoin any more: sweep again for a node that came back while it was still running.
     await deleteOwnedDevices(tailnet, hostname, undefined, () => undefined);
-    if (nodeId && await tailnet.getDevice(nodeId)) {
+    if (recordedNode && await tailnet.getDevice(recordedNode.nodeId)) {
       throw new Error(`Remove didn't finish: the tailnet still lists ${hostname}'s node ${nodeId} after deleting it. Try Remove again.`);
     }
     const remaining = deletableNodeIds(await tailnet.findDevicesByHostname(hostname), [CLOUD_SESSION_TAG]).nodeIds;

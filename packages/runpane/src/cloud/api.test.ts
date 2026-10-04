@@ -518,16 +518,27 @@ test('remove never takes a sandbox it can\'t see in the host\'s wallet as gone',
   assert.deepEqual((await h.cloud.list()).map((info) => info.hostname), [hostname], 'the record and the row stay');
 });
 
-test('remove deletes the recorded tailnet node by id, even when its name no longer matches', async () => {
-  const h = harness();
-  await withCredentials(h);
-  const { hostname } = await h.cloud.create();
-  const [device] = h.tailnet.devices;
-  h.tailnet.devices[0] = { ...device, hostname: 'localhost', name: 'localhost-1.tail1234.ts.net' };
+test('remove never deletes a recorded node that is not this sandbox\'s, and keeps the record', async () => {
+  for (const foreign of [
+    { hostname: 'rp-other1234', name: 'rp-other1234.tail1234.ts.net', tags: ['tag:rp-session'] },
+    { tags: [] },
+  ]) {
+    const h = harness();
+    await withCredentials(h);
+    const { hostname, sessionId, sandboxId } = await h.cloud.create();
+    const [device] = h.tailnet.devices;
+    // The record's node id points at another sandbox's node, or at an untagged machine.
+    h.tailnet.devices[0] = { ...device, ...foreign };
 
-  await h.cloud.remove(hostname, h.onProgress);
+    await assert.rejects(h.cloud.remove(hostname, h.onProgress),
+      new RegExp(`^Error: Remove didn't finish: the recorded tailnet device doesn't belong to this sandbox: ${device.nodeId} is .* Nothing was deleted\\.$`, 'u'));
 
-  assert.deepEqual(h.tailnet.devices, []);
+    assert.deepEqual(h.tailnet.devices.map((left) => left.nodeId), [device.nodeId], 'that device is untouched');
+    assert.equal(h.provider.sandboxes.has(sandboxId), true, 'and so is the sandbox');
+    assert.ok(!h.provider.calls.includes(`destroy ${sandboxId}`));
+    assert.equal(h.saved.has(sessionId), true);
+    assert.deepEqual((await h.cloud.list()).map((info) => info.hostname), [hostname], 'the row stays');
+  }
 });
 
 test('remove checks the recorded node by id: a delete that left it behind keeps the record', async () => {
@@ -535,8 +546,7 @@ test('remove checks the recorded node by id: a delete that left it behind keeps 
   await withCredentials(h);
   const { hostname, sessionId } = await h.cloud.create();
   const [device] = h.tailnet.devices;
-  // Renamed, so a name search can't see it, and its delete "succeeds" without removing it.
-  h.tailnet.devices[0] = { ...device, hostname: 'localhost', name: 'localhost-1.tail1234.ts.net' };
+  // Its delete "succeeds" without removing it.
   h.tailnet.rejoin.stuck.add(device.nodeId);
 
   await assert.rejects(h.cloud.remove(hostname, h.onProgress),
