@@ -404,10 +404,8 @@ export async function applyGitHubToken(sandbox: SandboxHandle, token: string | u
     await sandbox.runScript(`shred -u ${shellQuote(file)} 2>/dev/null || rm -f ${shellQuote(file)}`, { timeoutSeconds: 30 }).catch(() => undefined);
     throw error;
   }
-  if (result.state === 'signed-in') {
-    if (!result.user) throw new BootstrapError('github-auth', 'malformed result: signed in without a user');
-    return { state: 'signed-in', user: result.user };
-  }
+  // `user` is '' when gh is signed in but the account name couldn't be read.
+  if (result.state === 'signed-in') return { state: 'signed-in', user: result.user ?? '' };
   if (result.state === 'invalid') return { state: 'invalid' };
   return { state: 'error', message: GITHUB_AUTH_ERRORS.get(result.reason ?? '') ?? GITHUB_AUTH_FAILED };
 }

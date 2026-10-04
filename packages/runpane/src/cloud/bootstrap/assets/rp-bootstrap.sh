@@ -824,7 +824,7 @@ UNIT
 # would hang, so gh keeps it in ~/.config/gh/hosts.yml, owner-only. No gh output reaches the result (it can echo token
 # prefixes): `invalid` when GitHub refuses the token, `error` with a fixed reason otherwise.
 step_github_auth() {
-  local file="${1:-}" out rc=0 user
+  local file="${1:-}" out rc=0 setup_rc=0 user
   [ -f "$file" ] || fail "github-auth: no token file"
   # shellcheck disable=SC2064 # the path is fixed now
   trap "shred -u '$file' 2>/dev/null || rm -f '$file'" EXIT
@@ -835,21 +835,28 @@ step_github_auth() {
   fi
   out="$(gh auth login --hostname github.com --with-token --insecure-storage <"$file" 2>&1)" || rc=$?
   shred -u "$file" 2>/dev/null || rm -f "$file"
-  if [ "$rc" -ne 0 ]; then
-    case "$out" in
-      # A classic token without a scope gh requires can't sign in either. gh skips that check for fine-grained tokens
-      # (no X-OAuth-Scopes header; pkg/cmd/auth/shared/oauth_scopes.go HeaderHasMinimumScopes).
-      *"HTTP 401"*|*"Bad credentials"*|*"missing required scope"*) result '{"ok":true,"state":"invalid"}' ;;
-      *) result '{"ok":true,"state":"error","reason":"login-failed"}' ;;
-    esac
+  [ -f "$HOME/.config/gh/hosts.yml" ] && chmod 600 "$HOME/.config/gh/hosts.yml"
+  # setup-git can fail once while the sandbox settles after a resume; one more try.
+  gh auth setup-git --hostname github.com >/dev/null 2>&1 || gh auth setup-git --hostname github.com >/dev/null 2>&1 || setup_rc=$?
+  # Whether the sandbox IS signed in decides, not one step's exit code: gh can exit non-zero while staying signed in
+  # (a token already stored, say), and the row must not warn about a sandbox that works.
+  if gh auth status --hostname github.com >/dev/null 2>&1; then
+    user="$(gh api user --jq .login 2>/dev/null || true)"
+    if ! [[ "$user" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]; then
+      user="$(gh auth status --hostname github.com 2>&1 | sed -n 's/.*Logged in to github\.com account \([A-Za-z0-9][A-Za-z0-9-]*\).*/\1/p' | head -1)"
+    fi
+    [[ "$user" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || user=""
+    result "$(printf '{"ok":true,"state":"signed-in","user":"%s"}' "$user")"
     return
   fi
-  [ -f "$HOME/.config/gh/hosts.yml" ] && chmod 600 "$HOME/.config/gh/hosts.yml"
-  gh auth setup-git --hostname github.com >/dev/null 2>&1 || { result '{"ok":true,"state":"error","reason":"setup-git-failed"}'; return; }
-  gh auth status --hostname github.com >/dev/null 2>&1 || { result '{"ok":true,"state":"error","reason":"status-failed"}'; return; }
-  user="$(gh api user --jq .login 2>/dev/null || true)"
-  [[ "$user" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || { result '{"ok":true,"state":"error","reason":"user-unknown"}'; return; }
-  result "$(printf '{"ok":true,"state":"signed-in","user":"%s"}' "$user")"
+  case "$out" in
+    # A classic token without a scope gh requires can't sign in either. gh skips that check for fine-grained tokens
+    # (no X-OAuth-Scopes header; pkg/cmd/auth/shared/oauth_scopes.go HeaderHasMinimumScopes).
+    *"HTTP 401"*|*"Bad credentials"*|*"missing required scope"*) result '{"ok":true,"state":"invalid"}' ;;
+    *) if [ "$rc" -ne 0 ]; then result '{"ok":true,"state":"error","reason":"login-failed"}'
+       elif [ "${setup_rc:-0}" -ne 0 ]; then result '{"ok":true,"state":"error","reason":"setup-git-failed"}'
+       else result '{"ok":true,"state":"error","reason":"status-failed"}'; fi ;;
+  esac
 }
 
 # local-env-install <uploaded env file | "">: the variables the user's LOCAL start script printed (Settings > Cloud

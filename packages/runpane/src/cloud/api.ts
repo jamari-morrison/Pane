@@ -238,6 +238,10 @@ export interface CloudBootstrap {
 }
 
 const SANDBOX_READY_TIMEOUT_MS = 180_000;
+/** How long a resumed sandbox may take to run commands before the start goes on anyway. */
+const COMMANDS_READY_TIMEOUT_MS = 120_000;
+const GITHUB_APPLY_ATTEMPTS = 3;
+const GITHUB_APPLY_RETRY_MS = 5_000;
 const LOCAL_START_FAILED = "Pane couldn't run the local start script.";
 const LOCAL_ENV_NOT_SENT = "Couldn't send the local start script's variables to the sandbox.";
 /**
@@ -334,10 +338,33 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
    * never puts the token in a message: a failure is reported with fixed text.
    */
   async function applyGitHubBestEffort(handle: SandboxHandle, credentials: CloudCredentials): Promise<GitHubAuthStatus> {
-    try {
-      return await bootstrap.applyGitHubToken(handle, credentials.github?.token);
-    } catch {
-      return { state: 'error', message: GITHUB_AUTH_FAILED };
+    // A sandbox that just resumed can fail a command or two while it settles: try again before warning about GitHub.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await bootstrap.applyGitHubToken(handle, credentials.github?.token);
+      } catch {
+        if (attempt >= GITHUB_APPLY_ATTEMPTS) return { state: 'error', message: GITHUB_AUTH_FAILED };
+        await sleep(GITHUB_APPLY_RETRY_MS);
+      }
+    }
+  }
+
+  /**
+   * Waits until a resumed sandbox runs commands: boat reports it running before its command service answers, and the
+   * steps after a start (OS name, GitHub, local env, startup script) all go through it. Gives up quietly at the limit;
+   * each step then reports its own failure.
+   */
+  async function waitForCommands(handle: SandboxHandle): Promise<void> {
+    const deadline = now() + COMMANDS_READY_TIMEOUT_MS;
+    for (;;) {
+      try {
+        const answer = await handle.runScript('true', { timeoutSeconds: 15 });
+        if (answer.exitCode === 0) return;
+      } catch {
+        // not ready yet
+      }
+      if (now() >= deadline) return;
+      await sleep(POLL_INTERVAL_MS);
     }
   }
 
@@ -659,6 +686,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
         await store.writeHost(record);
       }
       sandbox = await waitForSandbox(provider, sandboxId, 'running', SANDBOX_READY_TIMEOUT_MS);
+      await waitForCommands(provider.handle(sandboxId));
       await setHostnameBestEffort(provider.handle(sandboxId), record, (message) => onProgress?.({ step: 'starting', message }));
       const github = await applyGitHubBestEffort(provider.handle(sandboxId), credentials);
       // Fresh variables for THIS sandbox only, before its startup script runs with them.
