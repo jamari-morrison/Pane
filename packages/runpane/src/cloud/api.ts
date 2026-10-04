@@ -471,9 +471,12 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
 
   /** Tailnet devices first, then the sandbox (a live node would otherwise linger as an orphan). */
   /**
-   * Deletes the sandbox and its tailnet node, and returns only once both are confirmed gone: boat accepts a delete
-   * (202) and finishes it later, and a node whose sandbox still runs can rejoin the tailnet after its device is
-   * deleted. Anything left over throws "Remove didn't finish: …", so the caller keeps the record (and the row).
+   * Deletes the sandbox and its tailnet node, and returns only once both are confirmed gone. boat accepts a delete
+   * (202) and finishes it later; its calls are scoped to the host's wallet, where a sandbox in another wallet also
+   * answers 404, so a scoped 404 is double-checked without the wallet before it counts as gone. The recorded node is
+   * deleted and checked by id (a name search misses a renamed node), and the name is swept again at the end for a
+   * node that rejoined while the sandbox still ran. Anything left over throws "Remove didn't finish: …", so the
+   * caller keeps the record (and the row).
    */
   async function destroyHost(
     record: CloudHostRecord,
@@ -483,25 +486,52 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
   ): Promise<void> {
     const { hostname, nodeId, sandboxId } = record.profile.cloud;
     const { label } = record.profile;
-    await deleteOwnedDevices(tailnet, hostname, nodeId || undefined, () => undefined);
-    await provider.destroy(sandboxId);
+    const progress = (message: string) => onProgress?.({ step: 'removing', message });
+
+    let sandboxGone = (await provider.get(sandboxId)).state === 'gone';
+    if (sandboxGone) {
+      const anywhere = await provider.getWithoutWallet(sandboxId);
+      if (anywhere.state !== 'gone') {
+        throw new Error(`Remove didn't finish: boat doesn't show ${label}'s sandbox ${sandboxId} in this host's wallet `
+          + `(${record.meta.boatOrg?.name ?? 'boat\'s active wallet'}), but it still exists (${anywhere.providerState}). Check the wallet and try Remove again.`);
+      }
+      progress(`boat no longer has ${label}'s sandbox; removing what is left...`);
+    }
+
+    if (nodeId) {
+      const deleted = await tailnet.deleteDevice(nodeId);
+      progress(`Tailnet node ${nodeId}: ${deleted ? 'deleted' : 'already gone'}.`);
+    }
+    await deleteOwnedDevices(tailnet, hostname, undefined, () => undefined);
+
+    if (!sandboxGone) {
+      await provider.destroy(sandboxId);
+      progress(`boat accepted the delete of ${sandboxId}.`);
+    }
     const deadline = now() + REMOVE_CONFIRM_TIMEOUT_MS;
-    for (let waiting = false; ; waiting = true) {
+    for (let waiting = false; !sandboxGone; waiting = true) {
       const sandbox = await provider.get(sandboxId);
-      if (sandbox.state === 'gone') break;
+      sandboxGone = sandbox.state === 'gone';
+      if (sandboxGone) break;
       if (now() >= deadline) {
         throw new Error(`Remove didn't finish: boat still lists ${label}'s sandbox ${sandboxId} (${sandbox.providerState}) `
           + `${REMOVE_CONFIRM_TIMEOUT_MS / 60_000} minutes after accepting the delete. Try Remove again.`);
       }
-      if (!waiting) onProgress?.({ step: 'removing', message: `Waiting for boat to finish removing ${label}...` });
+      if (!waiting) progress(`Waiting for boat to finish removing ${label}...`);
       await sleep(REMOVE_POLL_MS);
     }
+    progress(`boat no longer lists ${sandboxId}.`);
+
     // The sandbox can't rejoin any more: sweep again for a node that came back while it was still running.
     await deleteOwnedDevices(tailnet, hostname, undefined, () => undefined);
+    if (nodeId && await tailnet.getDevice(nodeId)) {
+      throw new Error(`Remove didn't finish: the tailnet still lists ${hostname}'s node ${nodeId} after deleting it. Try Remove again.`);
+    }
     const remaining = deletableNodeIds(await tailnet.findDevicesByHostname(hostname), [CLOUD_SESSION_TAG]).nodeIds;
     if (remaining.length > 0) {
       throw new Error(`Remove didn't finish: tailnet devices for ${hostname} are still listed after delete: ${remaining.join(', ')}. Try Remove again.`);
     }
+    progress(`No tailnet node is left for ${hostname}.`);
   }
 
   return {

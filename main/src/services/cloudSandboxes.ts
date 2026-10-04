@@ -271,6 +271,18 @@ export class CloudSandboxManager {
     });
   }
 
+  /**
+   * Puts a failure that happened before the library ran (e.g. leaving the connected sandbox) on the row, so a renderer
+   * that missed the reply still sees it in the next snapshot; also written to the app log.
+   */
+  recordFailure(id: string, action: Exclude<CloudSandboxAction, 'create'>, message: string): CloudSandboxesSnapshot {
+    console.warn(`[cloud] ${action} ${id} failed: ${message}`);
+    if (this.listed.some((summary) => summary.hostname === id) && !this.operations.get(id)?.running) {
+      this.operations.set(id, { action, running: false, steps: [], error: message });
+    }
+    return this.emit();
+  }
+
   getStartupScript(): Promise<string> {
     return this.options.startupScriptFile.read();
   }
@@ -375,6 +387,7 @@ export class CloudSandboxManager {
     const operation: CloudSandboxOperation = { action, running: true, steps: [] };
     this.operations.set(id, operation);
     this.emit();
+    console.info(`[cloud] ${action} ${id}: started`);
     try {
       // start and update give the sandbox the user's default model; remember which one it got.
       const claudeModel = action === 'start' || action === 'update' ? await this.readDefaultClaudeModel() : undefined;
@@ -385,6 +398,7 @@ export class CloudSandboxManager {
         operation.progress = progress.message;
         this.emit();
       });
+      console.info(`[cloud] ${action} ${id}: done`);
       this.operations.delete(id);
       this.daemonVersions.delete(id);
       // A stopped or removed sandbox's last run says nothing about its next one.

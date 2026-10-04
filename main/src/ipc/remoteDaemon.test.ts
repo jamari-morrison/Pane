@@ -1545,6 +1545,47 @@ describe('cloud sandbox IPC', () => {
     expect(configManager.getConfig().remoteDaemon?.client).toEqual({ profiles: [], activeProfileId: null, mode: 'local' });
   });
 
+  it('keeps a Remove that could not leave the connected sandbox on its row, for a renderer that missed the reply', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const ipcMain = createIpcMainStub();
+    const initialConfig = createDefaultRemoteDaemonConfig();
+    initialConfig.client = { profiles: [cloudProfile], activeProfileId: 'profile-alpha', mode: 'remote' };
+    vi.spyOn(remotePaneClientController, 'switchToLocalMode').mockRejectedValue(new Error('local daemon did not answer'));
+    const cloud = createCloudLibrary({});
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager: createConfigManagerStub(initialConfig) }, cloud);
+    await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
+
+    const result = await ipcMain.handlers.get('remote-daemon:remove-cloud-sandbox')?.({}, 'rp-alpha');
+
+    const reason = "Remove didn't start: couldn't switch this window off the sandbox first (local daemon did not answer).";
+    expect(result).toMatchObject({ success: false, error: reason });
+    expect(cloud.library.remove).not.toHaveBeenCalled();
+    // The renderer was resyncing and lost that reply; the next snapshot it asks for still says what happened.
+    const fresh = await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
+    expect(fresh).toMatchObject({ success: true, data: { sandboxes: [{ id: 'rp-alpha', error: reason, failedAction: 'remove' }] } });
+    expect(warn).toHaveBeenCalledWith(`[cloud] remove rp-alpha failed: ${reason}`);
+  });
+
+  it('keeps a failed Remove on its row after the window left the sandbox', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const ipcMain = createIpcMainStub();
+    const initialConfig = createDefaultRemoteDaemonConfig();
+    initialConfig.client = { profiles: [cloudProfile], activeProfileId: 'profile-alpha', mode: 'remote' };
+    stubSwitchToLocal();
+    const cloud = createCloudLibrary({});
+    const unfinished = "Remove didn't finish: boat still lists alpha's sandbox bx_alpha (idle) 3 minutes after accepting the delete. Try Remove again.";
+    vi.mocked(cloud.library.remove).mockRejectedValueOnce(new Error(unfinished));
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager: createConfigManagerStub(initialConfig) }, cloud);
+    await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
+
+    await ipcMain.handlers.get('remote-daemon:remove-cloud-sandbox')?.({}, 'rp-alpha');
+
+    const fresh = await ipcMain.handlers.get('remote-daemon:get-cloud-sandboxes')?.({});
+    expect(fresh).toMatchObject({ success: true, data: { sandboxes: [{ id: 'rp-alpha', error: unfinished, failedAction: 'remove' }] } });
+    expect(info).toHaveBeenCalledWith('[cloud] remove rp-alpha: started');
+  });
+
   it('reads the daemon version through the saved profile and updates Pane to this app\'s version', async () => {
     const ipcMain = createIpcMainStub();
     const initialConfig = createDefaultRemoteDaemonConfig();

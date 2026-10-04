@@ -97,6 +97,8 @@ export interface TailscaleApi {
   findDevicesByHostname(hostname: string): Promise<TailscaleDevice[]>;
   /** Deletes a device by node id. Resolves false when it was already gone (404). */
   deleteDevice(nodeId: string): Promise<boolean>;
+  /** One device by node id; null when the tailnet answers 404. */
+  getDevice(nodeId: string): Promise<TailscaleDevice | null>;
 }
 
 class TailscaleApiError extends Error {
@@ -172,15 +174,7 @@ export function createTailscaleApi(
       throw await failure(response, 'Tailscale device list');
     }
     const payload = await decodeResponse(response, deviceListSchema, 'Tailscale device list');
-    return (payload.devices ?? []).map((device) => ({
-      nodeId: device.nodeId ?? '',
-      id: device.id ?? '',
-      hostname: device.hostname ?? '',
-      name: (device.name ?? '').replace(/\.$/, ''),
-      addresses: device.addresses ?? [],
-      tags: device.tags ?? [],
-      lastSeen: device.lastSeen,
-    }));
+    return (payload.devices ?? []).map(toDevice);
   }
 
   return {
@@ -217,6 +211,13 @@ export function createTailscaleApi(
         device.hostname.toLowerCase() === wanted || device.name.toLowerCase().split('.')[0] === wanted);
     },
 
+    async getDevice(nodeId: string): Promise<TailscaleDevice | null> {
+      const response = await request('GET', `/device/${encodeURIComponent(nodeId)}`);
+      if (response.status === 404) return null;
+      if (!response.ok) throw await failure(response, `Tailscale device ${nodeId}`);
+      return toDevice(await decodeResponse(response, deviceSchema, `Tailscale device ${nodeId}`));
+    },
+
     async deleteDevice(nodeId: string): Promise<boolean> {
       const response = await request('DELETE', `/device/${encodeURIComponent(nodeId)}`);
       if (response.status === 404) {
@@ -250,17 +251,38 @@ const authKeySchema = boundary.object({
 });
 
 const optionalString = boundary.optional(boundary.string);
-const deviceListSchema = boundary.object({
-  devices: boundary.optional(boundary.array(boundary.object({
-    nodeId: optionalString,
-    id: optionalString,
-    hostname: optionalString,
-    name: optionalString,
-    addresses: boundary.optional(boundary.array(boundary.string)),
-    tags: boundary.optional(boundary.array(boundary.string)),
-    lastSeen: optionalString,
-  }))),
+interface DecodedDevice {
+  nodeId?: string;
+  id?: string;
+  hostname?: string;
+  name?: string;
+  addresses?: string[];
+  tags?: string[];
+  lastSeen?: string;
+}
+
+const deviceSchema: BoundarySchema<DecodedDevice> = boundary.object({
+  nodeId: optionalString,
+  id: optionalString,
+  hostname: optionalString,
+  name: optionalString,
+  addresses: boundary.optional(boundary.array(boundary.string)),
+  tags: boundary.optional(boundary.array(boundary.string)),
+  lastSeen: optionalString,
 });
+const deviceListSchema = boundary.object({ devices: boundary.optional(boundary.array(deviceSchema)) });
+
+function toDevice(device: DecodedDevice): TailscaleDevice {
+  return {
+    nodeId: device.nodeId ?? '',
+    id: device.id ?? '',
+    hostname: device.hostname ?? '',
+    name: (device.name ?? '').replace(/\.$/, ''),
+    addresses: device.addresses ?? [],
+    tags: device.tags ?? [],
+    lastSeen: device.lastSeen,
+  };
+}
 
 async function decodeResponse<Value>(
   response: Response,
