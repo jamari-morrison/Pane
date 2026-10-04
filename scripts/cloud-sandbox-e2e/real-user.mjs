@@ -2249,7 +2249,21 @@ async function d9() {
   check('remove-asks-first', await visible(confirm, 5000), `"Remove ${state.label}?"`);
   await shot('remove-confirm');
   await confirm.getByRole('button', { name: 'Remove', exact: true }).click();
-  const gone = await until(async () => !(await visible(ui.row(state.label), 500)), 300_000, 2000);
+  // Since drop 13 (70441b6c) a failed Remove stays on the row as an alert ("Remove didn't finish: …" / "didn't start");
+  // stop at once and quote it rather than waiting out the 300 s.
+  const removeError = ui.row(state.label).getByRole('alert').filter({ hasText: /Remove didn't (finish|start)/ });
+  const outcome = await until(async () => {
+    if (!(await visible(ui.row(state.label), 500))) return { gone: true };
+    if (await visible(removeError, 200)) return { error: ((await removeError.first().innerText().catch(() => '')) || 'Remove failed').replace(/\s+/g, ' ').trim() };
+    return undefined;
+  }, 300_000, 2000);
+  if (outcome?.error) {
+    check('row-gone', false, `Remove failed on the row: ${outcome.error}`);
+    await inView('remove-error', ui.row(state.label));
+    await shot('remove-failed', { result: true, oracle: { error: outcome.error } });
+    throw new Error(`Remove failed: ${outcome.error}`);
+  }
+  const gone = outcome?.gone;
   check('row-gone', Boolean(gone), state.label);
   check('saved-host-gone', !savedHosts(paneDir).some((host) => host.label === state.label), 'no saved host');
   await shot('removed', { result: true });
@@ -2423,6 +2437,50 @@ async function main() {
   await shot('launched');
   try {
     await step('D0', 'Startup script through Settings, then Add cloud sandbox', d0, { applies: cloud, why: 'cloud sandboxes only' });
+    // D9_SELFTEST=1 (tests only, with D0_DRY): a fake sandbox row whose Remove fails the way drop 13 reports it, so D9's
+    // early stop on a "Remove didn't finish" row error is exercised in the real window (D9 runs in the finally below).
+    if (!relay && env.D9_SELFTEST === '1' && env.D0_DRY === '1') {
+      state.label = 'selftest-row';
+      await openCloud();
+      await page.evaluate(() => {
+        // Inside the Settings dialog (a modal hides everything outside it from roles), re-attached whenever Settings
+        // (re)opens: D9 closes and reopens it.
+        const list = document.createElement('ul');
+        const row = document.createElement('li');
+        row.setAttribute('aria-label', 'Cloud sandbox selftest-row');
+        row.textContent = 'selftest-row Running ';
+        const remove = document.createElement('button');
+        remove.textContent = 'Remove';
+        remove.setAttribute('aria-label', 'Remove selftest-row');
+        remove.onclick = () => {
+          const confirmBox = document.createElement('div');
+          confirmBox.setAttribute('role', 'dialog');
+          confirmBox.setAttribute('aria-label', 'Remove selftest-row?');
+          const confirm = document.createElement('button');
+          confirm.textContent = 'Remove';
+          confirm.onclick = () => {
+            confirmBox.remove();
+            setTimeout(() => {
+              const alert = document.createElement('p');
+              alert.setAttribute('role', 'alert');
+              alert.textContent = "Remove didn't finish: boat still lists selftest-row (selftest)";
+              row.appendChild(alert);
+            }, 1500);
+          };
+          confirmBox.appendChild(confirm);
+          list.appendChild(confirmBox);
+        };
+        row.appendChild(remove);
+        list.appendChild(row);
+        const attach = () => {
+          const settings = [...document.querySelectorAll('[role="dialog"]')].find((dialog) => /Pane Settings/.test(dialog.textContent ?? ''));
+          if (settings && !settings.contains(list)) settings.appendChild(list);
+        };
+        attach();
+        new MutationObserver(attach).observe(document.body, { childList: true, subtree: true });
+      });
+      log(`D9_SELFTEST: fake row injected (${await page.getByRole('button', { name: 'Remove selftest-row', exact: true }).count()} button)`);
+    }
     if (env.D0_DRY === '1') return;
     if (!state.label) throw new Error('no host to run on');
     await step('D1', 'Host terminal from the switcher: whoami; hostname; pwd', d1);
