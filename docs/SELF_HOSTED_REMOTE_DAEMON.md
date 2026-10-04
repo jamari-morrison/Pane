@@ -310,7 +310,9 @@ Claude Code's own default), and a notice saying why is logged. It is not a pin: 
 the sandbox with `/model` is kept.
 
 Codex is installed in every sandbox but not signed in. Sign it in yourself: run `codex login --device-auth` in the
-sandbox's terminal (**Terminal on <sandbox>**). Claude Code signs in by itself when a Claude token is saved.
+sandbox's terminal (**Terminal on <sandbox>**).
+First enable device code authorization in your ChatGPT settings (Security), then run codex login --device-auth.
+Claude Code signs in by itself when a Claude token is saved.
 
 On cloud sandboxes, Pane stores the GitHub token in ~/.config/gh/hosts.yml (owner-only).
 
