@@ -835,6 +835,12 @@ step_github_auth() {
   fi
   out="$(gh auth login --hostname github.com --with-token --insecure-storage <"$file" 2>&1)" || rc=$?
   shred -u "$file" 2>/dev/null || rm -f "$file"
+  # GitHub refused THIS token: invalid, even if an older token from an earlier start still signs gh in. A classic token
+  # without a scope gh requires can't sign in either; gh skips that check for fine-grained tokens (no X-OAuth-Scopes
+  # header; pkg/cmd/auth/shared/oauth_scopes.go HeaderHasMinimumScopes).
+  if [ "$rc" -ne 0 ]; then
+    case "$out" in *"HTTP 401"*|*"Bad credentials"*|*"missing required scope"*) result '{"ok":true,"state":"invalid"}'; return ;; esac
+  fi
   [ -f "$HOME/.config/gh/hosts.yml" ] && chmod 600 "$HOME/.config/gh/hosts.yml"
   # setup-git can fail once while the sandbox settles after a resume; one more try.
   gh auth setup-git --hostname github.com >/dev/null 2>&1 || gh auth setup-git --hostname github.com >/dev/null 2>&1 || setup_rc=$?
@@ -849,14 +855,9 @@ step_github_auth() {
     result "$(printf '{"ok":true,"state":"signed-in","user":"%s"}' "$user")"
     return
   fi
-  case "$out" in
-    # A classic token without a scope gh requires can't sign in either. gh skips that check for fine-grained tokens
-    # (no X-OAuth-Scopes header; pkg/cmd/auth/shared/oauth_scopes.go HeaderHasMinimumScopes).
-    *"HTTP 401"*|*"Bad credentials"*|*"missing required scope"*) result '{"ok":true,"state":"invalid"}' ;;
-    *) if [ "$rc" -ne 0 ]; then result '{"ok":true,"state":"error","reason":"login-failed"}'
-       elif [ "${setup_rc:-0}" -ne 0 ]; then result '{"ok":true,"state":"error","reason":"setup-git-failed"}'
-       else result '{"ok":true,"state":"error","reason":"status-failed"}'; fi ;;
-  esac
+  if [ "$rc" -ne 0 ]; then result '{"ok":true,"state":"error","reason":"login-failed"}'
+  elif [ "${setup_rc:-0}" -ne 0 ]; then result '{"ok":true,"state":"error","reason":"setup-git-failed"}'
+  else result '{"ok":true,"state":"error","reason":"status-failed"}'; fi
 }
 
 # local-env-install <uploaded env file | "">: the variables the user's LOCAL start script printed (Settings > Cloud
