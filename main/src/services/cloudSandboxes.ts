@@ -378,8 +378,10 @@ export class CloudSandboxManager {
     try {
       // start and update give the sandbox the user's default model; remember which one it got.
       const claudeModel = action === 'start' || action === 'update' ? await this.readDefaultClaudeModel() : undefined;
+      // Steps and failures go to the app log (names and ids only), so a host action that went wrong can be traced.
       const summary = await run(library, listed.hostname, (progress) => {
         if (progress.step === 'done') return;
+        console.info(`[cloud] ${action} ${id}: ${progress.message}`);
         operation.progress = progress.message;
         this.emit();
       });
@@ -401,6 +403,7 @@ export class CloudSandboxManager {
     } catch (error) {
       operation.running = false;
       const message = getCloudErrorMessage(error, `Failed to ${action} ${listed.label}`);
+      console.warn(`[cloud] ${action} ${id} failed: ${message}`);
       // Never keep the pre-action summary: show what the provider says now.
       const current = await this.readProviderState(library, listed.hostname);
       operation.error = message;

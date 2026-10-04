@@ -29,12 +29,19 @@ interface SlowStop {
   then: 'stopped' | 'error' | 'gone' | 'stuck';
 }
 
-/** Set `stop` to make the fake boat archive slowly after it accepts a Stop. */
+/** How boat handles an accepted delete (202): gone after a while, or never (the sandbox keeps running). */
+interface SlowDestroy {
+  goneAfterMs: number | 'never';
+}
+
+/** Set `stop` to make the fake boat archive slowly after it accepts a Stop; `destroy` likewise for a delete. */
 class SlowBoat {
   stop?: SlowStop;
   acceptedAt?: number;
   /** Commands fail this many more times, as right after a resume before the sandbox takes commands. */
   commandsFailing = 0;
+  destroy?: SlowDestroy;
+  destroyAcceptedAt?: number;
 }
 
 function fakeProvider(clock: FakeClock, orgs: ListedBoatOrg[] = [{ id: 'team_test', name: 'test', active: false }]) {
@@ -62,6 +69,8 @@ function fakeProvider(clock: FakeClock, orgs: ListedBoatOrg[] = [{ id: 'team_tes
         return { ...created, state: 'starting', providerState: 'provisioning' };
       },
       async get(id) {
+        if (slow.destroy && slow.destroyAcceptedAt !== undefined && slow.destroy.goneAfterMs !== 'never'
+          && clock.now() - slow.destroyAcceptedAt >= slow.destroy.goneAfterMs) sandboxes.delete(id);
         const current = sandboxes.get(id);
         if (current?.state === 'stopping' && slow.stop && slow.acceptedAt !== undefined && clock.now() - slow.acceptedAt >= slow.stop.archivingMs) {
           if (slow.stop.then === 'stopped') set(id, 'stopped', 'archived');
@@ -87,7 +96,8 @@ function fakeProvider(clock: FakeClock, orgs: ListedBoatOrg[] = [{ id: 'team_tes
       },
       async destroy(id) {
         calls.push(`destroy ${id}`);
-        sandboxes.delete(id);
+        if (slow.destroy) slow.destroyAcceptedAt = clock.now();
+        else sandboxes.delete(id);
       },
       handle: (id) => ({
         id,
@@ -106,8 +116,14 @@ function fakeProvider(clock: FakeClock, orgs: ListedBoatOrg[] = [{ id: 'team_tes
   return { factory, sandboxes, calls, creates, keys, slow };
 }
 
+/** Set `device` to re-add it once after a delete (a node that rejoins while its sandbox still runs). */
+class TailnetRejoin {
+  device?: TailscaleDevice;
+}
+
 function fakeTailnet() {
   const devices: TailscaleDevice[] = [];
+  const rejoin = new TailnetRejoin();
   const api: TailscaleApi = {
     mintAuthKey: async () => ({ id: 'k', key: 'tskey-fake-SECRET' }),
     listDevices: async () => devices,
@@ -115,10 +131,14 @@ function fakeTailnet() {
     async deleteDevice(nodeId) {
       const index = devices.findIndex((device) => device.nodeId === nodeId);
       if (index !== -1) devices.splice(index, 1);
+      if (rejoin.device) {
+        devices.push(rejoin.device);
+        rejoin.device = undefined;
+      }
       return index !== -1;
     },
   };
-  return { api, devices };
+  return { api, devices, rejoin };
 }
 
 interface BootstrapScript {
@@ -426,6 +446,41 @@ test('remove deletes the tailnet device, the sandbox, the saved host and the rec
   assert.equal(h.saved.has(sessionId), false);
   assert.deepEqual(await h.cloud.list(), []);
   await assert.rejects(h.cloud.status(hostname), /No cloud sandbox matches/u);
+});
+
+test('remove after a stop and start waits until boat really deleted the sandbox and the tailnet node is gone', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname, sessionId, sandboxId } = await h.cloud.create();
+  await h.cloud.stop(hostname);
+  await h.cloud.start(hostname);
+  // boat answers the delete with 202 and finishes it 40 s later; meanwhile the still-running node rejoins once.
+  h.provider.slow.destroy = { goneAfterMs: 40_000 };
+  const [device] = h.tailnet.devices;
+  h.tailnet.rejoin.device = { ...device, nodeId: 'n-rejoined' };
+
+  await h.cloud.remove(hostname, h.onProgress);
+
+  assert.equal((await h.provider.factory('k').get(sandboxId)).state, 'gone', 'boat GET is 404');
+  assert.deepEqual(h.tailnet.devices, [], 'no tailnet device is left, including the one that rejoined');
+  assert.equal(h.saved.has(sessionId), false);
+  assert.deepEqual(await h.cloud.list(), []);
+  assert.ok(h.progress.some((update) => update.message.includes('Waiting for boat to finish removing')));
+});
+
+test('remove keeps the record and says so when boat accepts the delete but keeps the sandbox', async () => {
+  const h = harness();
+  await withCredentials(h);
+  const { hostname, sessionId, sandboxId, label } = await h.cloud.create();
+  await h.cloud.stop(hostname);
+  await h.cloud.start(hostname);
+  h.provider.slow.destroy = { goneAfterMs: 'never' };
+
+  await assert.rejects(h.cloud.remove(hostname, h.onProgress), new RegExp(
+    `^Error: Remove didn't finish: boat still lists ${label}'s sandbox ${sandboxId} \\(idle\\) 3 minutes after accepting the delete\\.`, 'u'));
+
+  assert.equal(h.saved.has(sessionId), true, 'the saved host stays');
+  assert.deepEqual((await h.cloud.list()).map((info) => info.hostname), [hostname], 'the record stays, so the row does too');
 });
 
 test('host records hold the paired token but never a provider or Tailscale secret', async () => {
