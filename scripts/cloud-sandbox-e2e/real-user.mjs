@@ -288,8 +288,6 @@ function fakeSaveHost(payload) {
 // ---------------------------------------------------------------- app, video, evidence
 let app;
 let page;
-// The startup script editor is masked whenever it may hold the user's own script (before D0's save, after the restore).
-let maskStartupEditor = true;
 let videoStartedAt = 0;
 let shotIndex = 0;
 
@@ -485,7 +483,7 @@ async function shot(what, { oracle, result = false } = {}) {
   // While a device code is on screen the terminal is masked in the shot (Red's rule: never show it in evidence).
   // On EVERY shot, whatever the kit believes: the code element by its frozen names and any text shaped like a device
   // code (backstop); while a code is known to be on screen also the kit's own mask (the terminal, or the code element).
-  const mask = [ui.deviceCode(), page.getByText(DEVICE_CODE_SHAPE), ui.localStartScript(), ...(maskStartupEditor ? [ui.startupScript()] : []), ...(codeOnScreenSince === null ? [] : await codeMask())];
+  const mask = [ui.deviceCode(), page.getByText(DEVICE_CODE_SHAPE), ui.localStartScript(), ui.startupScript(), ...(codeOnScreenSince === null ? [] : await codeMask())];
   await page.screenshot({ path: `${base}.png`, mask }).catch(() => undefined);
   if (codeOnScreenSince !== null || (await ui.deviceCode().count().catch(() => 0)) > 0) entry0.masked = 'the device code (on screen at this shot)';
   const aria = redact(await page.locator('body').ariaSnapshot().catch(() => ''));
@@ -1262,7 +1260,6 @@ async function d0() {
   check('startup-warning-shown', await visible(ui.settingsDialog().getByText("Don't put secrets here; it's stored unencrypted."), 2000), 'the editor warns against secrets');
   await editor.fill(startupScript);
   await ui.saveStartupScript().click();
-  maskStartupEditor = false;
   if (env.STARTUP_DOPPLER === '1') {
     const saved = await until(async () => readStartupFile().includes(Buffer.from(DOPPLER_BLOCK)), 10_000, 500);
     check('doppler-block-saved-byte-exact', Boolean(saved), `the saved startup.sh holds the Doppler block (sha256 ${sha256Of(Buffer.from(DOPPLER_BLOCK)).slice(0, 12)}) byte for byte`);
@@ -2321,7 +2318,6 @@ async function restoreStartupScript() {
     how = 'skipped';
     log(`UI restore skipped: ${others.join(', ')} active (a save would run the script there)`);
   } else {
-    maskStartupEditor = true;
     await ui.startupScript().fill(original.startupScript).catch(() => undefined);
     await ui.saveStartupScript().click().catch(() => undefined);
     await visible(ui.settingsDialog().getByText('Saved', { exact: true }), 10_000);
