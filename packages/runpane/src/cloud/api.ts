@@ -247,6 +247,9 @@ const LOCAL_ENV_NOT_SENT = "Couldn't send the local start script's variables to 
 const STOP_TIMEOUT_MS = 15 * 60_000;
 /** The progress text while boat saves the sandbox (desktop shows it as is). */
 const SAVING_MESSAGE = 'Saving the sandbox…';
+/** How long a delete boat accepted (202) may take to finish; until boat stops listing the sandbox, it isn't removed. */
+const REMOVE_CONFIRM_TIMEOUT_MS = 3 * 60_000;
+const REMOVE_POLL_MS = 2_000;
 const START_HEALTH_CHECK_MS = 30_000;
 const REPAIRED_HEALTH_TIMEOUT_MS = 90_000;
 const CREATE_HEALTH_TIMEOUT_MS = 180_000;
@@ -440,13 +443,37 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
   }
 
   /** Tailnet devices first, then the sandbox (a live node would otherwise linger as an orphan). */
-  async function destroyHost(record: CloudHostRecord, provider: CloudProvider, tailnet: TailscaleApi): Promise<void> {
+  /**
+   * Deletes the sandbox and its tailnet node, and returns only once both are confirmed gone: boat accepts a delete
+   * (202) and finishes it later, and a node whose sandbox still runs can rejoin the tailnet after its device is
+   * deleted. Anything left over throws "Remove didn't finish: …", so the caller keeps the record (and the row).
+   */
+  async function destroyHost(
+    record: CloudHostRecord,
+    provider: CloudProvider,
+    tailnet: TailscaleApi,
+    onProgress?: CloudProgressListener,
+  ): Promise<void> {
     const { hostname, nodeId, sandboxId } = record.profile.cloud;
+    const { label } = record.profile;
     await deleteOwnedDevices(tailnet, hostname, nodeId || undefined, () => undefined);
     await provider.destroy(sandboxId);
+    const deadline = now() + REMOVE_CONFIRM_TIMEOUT_MS;
+    for (let waiting = false; ; waiting = true) {
+      const sandbox = await provider.get(sandboxId);
+      if (sandbox.state === 'gone') break;
+      if (now() >= deadline) {
+        throw new Error(`Remove didn't finish: boat still lists ${label}'s sandbox ${sandboxId} (${sandbox.providerState}) `
+          + `${REMOVE_CONFIRM_TIMEOUT_MS / 60_000} minutes after accepting the delete. Try Remove again.`);
+      }
+      if (!waiting) onProgress?.({ step: 'removing', message: `Waiting for boat to finish removing ${label}...` });
+      await sleep(REMOVE_POLL_MS);
+    }
+    // The sandbox can't rejoin any more: sweep again for a node that came back while it was still running.
+    await deleteOwnedDevices(tailnet, hostname, undefined, () => undefined);
     const remaining = deletableNodeIds(await tailnet.findDevicesByHostname(hostname), [CLOUD_SESSION_TAG]).nodeIds;
     if (remaining.length > 0) {
-      throw new Error(`Tailnet devices for ${hostname} are still listed after delete: ${remaining.join(', ')}.`);
+      throw new Error(`Remove didn't finish: tailnet devices for ${hostname} are still listed after delete: ${remaining.join(', ')}. Try Remove again.`);
     }
   }
 
@@ -735,7 +762,7 @@ export function createCloudSandboxes(options: CloudSandboxesOptions = {}): Cloud
     async remove(host, onProgress) {
       const { record, provider, tailscale } = await loadHost(host);
       onProgress?.({ step: 'removing', message: `Removing ${record.profile.label}...` });
-      await destroyHost(record, provider, createTailscale(tailscale));
+      await destroyHost(record, provider, createTailscale(tailscale), onProgress);
       await savedHosts.remove(record.profile.cloud.sessionId);
       await store.removeHost(record.profile.cloud.hostname);
       onProgress?.({ step: 'done', message: `${record.profile.label} is removed.` });

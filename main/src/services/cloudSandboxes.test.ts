@@ -255,6 +255,28 @@ describe('CloudSandboxManager', () => {
     expect(snapshot.sandboxes).toEqual([]);
   });
 
+  it('keeps the row with the reason when the library could not confirm the sandbox is gone', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const unfinished = "Remove didn't finish: boat still lists rp-alpha's sandbox bx_alpha (idle) 3 minutes after accepting the delete. Try Remove again.";
+    const library = createLibrary({
+      list: vi.fn(async () => [summary()]),
+      remove: vi.fn(async (_host: string, onProgress?: (progress: { step: string; message: string }) => void) => {
+        onProgress?.({ step: 'removing', message: 'Waiting for boat to finish removing alpha...' });
+        throw new Error(unfinished);
+      }),
+    });
+    const { manager } = createManager(library);
+    await manager.refresh();
+
+    const snapshot = await manager.remove('rp-alpha');
+
+    expect(snapshot.sandboxes).toHaveLength(1);
+    expect(snapshot.sandboxes[0]).toMatchObject({ id: 'rp-alpha', error: unfinished, failedAction: 'remove' });
+    expect(info).toHaveBeenCalledWith('[cloud] remove rp-alpha: Waiting for boat to finish removing alpha...');
+    expect(warn).toHaveBeenCalledWith(`[cloud] remove rp-alpha failed: ${unfinished}`);
+  });
+
   it('offers Update Pane when the daemon reports another version and installs this app\'s', async () => {
     const readDaemonVersion = vi.fn<(profileId: string) => Promise<string | undefined>>()
       .mockResolvedValueOnce('2.4.140')
