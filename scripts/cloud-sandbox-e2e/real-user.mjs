@@ -823,17 +823,62 @@ async function waitForFlag(name, instructions, timeoutMs = Number(env.PAUSE_TIME
 // ---------------------------------------------------------------- D0: startup script + Add cloud sandbox
 // E5 has ONE startup script for every sandbox and saving it runs it on every running sandbox: with another sandbox up
 // (Red's testina) a save would run the kit's script there. Every save is refused while any other row is active.
-async function otherActiveSandboxes() {
-  // The rows come in the same snapshot as the credentials: wait for that snapshot (the wallet's value) before listing,
-  // or an active sandbox could be missed while Settings is still loading.
-  if (!(await savedWallet())) throw new Error('the cloud sandboxes did not load; not saving anything');
-  const rows = page.getByRole('listitem', { name: /^Cloud sandbox / });
-  const active = [];
-  for (const row of await rows.all()) {
-    const label = ((await row.getAttribute('aria-label').catch(() => '')) ?? '').replace(/^Cloud sandbox /, '');
-    const text = ((await row.innerText().catch(() => '')) ?? '').replace(/\s+/g, ' ');
-    if (label && label !== state.label && /(^|\s)(Running|Starting|Stopping|Creating|Updating|Saving)(\s|$)/.test(text)) active.push(label);
+// Every cloud sandbox this machine knows, by LABEL, from the kit's own reads (never from the rows): the desktop's saved
+// cloud profiles AND the cloud library's shared host records (<cloud dir>/hosts/*.json: the rows are built from these, so
+// a sandbox made by another build has a row but no profile here). The run's own sandbox is left out.
+// GUARD_SELFTEST_SAVED (tests only) replaces the list.
+function savedCloudLabels() {
+  if (!relay && env.GUARD_SELFTEST_SAVED !== undefined) return env.GUARD_SELFTEST_SAVED.split(',').filter(Boolean).filter((label) => label !== state.label);
+  const labels = new Set(savedHosts(paneDir).filter((host) => host.cloud).map((host) => host.label));
+  const hostsDir = path.join(env.RUNPANE_CLOUD_DIR ?? path.join(env.XDG_CONFIG_HOME ?? path.join(home, '.config'), 'runpane-cloud'), 'hosts');
+  try {
+    for (const name of fs.readdirSync(hostsDir).filter((entry) => entry.endsWith('.json'))) {
+      try {
+        const label = JSON.parse(fs.readFileSync(path.join(hostsDir, name), 'utf8'))?.profile?.label;
+        if (typeof label === 'string' && label) labels.add(label);
+      } catch {
+        // An unreadable record: its row (if any) is still caught by the row-only rule below.
+      }
+    }
+  } catch {
+    // No hosts dir yet.
   }
+  labels.delete(state.label);
+  return [...labels].sort();
+}
+
+async function otherActiveSandboxes() {
+  // K-R8W (Run 8 attempt 1: the guard passed on ZERO rows while testina, test-3 and test-4 were Running). Every saved cloud
+  // host other than the run's own must have its OWN row with a definite badge within 20 s, else the guard fails safe.
+  // Badges (drop 11, cloudSandboxPresentation.ts): Checking = state unknown, so not loaded yet; only Stopped lets a
+  // save through; Running/Starting/Stopping/Creating/Updating/Removing/Error (unknown, could be running) refuse it.
+  if (!(await savedWallet())) return ['(cloud sandboxes not loaded)'];
+  const others = savedCloudLabels();
+  const badgeOf = async (label) => {
+    const row = page.getByRole('listitem', { name: `Cloud sandbox ${label}`, exact: true }).first();
+    const text = ((await row.innerText({ timeout: 500 }).catch(() => '')) ?? '').replace(/\s+/g, ' ');
+    return text.match(/(^|\s)(Running|Starting|Stopping|Stopped|Creating|Updating|Removing|Error|Checking)(\s|$)/)?.[2];
+  };
+  const badges = await until(async () => {
+    const seen = {};
+    for (const label of others) {
+      const badge = await badgeOf(label);
+      if (!badge || badge === 'Checking') return undefined;
+      seen[label] = badge;
+    }
+    return seen;
+  }, 20_000, 250);
+  if (!badges) {
+    const missing = [];
+    for (const label of others) {
+      const badge = await badgeOf(label);
+      if (!badge || badge === 'Checking') missing.push(`${label}:${badge ?? 'no row'}`);
+    }
+    return [`(rows not loaded: ${missing.join(', ')})`];
+  }
+  const active = Object.entries(badges).filter(([, badge]) => badge !== 'Stopped').map(([label, badge]) => `${label} (${badge})`);
+  // Rows whose label is not one of those (none in practice: the labels include the library's own records) are ignored,
+  // like the run's own row (K-R8W spec).
   return active;
 }
 async function guardStartupScriptSave(what) {
@@ -1074,6 +1119,25 @@ async function walletMustBeTest(when) {
 
 async function d0() {
   await openCloud();
+  // GUARD_SELFTEST_ROWS (tests only, never on SOBECK): "label:Badge,…" rows injected into Settings after
+  // GUARD_SELFTEST_DELAY_MS (default 4000); GUARD_SELFTEST_OWN plays the run's own sandbox label.
+  if (!relay && env.GUARD_SELFTEST_ROWS !== undefined) {
+    if (env.GUARD_SELFTEST_OWN) state.label = env.GUARD_SELFTEST_OWN;
+    const rows = env.GUARD_SELFTEST_ROWS.split(',').filter(Boolean).map((entry) => entry.split(':'));
+    await page.evaluate(({ rows, delay }) => {
+      setTimeout(() => {
+        const list = document.createElement('ul');
+        (document.querySelector('[role="dialog"]') ?? document.body).appendChild(list);
+        for (const [label, badge] of rows) {
+          const row = document.createElement('li');
+          row.setAttribute('aria-label', `Cloud sandbox ${label}`);
+          row.textContent = `${label} ${badge} default`;
+          list.appendChild(row);
+        }
+      }, delay);
+    }, { rows, delay: Number(env.GUARD_SELFTEST_DELAY_MS ?? 4000) });
+    log(`GUARD_SELFTEST saved=[${env.GUARD_SELFTEST_SAVED ?? ''}] own=${state.label ?? '-'} rows=[${env.GUARD_SELFTEST_ROWS}] after ${env.GUARD_SELFTEST_DELAY_MS ?? 4000} ms`);
+  }
   await guardStartupScriptSave('d0');
   if (relay) await walletMustBeTest('at-start');
   const editor = ui.startupScript();
